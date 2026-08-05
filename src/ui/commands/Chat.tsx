@@ -32,6 +32,7 @@ import { useAgents } from "../../utils/hooks/use_agents.js";
 import { useMe } from "../../utils/hooks/use_me.js";
 import type { MarkdownSegment } from "../../utils/markdown.js";
 import { renderMarkdownSegments } from "../../utils/markdown.js";
+import { retryResult } from "../../utils/retry.js";
 import { clearTerminal } from "../../utils/terminal.js";
 import { toolsCache } from "../../utils/toolsCache.js";
 import { appendTranscriptEntry } from "../../utils/transcriptStore.js";
@@ -1347,12 +1348,17 @@ const CliChat: FC<CliChatProps> = ({
           messageId: userMessageId,
         });
 
-        // Stream the agent's response
-        const streamRes = await dustClient.streamAgentAnswerEvents({
-          conversation: conversation,
-          userMessageId: userMessageId,
-          signal: controller.signal, // Add the abort signal
-        });
+        // Stream the agent's response. Retried on transient failure since
+        // this only subscribes to an existing message's answer - unlike
+        // createConversation/postUserMessage above, it has no duplicate-
+        // side-effect risk on retry.
+        const streamRes = await retryResult(() =>
+          dustClient.streamAgentAnswerEvents({
+            conversation: conversation,
+            userMessageId: userMessageId,
+            signal: controller.signal, // Add the abort signal
+          })
+        );
 
         if (streamRes.isErr()) {
           throw new Error(
@@ -1900,8 +1906,12 @@ const CliChat: FC<CliChatProps> = ({
       return;
     }
 
-    // Handle option+left (meta+b) to move to the previous word
-    if (key.meta && input === "b" && currentCursorPos > 0) {
+    // Handle option+left (meta+b, Mac convention) or Ctrl+Left (Windows/
+    // Linux convention) to move to the previous word
+    if (
+      ((key.meta && input === "b") || (key.ctrl && key.leftArrow)) &&
+      currentCursorPos > 0
+    ) {
       let newPosition = currentCursorPos - 1;
 
       while (newPosition > 0 && /\s/.test(currentInput[newPosition])) {
@@ -1916,8 +1926,12 @@ const CliChat: FC<CliChatProps> = ({
       return;
     }
 
-    // Handle option+right (meta+f) to move to the next word
-    if (key.meta && input === "f" && currentCursorPos < currentInput.length) {
+    // Handle option+right (meta+f, Mac convention) or Ctrl+Right (Windows/
+    // Linux convention) to move to the next word
+    if (
+      ((key.meta && input === "f") || (key.ctrl && key.rightArrow)) &&
+      currentCursorPos < currentInput.length
+    ) {
       let newPosition = currentCursorPos;
 
       // If we're on whitespace, skip to next non-whitespace.

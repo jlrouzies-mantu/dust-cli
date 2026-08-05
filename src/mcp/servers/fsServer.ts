@@ -2,6 +2,7 @@ import type { DustAPI, Result } from "@dust-tt/client";
 import { Err, Ok } from "@dust-tt/client";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
+import { retryResult } from "../../utils/retry.js";
 import { CLI_VERSION } from "../../utils/version.js";
 import { EditFileTool } from "../tools/editFile.js";
 import { ReadFileTool } from "../tools/readFile.js";
@@ -30,11 +31,6 @@ export const useFileSystemServer = async (
     );
   }
 
-  const server = new McpServer({
-    name: "fs-cli",
-    version: CLI_VERSION,
-  });
-
   const readFileTool = new ReadFileTool();
   const searchFilesTool = new SearchFilesTool();
   const searchContentTool = new SearchContentTool();
@@ -53,30 +49,46 @@ export const useFileSystemServer = async (
     runCommandTool,
   ];
 
-  for (const tool of tools) {
-    server.registerTool(
-      tool.name,
-      {
-        description: tool.description,
-        inputSchema: tool.inputSchema.shape,
-      },
-      tool.execute.bind(tool)
-    );
-  }
+  // Transient connection failures shouldn't dead-end the user immediately -
+  // retry with fresh server/transport instances a few times before giving
+  // up (retrying server.connect() on the same instances after a failed
+  // attempt isn't safe, since the transport may be left partially
+  // connected).
+  return retryResult(async () => {
+    const server = new McpServer({
+      name: "fs-cli",
+      version: CLI_VERSION,
+    });
 
-  const transport = new CLIMcpTransport(dustAPI, onServerIdReceived, "fs-cli");
+    for (const tool of tools) {
+      server.registerTool(
+        tool.name,
+        {
+          description: tool.description,
+          inputSchema: tool.inputSchema.shape,
+        },
+        tool.execute.bind(tool)
+      );
+    }
 
-  try {
-    await server.connect(transport);
-    return new Ok(undefined);
-  } catch (error) {
-    console.error("[MCP Connection Failed]", error);
-    return new Err(
-      new Error(
-        `Failed to connect MCP server: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      )
+    const transport = new CLIMcpTransport(
+      dustAPI,
+      onServerIdReceived,
+      "fs-cli"
     );
-  }
+
+    try {
+      await server.connect(transport);
+      return new Ok(undefined);
+    } catch (error) {
+      console.error("[MCP Connection Failed]", error);
+      return new Err(
+        new Error(
+          `Failed to connect MCP server: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        )
+      );
+    }
+  });
 };

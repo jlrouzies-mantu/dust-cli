@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { agentCache } from "../agentCache.js";
 import AuthService from "../authService.js";
 import { getDustClient } from "../dustClient.js";
+import { retryResult } from "../retry.js";
 
 type AgentConfiguration =
   GetAgentConfigurationsResponseType["agentConfigurations"][number];
@@ -64,7 +65,13 @@ export function useAgents() {
         return;
       }
 
-      const agentsRes = await dustClient.getAgentConfigurations({});
+      // Transient API errors (e.g. a gateway hiccup returning an HTML
+      // error page instead of JSON) are common enough here that they
+      // shouldn't immediately dead-end the user - retry a few times with
+      // backoff before giving up.
+      const agentsRes = await retryResult(() =>
+        dustClient.getAgentConfigurations({})
+      );
 
       if (agentsRes.isErr()) {
         setError(`API Error fetching agents: ${agentsRes.error.message}`);

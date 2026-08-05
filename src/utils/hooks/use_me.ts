@@ -2,6 +2,7 @@ import type { MeResponseType } from "@dust-tt/client";
 import { useEffect, useState } from "react";
 
 import { getDustClient } from "../dustClient.js";
+import { retryResult } from "../retry.js";
 
 export function useMe() {
   const [me, setMe] = useState<MeResponseType["user"] | null>(null);
@@ -53,7 +54,7 @@ export function useMe() {
       }
 
       // For OAuth tokens, use existing .me() call
-      const meRes = await dustClient.me();
+      const meRes = await retryResult(() => dustClient.me());
 
       if (meRes.isErr()) {
         setError(`Failed to get user information: ${meRes.error.message}`);

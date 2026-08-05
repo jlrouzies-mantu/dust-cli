@@ -19,7 +19,7 @@ export default defineConfig({
   entry: ["src/index.tsx"],
   format: ["esm"],
   platform: "node",
-  dts: true,
+  dts: false,
   clean: true,
   // Inject environment variables into the build
   env: parsed,

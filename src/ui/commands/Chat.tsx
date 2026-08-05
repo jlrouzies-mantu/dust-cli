@@ -29,6 +29,7 @@ import { useAgents } from "../../utils/hooks/use_agents.js";
 import { useMe } from "../../utils/hooks/use_me.js";
 import { clearTerminal } from "../../utils/terminal.js";
 import { toolsCache } from "../../utils/toolsCache.js";
+import { appendTranscriptEntry } from "../../utils/transcriptStore.js";
 import AgentSelector from "../components/AgentSelector.js";
 import type { ConversationItem } from "../components/Conversation.js";
 import Conversation from "../components/Conversation.js";
@@ -185,10 +186,15 @@ const CliChat: FC<CliChatProps> = ({
     !!(projectName || projectId)
   );
   const [actionStatus, setActionStatus] = useState<string | null>(null);
+  const [thinkingPreview, setThinkingPreview] = useState("");
   const updateIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const contentRef = useRef<string>("");
   const chainOfThoughtRef = useRef<string>("");
   const resumeLoadedRef = useRef(false);
+  // Timestamp of the previous useInput event, used to detect pasted text
+  // arriving as a rapid sequence of individual keystrokes (see the
+  // key.return handling below).
+  const lastKeystrokeTimeRef = useRef(0);
 
   const { stdout } = useStdout();
 
@@ -671,7 +677,7 @@ const CliChat: FC<CliChatProps> = ({
   const showHelp = useCallback(() => {
     const helpText =
       "Commands: /help /switch /new /resume /attach /clear-files /auto /exit\n" +
-      "Shortcuts: Enter=send  \\Enter=newline  ESC=clear/cancel  Ctrl+G=open in browser";
+      "Shortcuts: Enter=send  \\Enter=newline  Ctrl+W=delete word  ESC=clear/cancel  Ctrl+G=open in browser";
     const lines = helpText.split("\n");
     setConversationItems((prev) => [
       ...prev,
@@ -1022,6 +1028,7 @@ const CliChat: FC<CliChatProps> = ({
       });
 
       setIsProcessingQuestion(true);
+      setThinkingPreview("");
       const controller = new AbortController();
       setAbortController(controller);
 
@@ -1041,6 +1048,124 @@ const CliChat: FC<CliChatProps> = ({
 
       let userMessageId: string;
       let conversation: CreateConversationResponseType["conversation"];
+
+      // Hoisted out of the try block below so the crash-recovery path in
+      // the catch block can also use it to render a recovered answer.
+      const pushFullLinesToConversationItems = (isStreaming: boolean) => {
+        // If isStreaming is true, we only consider lines are full up to the penultimate line,
+        // as we have no guarantee the last line is complete.
+        // If isStreaming is false, we consider all lines to be complete.
+        //
+        // Chain-of-thought is intentionally not included here: it's shown as
+        // a transient "Thinking…" status (see thinkingPreview state) rather
+        // than being permanently written to scrollback, matching how
+        // Claude Code/Cursor/Kimi Code hide raw reasoning by default.
+        const contentLines = contentRef.current.split("\n");
+
+        setConversationItems((prev) => {
+          // Remove leading empty lines
+          while (contentLines.length > 0 && contentLines[0] === "") {
+            contentLines.shift();
+          }
+
+          const lastAgentMessageHeader = getLastConversationItem<
+            ConversationItem & { type: "agent_message_header" }
+          >(prev, "agent_message_header");
+
+          if (!lastAgentMessageHeader) {
+            throw new Error("Unreachable: No agent message header found");
+          }
+
+          const agentMessageIndex = lastAgentMessageHeader.index;
+
+          const prevIds = new Set(prev.map((item) => item.key));
+
+          const contentItems = contentLines
+            .map(
+              (line, index) =>
+                ({
+                  key: `agent_message_content_line_${agentMessageIndex}__${index}`,
+                  type: "agent_message_content_line",
+                  text: line || " ",
+                  index,
+                }) satisfies ConversationItem & {
+                  type: "agent_message_content_line";
+                }
+            )
+            .filter((item) => !prevIds.has(item.key))
+            .slice(0, isStreaming ? -1 : undefined);
+
+          const newItems = [...prev, ...contentItems];
+
+          // If we are done streaming, we insert a separator below the completed agent message.
+          if (!isStreaming) {
+            newItems.push({
+              key: `end_of_agent_message_separator_${agentMessageIndex}`,
+              type: "separator",
+            });
+          }
+
+          return newItems;
+        });
+      };
+
+      // Live, transient preview of the current chain-of-thought (last
+      // non-empty line, truncated), shown only in the "Thinking…" status
+      // line — never written into permanent scrollback.
+      const updateThinkingPreview = () => {
+        const lines = chainOfThoughtRef.current
+          .split("\n")
+          .map((l) => l.trim())
+          .filter((l) => l.length > 0);
+        const lastLine = lines[lines.length - 1] ?? "";
+        setThinkingPreview(
+          lastLine.length > 100 ? `${lastLine.slice(0, 100)}…` : lastLine
+        );
+      };
+
+      // Before surfacing a fatal error from the stream below, check whether
+      // the agent's answer actually completed successfully server-side
+      // despite the client-side failure (e.g. the known @dust-tt/client SSE
+      // "done"-sentinel bug that exhausts its reconnect budget even though
+      // the answer already landed). Returns the recovered text, or null if
+      // recovery wasn't possible/didn't find a completed answer.
+      const tryRecoverAgentAnswer = async (): Promise<string | null> => {
+        if (!conversation) {
+          return null;
+        }
+        const recoveryRes = await dustClient.getConversation({
+          conversationId: conversation.sId,
+        });
+        if (recoveryRes.isErr()) {
+          return null;
+        }
+        let lastAgentMessageContent: string | null = null;
+        for (const group of recoveryRes.value.content) {
+          for (const msg of group) {
+            if (msg.type === "agent_message" && msg.content) {
+              lastAgentMessageContent = msg.content;
+            }
+          }
+        }
+        return lastAgentMessageContent;
+      };
+
+      // Wrapped in a closure (rather than read inline in the catch block)
+      // so TypeScript's definite-assignment analysis doesn't treat this as
+      // a use of `conversation` before it's assigned.
+      const getConversationIdSuffix = (): string => {
+        return conversation ? ` (conversationId: ${conversation.sId})` : "";
+      };
+
+      // Same closure-scoping reason as above.
+      const appendRecoveredAgentTranscriptEntry = (text: string): void => {
+        if (conversation) {
+          void appendTranscriptEntry(conversation.sId, {
+            role: "agent",
+            text,
+          });
+        }
+      };
 
       try {
         let createdContentFragments = [];
@@ -1157,6 +1282,15 @@ const CliChat: FC<CliChatProps> = ({
           conversation = convRes.value;
         }
 
+        // Crash-safety net: record the user's side of the exchange before
+        // waiting on the agent's (potentially long-running, potentially
+        // failing) stream below.
+        void appendTranscriptEntry(conversation.sId, {
+          role: "user",
+          text: questionText,
+          messageId: userMessageId,
+        });
+
         // Stream the agent's response
         const streamRes = await dustClient.streamAgentAnswerEvents({
           conversation: conversation,
@@ -1170,104 +1304,9 @@ const CliChat: FC<CliChatProps> = ({
           );
         }
 
-        const pushFullLinesToConversationItems = (isStreaming: boolean) => {
-          // If isStreaming is true, we only consider lines are full up to the penultimate line,
-          // as we have no guarantee the last line is complete.
-          // If isStreaming is false, we consider all lines to be complete.
-          const cotLines = chainOfThoughtRef.current.split("\n");
-          const contentLines = contentRef.current.split("\n");
-
-          setConversationItems((prev) => {
-            // Remove leading empty lines
-            while (cotLines.length > 0 && cotLines[0] === "") {
-              cotLines.shift();
-            }
-            while (contentLines.length > 0 && contentLines[0] === "") {
-              contentLines.shift();
-            }
-
-            const lastAgentMessageHeader = getLastConversationItem<
-              ConversationItem & { type: "agent_message_header" }
-            >(prev, "agent_message_header");
-
-            if (!lastAgentMessageHeader) {
-              throw new Error("Unreachable: No agent message header found");
-            }
-
-            const agentMessageIndex = lastAgentMessageHeader.index;
-
-            const prevIds = new Set(prev.map((item) => item.key));
-
-            const contentItems = contentLines
-              .map(
-                (line, index) =>
-                  ({
-                    key: `agent_message_content_line_${agentMessageIndex}__${index}`,
-                    type: "agent_message_content_line",
-                    text: line || " ",
-                    index,
-                  }) satisfies ConversationItem & {
-                    type: "agent_message_content_line";
-                  }
-              )
-              .filter((item) => !prevIds.has(item.key))
-              .slice(0, isStreaming ? -1 : undefined);
-
-            const newItems = [...prev];
-
-            const hasContentLines =
-              newItems[newItems.length - 1].type ===
-              "agent_message_content_line";
-
-            // If we already inserted some content lines for the agent message, we don't insert more cot lines, even if
-            // the agent generated some additional ones.
-            if (!hasContentLines) {
-              const cotItems = cotLines
-                .map(
-                  (line, index) =>
-                    ({
-                      key: `agent_message_cot_line_${agentMessageIndex}__${index}`,
-                      type: "agent_message_cot_line",
-                      text: line,
-                      index,
-                    }) satisfies ConversationItem & {
-                      type: "agent_message_cot_line";
-                    }
-                )
-                .filter((item) => !prevIds.has(item.key))
-                .slice(0, isStreaming && !contentItems.length ? -1 : undefined);
-
-              newItems.push(...cotItems);
-            }
-
-            const hasCotLines =
-              newItems[newItems.length - 1].type === "agent_message_cot_line";
-
-            if (!hasContentLines && hasCotLines && contentLines.length > 0) {
-              // This is the first content line, and we have some previous cot lines.
-              // So we insert a separator to separate the cot from the content.
-              newItems.push({
-                key: `end_of_cot_separator_${agentMessageIndex}`,
-                type: "separator",
-              });
-            }
-
-            newItems.push(...contentItems);
-
-            // If we are done streaming, we insert a separator below the completed agent message.
-            if (!isStreaming) {
-              newItems.push({
-                key: `end_of_agent_message_separator_${agentMessageIndex}`,
-                type: "separator",
-              });
-            }
-
-            return newItems;
-          });
-        };
-
         updateIntervalRef.current = setInterval(() => {
           pushFullLinesToConversationItems(true);
+          updateThinkingPreview();
         }, 1000);
 
         for await (const event of streamRes.value.eventStream) {
@@ -1290,6 +1329,7 @@ const CliChat: FC<CliChatProps> = ({
             setError(null);
             pushFullLinesToConversationItems(false);
             chainOfThoughtRef.current = "";
+            setThinkingPreview("");
             contentRef.current = contentRef.current || "[Cancelled]";
             pushFullLinesToConversationItems(false);
             contentRef.current = "";
@@ -1301,7 +1341,13 @@ const CliChat: FC<CliChatProps> = ({
             setActionStatus(null);
             setError(null);
             pushFullLinesToConversationItems(false);
+            void appendTranscriptEntry(conversation.sId, {
+              role: "agent",
+              text: contentRef.current,
+              messageId: event.message.sId,
+            });
             chainOfThoughtRef.current = "";
+            setThinkingPreview("");
             contentRef.current = "";
             break;
           } else if (event.type === "tool_params") {
@@ -1347,6 +1393,7 @@ const CliChat: FC<CliChatProps> = ({
           });
 
           chainOfThoughtRef.current = "";
+          setThinkingPreview("");
           contentRef.current = "";
 
           setIsProcessingQuestion(false);
@@ -1354,7 +1401,27 @@ const CliChat: FC<CliChatProps> = ({
           return;
         }
 
-        setError(`Error: ${normalizeError(error).message}`);
+        const recoveredText = await tryRecoverAgentAnswer();
+        if (recoveredText) {
+          if (updateIntervalRef.current) {
+            clearInterval(updateIntervalRef.current);
+          }
+          setActionStatus(null);
+          setError(null);
+          chainOfThoughtRef.current = "";
+          setThinkingPreview("");
+          contentRef.current = recoveredText;
+          pushFullLinesToConversationItems(false);
+          appendRecoveredAgentTranscriptEntry(recoveredText);
+          contentRef.current = "";
+          setIsProcessingQuestion(false);
+          setAbortController(null);
+          return;
+        }
+
+        setError(
+          `Error: ${normalizeError(error).message}${getConversationIdSuffix()}`
+        );
       } finally {
         setIsProcessingQuestion(false);
         setAbortController(null);
@@ -1401,6 +1468,16 @@ const CliChat: FC<CliChatProps> = ({
     if (!selectedAgent) {
       return;
     }
+
+    // Track how long it's been since the previous keystroke event. Pasted
+    // multi-line text on terminals without bracketed-paste support (e.g.
+    // this box's legacy Windows console) arrives as a rapid sequence of
+    // individual keystroke events rather than one batched input, so a
+    // human-speed gap is used below to tell a real Enter press apart from
+    // an embedded newline in a paste.
+    const now = Date.now();
+    const isRapidSuccession = now - lastKeystrokeTimeRef.current < 15;
+    lastKeystrokeTimeRef.current = now;
 
     // Handle inline selector keyboard (agent switch, file browser, approval).
     if (inlineSelector) {
@@ -1656,6 +1733,21 @@ const CliChat: FC<CliChatProps> = ({
         return;
       }
 
+      // A `return` arriving faster than a human can physically press Enter
+      // after other input is almost certainly an embedded newline from a
+      // pasted multi-line block delivered keystroke-by-keystroke, not a
+      // deliberate Enter press — insert it as a literal newline instead of
+      // submitting prematurely.
+      if (isRapidSuccession) {
+        const newInput =
+          userInput.slice(0, cursorPosition) +
+          "\n" +
+          userInput.slice(cursorPosition);
+        setUserInput(newInput);
+        setCursorPosition(cursorPosition + 1);
+        return;
+      }
+
       // Only allow submission if not processing, "me" is loaded and user input is not empty
       if (!canSubmit) {
         return;
@@ -1667,6 +1759,33 @@ const CliChat: FC<CliChatProps> = ({
       setCursorPosition(0);
       setUploadedFiles([]); // Clear uploaded files after sending
 
+      return;
+    }
+
+    // Ctrl+Backspace / Ctrl+W: delete the previous word (mirrors readline's
+    // unix-word-rubout binding). Ctrl+Backspace's exact reported key shape
+    // varies by terminal, so both are supported; Ctrl+W is the reliable,
+    // terminal-agnostic fallback.
+    if (
+      currentCursorPos > 0 &&
+      key.ctrl &&
+      ((key.backspace || key.delete) || input === "w")
+    ) {
+      let newPosition = currentCursorPos - 1;
+      while (newPosition > 0 && /\s/.test(currentInput[newPosition])) {
+        newPosition--;
+      }
+      while (newPosition > 0 && !/\s/.test(currentInput[newPosition - 1])) {
+        newPosition--;
+      }
+      setCurrentInput(
+        currentInput.slice(0, newPosition) +
+          currentInput.slice(currentCursorPos)
+      );
+      setCurrentCursorPos(newPosition);
+      if (isInCommandMode) {
+        setSelectedCommandIndex(0);
+      }
       return;
     }
 
@@ -2037,6 +2156,7 @@ const CliChat: FC<CliChatProps> = ({
         conversationItems={conversationItems}
         isProcessingQuestion={isProcessingQuestion}
         actionStatus={actionStatus}
+        thinkingPreview={thinkingPreview}
         userInput={inlineSelector ? inlineSelector.query : userInput}
         cursorPosition={
           inlineSelector ? inlineSelector.query.length : cursorPosition

@@ -1,14 +1,14 @@
 {
-  "name": "@dust-tt/dust-cli",
-  "version": "0.4.5",
+  "name": "dustw",
+  "version": "0.4.5-dustw.1",
   "engines": {
     "node": ">=24.16.0"
   },
-  "description": "A command-line interface for interacting with Dust.",
+  "description": "Patched fork of the Dust CLI (paste/crash/persistence fixes for legacy Windows consoles).",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "dust": "dist/index.js"
+    "dustw": "dist/index.js"
   },
   "files": ["dist"],
   "scripts": {

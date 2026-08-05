@@ -46,11 +46,6 @@ export type ConversationItem = { key: string } & (
       index: number;
     }
   | {
-      type: "agent_message_cot_line";
-      text: string;
-      index: number;
-    }
-  | {
       type: "agent_message_content_line";
       text: string;
       index: number;
@@ -67,6 +62,7 @@ interface ConversationProps {
   conversationItems: ConversationItem[];
   isProcessingQuestion: boolean;
   actionStatus: string | null;
+  thinkingPreview: string;
   userInput: string;
   cursorPosition: number;
   mentionPrefix: string;
@@ -91,6 +87,7 @@ const _Conversation: FC<ConversationProps> = ({
   conversationItems,
   isProcessingQuestion,
   actionStatus,
+  thinkingPreview,
   userInput,
   cursorPosition,
   mentionPrefix,
@@ -129,6 +126,12 @@ const _Conversation: FC<ConversationProps> = ({
             <Text color="green">
               Thinking
               <Spinner type="simpleDots" />
+              {thinkingPreview && (
+                <Text dimColor italic>
+                  {" "}
+                  · {thinkingPreview}
+                </Text>
+              )}
             </Text>
           )}
         </Box>
@@ -296,14 +299,6 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
         <Box>
           <Text bold color="blue">
             {item.agentName}
-          </Text>
-        </Box>
-      );
-    case "agent_message_cot_line":
-      return (
-        <Box marginLeft={2}>
-          <Text dimColor italic>
-            {item.text}
           </Text>
         </Box>
       );

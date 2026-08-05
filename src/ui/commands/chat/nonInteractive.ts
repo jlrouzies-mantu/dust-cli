@@ -7,6 +7,7 @@ import type {
 
 import { getDustClient } from "../../../utils/dustClient.js";
 import { normalizeError } from "../../../utils/errors.js";
+import { appendTranscriptEntry } from "../../../utils/transcriptStore.js";
 
 type AgentConfiguration =
   GetAgentConfigurationsResponseType["agentConfigurations"][number];
@@ -136,6 +137,37 @@ export async function sendNonInteractiveMessage(
     process.exit(1);
   }
 
+  // Declared before the try block (rather than inside it) so the
+  // crash-recovery fallback in the catch block below can still read the
+  // conversation that was created/continued before the failure occurred.
+  let conversation: CreateConversationResponseType["conversation"] | undefined;
+  let userMessageId: string | undefined;
+
+  // Before surfacing a fatal error, check whether the agent's answer
+  // actually completed successfully server-side despite the client-side
+  // failure (e.g. the known @dust-tt/client SSE "done"-sentinel bug that
+  // exhausts its reconnect budget even though the answer already landed).
+  const tryRecoverAgentAnswer = async (): Promise<string | null> => {
+    if (!conversation) {
+      return null;
+    }
+    const recoveryRes = await dustClient.getConversation({
+      conversationId: conversation.sId,
+    });
+    if (recoveryRes.isErr()) {
+      return null;
+    }
+    let lastAgentMessageContent: string | null = null;
+    for (const group of recoveryRes.value.content) {
+      for (const msg of group) {
+        if (msg.type === "agent_message" && msg.content) {
+          lastAgentMessageContent = msg.content;
+        }
+      }
+    }
+    return lastAgentMessageContent;
+  };
+
   try {
     // Resolve spaceId if projectName or projectId is provided
     let spaceId: string | undefined;
@@ -149,9 +181,6 @@ export async function sendNonInteractiveMessage(
       }
       process.exit(1);
     }
-
-    let conversation: CreateConversationResponseType["conversation"];
-    let userMessageId: string;
 
     if (existingConversationId) {
       // Add message to existing conversation
@@ -244,6 +273,12 @@ export async function sendNonInteractiveMessage(
       userMessageId = messageId;
     }
 
+    await appendTranscriptEntry(conversation.sId, {
+      role: "user",
+      text: message,
+      messageId: userMessageId,
+    });
+
     // Stream the agent's response
     const streamRes = await dustClient.streamAgentAnswerEvents({
       conversation: conversation,
@@ -327,6 +362,12 @@ export async function sendNonInteractiveMessage(
           messageId: event.message.sId,
         };
 
+        await appendTranscriptEntry(conversation.sId, {
+          role: "agent",
+          text: output.agentAnswer,
+          messageId: event.message.sId,
+        });
+
         // Add detailed event history if requested
         if (showDetails) {
           output.events = eventDetails;
@@ -338,7 +379,26 @@ export async function sendNonInteractiveMessage(
       }
     }
   } catch (error) {
-    const errorMsg = `Unexpected error: ${normalizeError(error).message}`;
+    const recoveredText = await tryRecoverAgentAnswer();
+    if (recoveredText && conversation) {
+      const output: NonInteractiveOutput = {
+        agentId: selectedAgent.sId,
+        agentAnswer: recoveredText.trim(),
+        conversationId: conversation.sId,
+        messageId: userMessageId ?? "",
+      };
+      await appendTranscriptEntry(conversation.sId, {
+        role: "agent",
+        text: output.agentAnswer,
+      });
+      console.log(JSON.stringify(output));
+      process.exit(0);
+    }
+
+    const conversationSuffix = conversation
+      ? ` (conversationId: ${conversation.sId})`
+      : "";
+    const errorMsg = `Unexpected error: ${normalizeError(error).message}${conversationSuffix}`;
     if (setError) {
       setError(errorMsg);
       return;

@@ -14,10 +14,10 @@
     "dist"
   ],
   "scripts": {
-    "build:prod": "NODE_ENV=production tsup",
-    "build:dev": "NODE_ENV=development tsup",
-    "build": "NODE_ENV=development tsup",
-    "dev": "NODE_ENV=development tsup --watch",
+    "build:prod": "cross-env NODE_ENV=production tsup",
+    "build:dev": "cross-env NODE_ENV=development tsup",
+    "build": "cross-env NODE_ENV=development tsup",
+    "dev": "cross-env NODE_ENV=development tsup --watch",
     "start": "node dist/index.js"
   },
   "keywords": [
@@ -67,6 +67,7 @@
     "@types/node": "^24.12.2",
     "@types/react": "^18.3.18",
     "@types/update-notifier": "^6.0.8",
+    "cross-env": "^10.1.0",
     "diff": "^8.0.2",
     "dotenv-flow": "^4.1.0",
     "ts-node": "^10.9.2",

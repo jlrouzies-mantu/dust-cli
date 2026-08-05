@@ -106,5 +106,9 @@ const cli = meow({
   },
 });
 
-const instance = render(<App cli={cli} />);
+// Ink's default exitOnCtrlC kills the process on the very first Ctrl+C
+// with no chance for the app to react — losing an in-progress chat with
+// no warning. Disabled here; App.tsx and Chat.tsx implement their own
+// (safer) Ctrl+C handling instead.
+const instance = render(<App cli={cli} />, { exitOnCtrlC: false });
 registerInkCleanup(() => instance.unmount());

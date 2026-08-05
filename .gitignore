@@ -34,4 +34,8 @@ Thumbs.db
 .npm
 
 # Optional eslint cache
-.eslintcache 
+.eslintcache
+
+# Debugging screenshots dropped in the repo root (may contain personal info)
+/*.PNG
+/*.png

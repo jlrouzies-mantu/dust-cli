@@ -1,4 +1,4 @@
-import { Box, Text } from "ink";
+import { Box, Text, useApp, useInput, useStdin } from "ink";
 import type { Result } from "meow";
 import type { FC } from "react";
 import React, { useCallback, useState } from "react";
@@ -91,10 +91,30 @@ const App: FC<AppProps> = ({ cli }) => {
   const command = input[0] || "chat";
   const isNonInteractiveChat =
     command === "chat" && Boolean(flags.message || flags.messageId);
+  const isInteractiveChat = command === "chat" && !isNonInteractiveChat;
 
   const handleUpdateComplete = useCallback(() => {
     setUpdateCheckComplete(true);
   }, []);
+
+  const { exit } = useApp();
+  const { isRawModeSupported } = useStdin();
+  // Immediate exit-on-Ctrl+C for every screen except the interactive chat,
+  // which implements its own safer (confirm-to-exit / cancel-generation)
+  // handling in Chat.tsx instead of a single accidental keypress ending
+  // the whole session. Guarded by isRawModeSupported: useInput
+  // unconditionally requires raw-mode-capable stdin when active, which
+  // isn't available when stdin is piped/redirected (e.g. non-interactive
+  // invocations) — without this guard, those would crash instead of just
+  // not having a Ctrl+C shortcut.
+  useInput(
+    (input, key) => {
+      if (key.ctrl && input === "c") {
+        exit();
+      }
+    },
+    { isActive: !isInteractiveChat && Boolean(isRawModeSupported) }
+  );
 
   if (flags.version) {
     return <Text>Dust CLI v{CLI_VERSION}</Text>;

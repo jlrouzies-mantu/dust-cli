@@ -64,6 +64,7 @@ interface ConversationProps {
   actionStatus: string | null;
   thinkingPreview: string;
   streamingContentPreview: string;
+  showExitHint: boolean;
   userInput: string;
   cursorPosition: number;
   mentionPrefix: string;
@@ -90,6 +91,7 @@ const _Conversation: FC<ConversationProps> = ({
   actionStatus,
   thinkingPreview,
   streamingContentPreview,
+  showExitHint,
   userInput,
   cursorPosition,
   mentionPrefix,
@@ -174,6 +176,11 @@ const _Conversation: FC<ConversationProps> = ({
           prompt={inlineSelector.prompt}
           header={inlineSelector.header}
         />
+      )}
+      {showExitHint && (
+        <Box paddingLeft={1}>
+          <Text color="yellow">Press Ctrl+C again to exit</Text>
+        </Box>
       )}
       {!showCommandSelector && !inlineSelector && (
         <Box marginTop={0} paddingLeft={1}>

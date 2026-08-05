@@ -7,7 +7,7 @@ import type {
 import chalk from "chalk";
 import { structuredPatch } from "diff";
 import { readdir, stat } from "fs/promises";
-import { Box, Text, useInput, useStdout } from "ink";
+import { Box, Text, useApp, useInput, useStdout } from "ink";
 import open from "open";
 import path from "path";
 import type { FC } from "react";
@@ -189,6 +189,7 @@ const CliChat: FC<CliChatProps> = ({
   const [actionStatus, setActionStatus] = useState<string | null>(null);
   const [thinkingPreview, setThinkingPreview] = useState("");
   const [streamingContentPreview, setStreamingContentPreview] = useState("");
+  const [showExitHint, setShowExitHint] = useState(false);
   const updateIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const contentRef = useRef<string>("");
   const chainOfThoughtRef = useRef<string>("");
@@ -197,8 +198,13 @@ const CliChat: FC<CliChatProps> = ({
   // arriving as a rapid sequence of individual keystrokes (see the
   // key.return handling below).
   const lastKeystrokeTimeRef = useRef(0);
+  const lastCtrlCTimeRef = useRef(0);
+  const exitHintTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
 
   const { stdout } = useStdout();
+  const { exit } = useApp();
 
   const { me, isLoading: isMeLoading, error: meError } = useMe();
 
@@ -1466,6 +1472,31 @@ const CliChat: FC<CliChatProps> = ({
 
   // Handle keyboard events.
   useInput((input, key) => {
+    // Ctrl+C: cancel an in-flight generation immediately (mirrors ESC), but
+    // never exit the whole session on a single accidental press while idle
+    // — require a second press within 2s, with a visible hint in between.
+    // (Ink's default exitOnCtrlC is disabled in index.tsx for this reason.)
+    if (key.ctrl && input === "c") {
+      if (isProcessingQuestion && abortController) {
+        abortController.abort();
+        return;
+      }
+      const now = Date.now();
+      if (now - lastCtrlCTimeRef.current < 2000) {
+        exit();
+        return;
+      }
+      lastCtrlCTimeRef.current = now;
+      if (exitHintTimeoutRef.current) {
+        clearTimeout(exitHintTimeoutRef.current);
+      }
+      setShowExitHint(true);
+      exitHintTimeoutRef.current = setTimeout(() => {
+        setShowExitHint(false);
+      }, 2000);
+      return;
+    }
+
     if (!selectedAgent) {
       return;
     }
@@ -2159,6 +2190,7 @@ const CliChat: FC<CliChatProps> = ({
         actionStatus={actionStatus}
         thinkingPreview={thinkingPreview}
         streamingContentPreview={streamingContentPreview}
+        showExitHint={showExitHint}
         userInput={inlineSelector ? inlineSelector.query : userInput}
         cursorPosition={
           inlineSelector ? inlineSelector.query.length : cursorPosition

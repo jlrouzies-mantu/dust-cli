@@ -12,6 +12,7 @@ import React, {
   useState,
 } from "react";
 
+import type { TodoItem } from "../../mcp/tools/todoWrite.js";
 import { MANTU_GOLD, MANTU_PURPLE } from "../../utils/brand.js";
 import type { ContextUsage } from "../../utils/contextUsage.js";
 import type { MarkdownSegment } from "../../utils/markdown.js";
@@ -75,6 +76,14 @@ export type ConversationItem = { key: string } & (
     }
   | {
       type: "agent_message_cancelled";
+    }
+  | {
+      // A snapshot of the todo list at the point todo_write was called.
+      // Pushed as a fresh item each update (Static is append-only), same
+      // as how Claude Code prints a new checklist snapshot per call.
+      type: "todo_list";
+      todos: TodoItem[];
+      index: number;
     }
   | {
       type: "separator";
@@ -490,6 +499,35 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
       return (
         <Box marginBottom={1} marginTop={1}>
           <Text color="red">[Cancelled]</Text>
+        </Box>
+      );
+    case "todo_list":
+      return (
+        <Box
+          flexDirection="column"
+          marginLeft={2}
+          marginBottom={1}
+          paddingX={1}
+          borderStyle="classic"
+          borderColor={MANTU_PURPLE}
+        >
+          {item.todos.map((todo, i) => {
+            const marker =
+              todo.status === "completed"
+                ? "[x]"
+                : todo.status === "in_progress"
+                  ? "[~]"
+                  : "[ ]";
+            return (
+              <Text
+                key={i}
+                color={todo.status === "completed" ? "gray" : undefined}
+                dimColor={todo.status === "completed"}
+              >
+                {marker} {todo.content}
+              </Text>
+            );
+          })}
         </Box>
       );
     case "separator":

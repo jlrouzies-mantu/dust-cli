@@ -14,6 +14,8 @@ import type { FC } from "react";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import { useFileSystemServer } from "../../mcp/servers/fsServer.js";
+import type { TodoItem } from "../../mcp/tools/todoWrite.js";
+import { todoListEmitter } from "../../mcp/tools/todoWrite.js";
 import AuthService from "../../utils/authService.js";
 import type { ContextUsage } from "../../utils/contextUsage.js";
 import { getContextUsage } from "../../utils/contextUsage.js";
@@ -213,6 +215,7 @@ const CliChat: FC<CliChatProps> = ({
   const contentRef = useRef<string>("");
   const chainOfThoughtRef = useRef<string>("");
   const resumeLoadedRef = useRef(false);
+  const todoListIndexRef = useRef(0);
   // Timestamp of the previous useInput event, used to detect pasted text
   // arriving as a rapid sequence of individual keystrokes (see the
   // key.return handling below).
@@ -241,6 +244,29 @@ const CliChat: FC<CliChatProps> = ({
     })();
     void getConsumedCredits().then(setConsumedCredits);
   }, [me, workspaceName]);
+
+  // The todo_write tool call runs inside the MCP transport layer, not this
+  // React tree - subscribe to its emitter to render each snapshot as a new
+  // conversation item (Static is append-only, so each update is a fresh
+  // item, same as how Claude Code prints a new checklist snapshot per call).
+  useEffect(() => {
+    const handleTodoUpdate = (todos: TodoItem[]) => {
+      const index = todoListIndexRef.current++;
+      setConversationItems((prev) => [
+        ...prev,
+        {
+          key: `todo_list_${index}`,
+          type: "todo_list",
+          todos,
+          index,
+        },
+      ]);
+    };
+    todoListEmitter.on("update", handleTodoUpdate);
+    return () => {
+      todoListEmitter.off("update", handleTodoUpdate);
+    };
+  }, []);
 
   // Import useAgents hook for agent search functionality
   const {

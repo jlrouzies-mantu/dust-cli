@@ -9,6 +9,7 @@ import { ReadFileTool } from "../tools/readFile.js";
 import { RunCommandTool } from "../tools/runCommand.js";
 import { SearchContentTool } from "../tools/searchContent.js";
 import { SearchFilesTool } from "../tools/searchFiles.js";
+import { TodoWriteTool } from "../tools/todoWrite.js";
 import { CLIMcpTransport } from "./cliTransport.js";
 
 // Add local development tools to the MCP server
@@ -36,6 +37,7 @@ export const useFileSystemServer = async (
   const searchContentTool = new SearchContentTool();
   const editFileTool = new EditFileTool();
   const runCommandTool = new RunCommandTool();
+  const todoWriteTool = new TodoWriteTool();
 
   if (diffApprovalCallback) {
     editFileTool.setDiffApprovalCallback(diffApprovalCallback);
@@ -47,6 +49,7 @@ export const useFileSystemServer = async (
     searchContentTool,
     editFileTool,
     runCommandTool,
+    todoWriteTool,
   ];
 
   // Transient connection failures shouldn't dead-end the user immediately -

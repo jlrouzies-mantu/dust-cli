@@ -47,6 +47,7 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 | Several UI glyphs rendered as garbage or misaligned boxes | `↵`, `…`, `↑`/`↓`, `→`, and every `borderStyle="round"` box border are Unicode code points this console's font doesn't cover |
 | Code blocks rendered with a border stretching across the whole terminal, and a patchy background | Ink/Yoga's default column-flex stretches boxes to the parent's full width unless `alignSelf` is set; `Text`'s `backgroundColor` only paints behind actual characters, so shorter lines need explicit padding |
 | Markdown headings (`# Title`) were never rendered — the `#` stayed literal | Confirmed upstream bug in `marked-terminal@7.3.0`'s heading renderer, reproducible with their own README example verbatim |
+| `getConversation` crashed with a wall of `ZodError`s on some real conversations | `@dust-tt/client@1.2.6`'s response schema didn't expect an `agent_message` in a slot a generated-file response used — fixed by upgrading to `1.2.8` |
 | `npm run build` failed out of the box on Windows | The build scripts use bash-style `NODE_ENV=x cmd` syntax |
 | The app crashed on startup | The update-checker queried the npm registry for a package (`dustw`) that isn't published there |
 
@@ -64,6 +65,8 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 | Persistent, colorized status bar | Workspace, active agent, working directory, git branch, conversation ID, context-window usage, and consumed credits — see [Status bar](#status-bar) |
 | Ctrl+Enter / Shift+Enter | Multi-line input, in addition to the existing shortcuts |
 | Mantu-branded header | Full-width separator, "MANTU FORK" + "Initiated by: Jean-Laurent" in brand colors |
+| `todo_write` tool | A Claude-Code-style persistent task checklist tool (`--with-tools` only), rendered as a boxed checklist snapshot each time the agent updates it |
+| Dust directive handling | Custom Dust-only markdown directives (e.g. `:preview_file{...}`, rendered as an interactive widget on the web app) are replaced with a readable placeholder instead of leaking raw syntax |
 
 ### 🔧 Changed
 

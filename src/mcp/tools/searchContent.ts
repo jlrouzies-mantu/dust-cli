@@ -2,15 +2,27 @@ import { z } from "zod";
 
 import { normalizeError } from "../../utils/errors.js";
 import { MAX_LINE_LENGTH_TEXT_FILE } from "../../utils/fileHandling.js";
-import { formatGrepRes, performGrep } from "../../utils/grep.js";
+import type { GrepResult } from "../../utils/grep.js";
+import { performGrep } from "../../utils/grep.js";
 import type { McpTool } from "../types/tools.js";
+
+function truncateLine(line: string): string {
+  if (line.length <= MAX_LINE_LENGTH_TEXT_FILE) {
+    return line;
+  }
+  return `${line.slice(0, MAX_LINE_LENGTH_TEXT_FILE)}... [cut]`;
+}
 
 export class SearchContentTool implements McpTool {
   name = "search_content";
-  description = "Search for content within files";
+  description =
+    "Search for a regular expression within files (recursive, like grep -E). " +
+    "Supports optional lines of context around each match.";
 
   inputSchema = z.object({
-    pattern: z.string().describe("The text to search for"),
+    pattern: z
+      .string()
+      .describe("The regular expression to search for (extended regex syntax)"),
     path: z
       .string()
       .optional()
@@ -19,14 +31,32 @@ export class SearchContentTool implements McpTool {
       .string()
       .optional()
       .describe("File pattern to search within (default: all files)"),
+    case_sensitive: z
+      .boolean()
+      .optional()
+      .describe("Whether the match is case-sensitive (default: true)"),
+    context_lines: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe(
+        "Number of lines of context to include before and after each match (default: 0)"
+      ),
   });
 
   async execute({
     pattern,
     path = ".",
     file_pattern = "*",
+    case_sensitive = true,
+    context_lines = 0,
   }: z.infer<typeof this.inputSchema>) {
-    const grepRes = await performGrep(pattern, path, file_pattern);
+    const grepRes = await performGrep(pattern, path, file_pattern, {
+      caseSensitive: case_sensitive,
+      contextBefore: context_lines,
+      contextAfter: context_lines,
+    });
     if (grepRes.isErr()) {
       return {
         content: [
@@ -41,9 +71,9 @@ export class SearchContentTool implements McpTool {
       };
     }
 
-    const formattedGrep = formatGrepRes(grepRes.value, path);
+    const { results, truncated } = grepRes.value;
 
-    if (formattedGrep.length === 0) {
+    if (results.length === 0) {
       return {
         content: [
           {
@@ -54,60 +84,41 @@ export class SearchContentTool implements McpTool {
       };
     }
 
-    // Group results by file path and sort by line number
-    const fileGroups = new Map<
-      string,
-      Array<{ lineNumber: number; content: string }>
-    >();
+    // Group by file path and sort by line number within each file.
+    const fileGroups = new Map<string, GrepResult[]>();
+    for (const result of results) {
+      const group = fileGroups.get(result.filePath) ?? [];
+      group.push(result);
+      fileGroups.set(result.filePath, group);
+    }
+    fileGroups.forEach((group) => group.sort((a, b) => a.lineNumber - b.lineNumber));
 
-    formattedGrep.forEach((result) => {
-      if (!fileGroups.has(result.filePath)) {
-        fileGroups.set(result.filePath, []);
-      }
-      const group = fileGroups.get(result.filePath);
-      if (group) {
-        group.push({
-          lineNumber: result.lineNumber,
-          content: result.content,
-        });
-      }
-    });
+    let output = `Found ${results.length} match${
+      results.length === 1 ? "" : "es"
+    } for "${pattern}" in the following files:\n\n`;
 
-    // Sort each file's results by line number
-    fileGroups.forEach((results) => {
-      results.sort((a, b) => a.lineNumber - b.lineNumber);
-    });
-
-    // Format output with relative paths ordered by line number
-    let output = `Found ${formattedGrep.length} matches for "${pattern}" in the following files:\n\n`;
-
-    let anyCut = false;
     Array.from(fileGroups.entries())
       .sort(([a], [b]) => a.localeCompare(b))
-      .forEach(([filePath, results]) => {
+      .forEach(([filePath, group]) => {
         output += `${filePath}:\n`;
-        results.forEach((result) => {
-          let cut = false;
-          if (result.content.length > MAX_LINE_LENGTH_TEXT_FILE) {
-            cut = true;
-            anyCut = true;
+        group.forEach((result) => {
+          result.contextBefore.forEach((line, i) => {
+            const lineNumber = result.lineNumber - result.contextBefore.length + i;
+            output += `  ${lineNumber}- ${truncateLine(line)}\n`;
+          });
+          output += `  ${result.lineNumber}: ${truncateLine(result.content)}\n`;
+          result.contextAfter.forEach((line, i) => {
+            output += `  ${result.lineNumber + i + 1}- ${truncateLine(line)}\n`;
+          });
+          if (result.contextBefore.length || result.contextAfter.length) {
+            output += "  --\n";
           }
-          output += `  ${result.lineNumber}: ${result.content.substring(
-            0,
-            Math.min(MAX_LINE_LENGTH_TEXT_FILE, result.content.length)
-          )}`;
-          if (cut) {
-            output += "... [cut]";
-          }
-          output += "\n";
         });
         output += "----------\n";
       });
 
-    if (anyCut) {
-      output =
-        `[The content of these files have been partially cut: some lines exceeded maximum length of ${MAX_LINE_LENGTH_TEXT_FILE} characters.]\n` +
-        output;
+    if (truncated) {
+      output += `\n[Results truncated - refine your pattern or file_pattern to narrow the search.]`;
     }
 
     return {

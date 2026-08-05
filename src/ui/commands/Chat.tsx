@@ -17,6 +17,7 @@ import { useFileSystemServer } from "../../mcp/servers/fsServer.js";
 import type { TodoItem } from "../../mcp/tools/todoWrite.js";
 import { todoListEmitter } from "../../mcp/tools/todoWrite.js";
 import AuthService from "../../utils/authService.js";
+import { getClipboardImagePath } from "../../utils/clipboardImage.js";
 import type { ContextUsage } from "../../utils/contextUsage.js";
 import { getContextUsage } from "../../utils/contextUsage.js";
 import type { CreditsUsage } from "../../utils/creditsInfo.js";
@@ -59,6 +60,10 @@ interface CliChatProps {
   projectName?: string;
   projectId?: string;
 }
+
+// Pastes with more lines than this get collapsed to a placeholder in the
+// input box instead of dumping the raw text inline.
+const PASTE_COMPACT_LINE_THRESHOLD = 4;
 
 function getLastConversationItem<T extends ConversationItem>(
   items: ConversationItem[],
@@ -240,6 +245,13 @@ const CliChat: FC<CliChatProps> = ({
   // arriving as a rapid sequence of individual keystrokes (see the
   // key.return handling below).
   const lastKeystrokeTimeRef = useRef(0);
+  // Large pastes are shown in the input as a compact "[Pasted N lines of
+  // text]" placeholder instead of the raw content (matching Claude Code),
+  // with the real content kept here and swapped back in at submit time -
+  // see the input.length > 1 paste-handling branch below.
+  const pastedBlocksRef = useRef<{ placeholder: string; content: string }[]>(
+    []
+  );
   const lastCtrlCTimeRef = useRef(0);
   const exitHintTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     null
@@ -359,6 +371,7 @@ const CliChat: FC<CliChatProps> = ({
     // Clear all input states before switching.
     setUserInput("");
     setCursorPosition(0);
+    pastedBlocksRef.current = [];
     setShowCommandSelector(false);
     setCommandQuery("");
     setSelectedCommandIndex(0);
@@ -382,6 +395,17 @@ const CliChat: FC<CliChatProps> = ({
     async (dirPath: string): Promise<InlineSelectorItem[]> => {
       const entries = await readdir(dirPath, { withFileTypes: true });
       const items: InlineSelectorItem[] = [];
+
+      // Clipboard image paste has no terminal-level "paste" event to hook
+      // into (a real OS paste only ever delivers text over stdin), so it's
+      // offered here as a selectable entry instead. Windows-only for now,
+      // see clipboardImage.ts.
+      if (process.platform === "win32") {
+        items.push({
+          id: "__clipboard__",
+          label: "📋 Paste image from clipboard",
+        });
+      }
 
       // Add parent directory navigation unless at root
       if (dirPath !== "/") {
@@ -661,6 +685,7 @@ const CliChat: FC<CliChatProps> = ({
 
     setUserInput("");
     setCursorPosition(0);
+    pastedBlocksRef.current = [];
     setShowCommandSelector(false);
     setCommandQuery("");
     setSelectedCommandIndex(0);
@@ -887,6 +912,7 @@ const CliChat: FC<CliChatProps> = ({
 
     setUserInput("");
     setCursorPosition(0);
+    pastedBlocksRef.current = [];
     setShowCommandSelector(false);
     setCommandQuery("");
     setSelectedCommandIndex(0);
@@ -1083,6 +1109,17 @@ const CliChat: FC<CliChatProps> = ({
       if (!selectedAgent || !me || meError || isMeLoading) {
         return;
       }
+
+      // questionText is what's shown in the transcript - it may still
+      // contain "[Pasted N lines of text]" placeholders. fullQuestionText
+      // swaps those back in for what actually gets sent to the agent.
+      let fullQuestionText = questionText;
+      for (const { placeholder, content } of pastedBlocksRef.current) {
+        if (fullQuestionText.includes(placeholder)) {
+          fullQuestionText = fullQuestionText.replace(placeholder, content);
+        }
+      }
+      pastedBlocksRef.current = [];
 
       setConversationItems((prev) => {
         const lastUserMessage = getLastConversationItem<
@@ -1323,12 +1360,12 @@ const CliChat: FC<CliChatProps> = ({
           }));
 
           const convRes = await dustClient.createConversation({
-            title: `CLI Question: ${questionText.substring(0, 30)}${
-              questionText.length > 30 ? "..." : ""
+            title: `CLI Question: ${fullQuestionText.substring(0, 30)}${
+              fullQuestionText.length > 30 ? "..." : ""
             }`,
             visibility: "unlisted",
             message: {
-              content: questionText,
+              content: fullQuestionText,
               mentions: [{ configurationId: selectedAgent.sId }],
               context: {
                 timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -1367,7 +1404,7 @@ const CliChat: FC<CliChatProps> = ({
           const messageRes = await dustClient.postUserMessage({
             conversationId: currentConversationId,
             message: {
-              content: questionText,
+              content: fullQuestionText,
               mentions: [{ configurationId: selectedAgent.sId }],
               context: {
                 clientSideMCPServerIds: fileSystemServerId
@@ -1407,7 +1444,7 @@ const CliChat: FC<CliChatProps> = ({
         // failing) stream below.
         void appendTranscriptEntry(conversation.sId, {
           role: "user",
-          text: questionText,
+          text: fullQuestionText,
           messageId: userMessageId,
         });
 
@@ -1728,6 +1765,24 @@ const CliChat: FC<CliChatProps> = ({
             if (selected.id === "__more__") {
               return;
             }
+            if (selected.id === "__clipboard__") {
+              setInlineSelector(null);
+              void (async () => {
+                const clipRes = await getClipboardImagePath();
+                if (clipRes.isErr()) {
+                  setError(
+                    `Failed to read clipboard image: ${clipRes.error.message}`
+                  );
+                  return;
+                }
+                if (clipRes.value === null) {
+                  setError("No image found on the clipboard.");
+                  return;
+                }
+                await handleFileSelected(clipRes.value);
+              })();
+              return;
+            }
             void (async () => {
               try {
                 const targetStat = await stat(selected.id);
@@ -1845,6 +1900,23 @@ const CliChat: FC<CliChatProps> = ({
         }
         return;
       }
+
+      // Tab completes the currently-highlighted command's name into the
+      // input (shell-style), without running it - Enter still does that.
+      if (key.tab && !key.shift) {
+        const filteredCommands = commands.filter((cmd) =>
+          cmd.name.toLowerCase().startsWith(commandQuery.toLowerCase())
+        );
+        if (
+          filteredCommands.length > 0 &&
+          selectedCommandIndex < filteredCommands.length
+        ) {
+          const selectedCommand = filteredCommands[selectedCommandIndex];
+          setCommandQuery(selectedCommand.name);
+          setCommandCursorPosition(selectedCommand.name.length);
+        }
+        return;
+      }
     }
 
     if (key.ctrl && input === "g") {
@@ -1874,6 +1946,7 @@ const CliChat: FC<CliChatProps> = ({
       } else if (userInput) {
         setUserInput("");
         setCursorPosition(0);
+        pastedBlocksRef.current = [];
       }
       return;
     }
@@ -2191,12 +2264,26 @@ const CliChat: FC<CliChatProps> = ({
       // Some terminals translate newlines to \r, so we normalize that to \n
       const normalizedInput = input.replace(/\r/g, "\n");
 
+      // Large pastes get collapsed to a placeholder rather than dumping
+      // hundreds of lines into the input box - the real content is kept in
+      // pastedBlocksRef and swapped back in at submit time.
+      const lineCount = normalizedInput.split("\n").length;
+      let textToInsert = normalizedInput;
+      if (lineCount > PASTE_COMPACT_LINE_THRESHOLD) {
+        const placeholder = `[Pasted ${lineCount} lines of text]`;
+        pastedBlocksRef.current.push({
+          placeholder,
+          content: normalizedInput,
+        });
+        textToInsert = placeholder;
+      }
+
       const newInput =
         currentInput.slice(0, currentCursorPos) +
-        normalizedInput +
+        textToInsert +
         currentInput.slice(currentCursorPos);
       setCurrentInput(newInput);
-      setCurrentCursorPos(currentCursorPos + normalizedInput.length);
+      setCurrentCursorPos(currentCursorPos + textToInsert.length);
       if (isInCommandMode) {
         setSelectedCommandIndex(0);
       }

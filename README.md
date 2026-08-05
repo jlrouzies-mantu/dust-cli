@@ -20,6 +20,7 @@
 - [Changelog: Mantu fork vs. upstream Dust CLI](#changelog-mantu-fork-vs-upstream-dust-cli)
 - [Screenshots](#screenshots)
 - [Installation](#installation)
+  - [Quick install (Windows)](#quick-install-windows)
 - [Usage](#usage)
   - [Commands](#commands)
   - [Shortcuts](#shortcuts)
@@ -53,6 +54,10 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 | Mantu-branded header | Full-width separator + brand colors |
 | `todo_write` tool | Claude-Code-style task checklist (`--with-tools` only) |
 | Dust directive handling | Web-only directives (e.g. `:preview_file{...}`) shown as readable placeholders |
+| Clipboard image paste | Attach a screenshot straight from the clipboard via `/attach` (Windows) — see [In-Chat Commands](#in-chat-commands) |
+| Paste compaction | Large multi-line pastes collapse to a `[Pasted N lines of text]` placeholder in the input instead of dumping the raw text inline |
+| Portable content search | `search_content` (`--with-tools`) no longer shells out to the system `grep` binary, and supports lines of context around each match |
+| One-line installer | `scripts/Install-DustCLI.ps1` — see [Quick install (Windows)](#quick-install-windows) |
 
 ### 🐛 Fixed
 
@@ -67,6 +72,7 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 | Code block borders/backgrounds rendered wrong | Ink/Yoga layout defaults, unpadded background fill |
 | Markdown headings/bold never rendered | Confirmed `marked-terminal@7.3.0` bug |
 | `npm run build` failed on Windows | Bash-style `NODE_ENV=x` syntax in scripts |
+| `search_content` (`--with-tools`) could silently fail | It shelled out to the system `grep` binary, not guaranteed to exist on plain Windows without Git for Windows/WSL |
 
 ### 🔧 Changed
 
@@ -90,6 +96,18 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 ---
 
 ## Installation
+
+### Quick install (Windows)
+
+One line, no prerequisites — installs NVM for Windows, Node.js, and builds and links this fork:
+
+```powershell
+irm https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/Install-DustCLI.ps1 | iex
+```
+
+Re-run the same command any time to update to the latest version. The script lives at [`scripts/Install-DustCLI.ps1`](./scripts/Install-DustCLI.ps1) — read it before running it, as with any install script piped from the internet.
+
+### Manual install
 
 ```bash
 git clone <this-repo-url>
@@ -158,7 +176,7 @@ Context-window usage and consumed credits come from endpoints the Dust web dashb
 
 - **`/exit`** — exit the chat session
 - **`/switch`** — switch to a different agent
-- **`/attach`** — open a file selector to attach a file
+- **`/attach`** — open a file selector to attach a file (includes a "Paste image from clipboard" option on Windows)
 - **`/clear-files`** — clear any attached files
 - **`/auto`** — toggle auto-approval of file edits
 

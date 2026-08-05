@@ -252,7 +252,7 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
           <Box marginTop={1} marginBottom={1}>
             <Text color={MANTU_GOLD}>{"_".repeat(terminalWidth)}</Text>
           </Box>
-          <Box marginBottom={1}>
+          <Box>
             <Box flexDirection="column" marginRight={2}>
               <Box>
                 <Text color="green" dimColor>

@@ -19,6 +19,7 @@ import { todoListEmitter } from "../../mcp/tools/todoWrite.js";
 import AuthService from "../../utils/authService.js";
 import type { ContextUsage } from "../../utils/contextUsage.js";
 import { getContextUsage } from "../../utils/contextUsage.js";
+import type { CreditsUsage } from "../../utils/creditsInfo.js";
 import { getConsumedCredits } from "../../utils/creditsInfo.js";
 import { getDustClient } from "../../utils/dustClient.js";
 import { normalizeError } from "../../utils/errors.js";
@@ -209,8 +210,27 @@ const CliChat: FC<CliChatProps> = ({
   >([]);
   const [showExitHint, setShowExitHint] = useState(false);
   const [workspaceName, setWorkspaceName] = useState<string | null>(null);
-  const [consumedCredits, setConsumedCredits] = useState<number | null>(null);
+  const [consumedCredits, setConsumedCredits] = useState<CreditsUsage | null>(
+    null
+  );
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
+  // These undocumented endpoints occasionally return null on a transient
+  // hiccup (see creditsInfo.ts/contextUsage.ts) - once we've displayed a
+  // real value in the status bar, a later failed refresh shouldn't blank
+  // it back out, so only apply updates that actually carry a value.
+  const setContextUsageIfPresent = useCallback((usage: ContextUsage | null) => {
+    if (usage !== null) {
+      setContextUsage(usage);
+    }
+  }, []);
+  const setConsumedCreditsIfPresent = useCallback(
+    (usage: CreditsUsage | null) => {
+      if (usage !== null) {
+        setConsumedCredits(usage);
+      }
+    },
+    []
+  );
   const updateIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const contentRef = useRef<string>("");
   const chainOfThoughtRef = useRef<string>("");
@@ -242,8 +262,17 @@ const CliChat: FC<CliChatProps> = ({
         setWorkspaceName(workspace.name);
       }
     })();
-    void getConsumedCredits().then(setConsumedCredits);
   }, [me, workspaceName]);
+
+  // Kicked off on mount rather than gated behind `me` loading - unlike the
+  // workspace name above, this fetches its own access token/workspace ID
+  // directly via AuthService, so it doesn't need to wait on the separate
+  // useMe() round-trip. Every bit of head start here matters: if a user
+  // sends their first message before this resolves, the status bar just
+  // won't have a value to show yet for that first reply.
+  useEffect(() => {
+    void getConsumedCredits().then(setConsumedCreditsIfPresent);
+  }, [setConsumedCreditsIfPresent]);
 
   // The todo_write tool call runs inside the MCP transport layer, not this
   // React tree - subscribe to its emitter to render each snapshot as a new
@@ -799,9 +828,10 @@ const CliChat: FC<CliChatProps> = ({
 
       await clearTerminal();
       setConversationItems(items);
-      void getContextUsage(convId).then(setContextUsage);
+      void getContextUsage(convId).then(setContextUsageIfPresent);
+      void getConsumedCredits().then(setConsumedCreditsIfPresent);
     },
-    [selectedAgent]
+    [selectedAgent, setContextUsageIfPresent, setConsumedCreditsIfPresent]
   );
 
   const resumeConversation = useCallback(async () => {
@@ -1026,9 +1056,15 @@ const CliChat: FC<CliChatProps> = ({
 
       await clearTerminal();
       setConversationItems(items);
-      void getContextUsage(conversationId).then(setContextUsage);
+      void getContextUsage(conversationId).then(setContextUsageIfPresent);
+      void getConsumedCredits().then(setConsumedCreditsIfPresent);
     })();
-  }, [conversationId, selectedAgent]);
+  }, [
+    conversationId,
+    selectedAgent,
+    setContextUsageIfPresent,
+    setConsumedCreditsIfPresent,
+  ]);
 
   useEffect(() => {
     autoAcceptEditsRef.current = autoAcceptEdits;
@@ -1244,9 +1280,10 @@ const CliChat: FC<CliChatProps> = ({
       };
 
       // Same closure-scoping reason as above.
-      const refreshContextUsage = (): void => {
+      const refreshUsageStats = (): void => {
         if (conversation) {
-          void getContextUsage(conversation.sId).then(setContextUsage);
+          void getContextUsage(conversation.sId).then(setContextUsageIfPresent);
+          void getConsumedCredits().then(setConsumedCreditsIfPresent);
         }
       };
 
@@ -1432,7 +1469,10 @@ const CliChat: FC<CliChatProps> = ({
             setError(null);
             setStreamingContentPreview([]);
             pushFinalContentToConversationItems();
-            void getContextUsage(conversation.sId).then(setContextUsage);
+            void getContextUsage(conversation.sId).then(
+              setContextUsageIfPresent
+            );
+            void getConsumedCredits().then(setConsumedCreditsIfPresent);
             void appendTranscriptEntry(conversation.sId, {
               role: "agent",
               text: contentRef.current,
@@ -1506,7 +1546,7 @@ const CliChat: FC<CliChatProps> = ({
           setStreamingContentPreview([]);
           contentRef.current = recoveredText;
           pushFinalContentToConversationItems();
-          refreshContextUsage();
+          refreshUsageStats();
           appendRecoveredAgentTranscriptEntry(recoveredText);
           contentRef.current = "";
           setIsProcessingQuestion(false);

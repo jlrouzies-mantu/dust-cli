@@ -2,7 +2,13 @@ import AuthService from "./authService.js";
 import { getApiDomain } from "./dustClient.js";
 import TokenStorage from "./tokenStorage.js";
 
-async function fetchConsumedCredits(): Promise<number | null> {
+export interface CreditsUsage {
+  consumed: number;
+  // null when the workspace has no spend limit configured.
+  limit: number | null;
+}
+
+async function fetchConsumedCredits(): Promise<CreditsUsage | null> {
   const accessTokenRes = await AuthService.getValidAccessToken();
   if (accessTokenRes.isErr() || !accessTokenRes.value) {
     return null;
@@ -28,11 +34,21 @@ async function fetchConsumedCredits(): Promise<number | null> {
   }
 
   const data = (await res.json()) as {
-    member?: { consumedAwuCredits?: unknown };
+    member?: {
+      consumedAwuCredits?: unknown;
+      spendLimitAwuCredits?: unknown;
+    };
   };
-  return typeof data.member?.consumedAwuCredits === "number"
-    ? data.member.consumedAwuCredits
-    : null;
+  if (typeof data.member?.consumedAwuCredits !== "number") {
+    return null;
+  }
+  return {
+    consumed: data.member.consumedAwuCredits,
+    limit:
+      typeof data.member.spendLimitAwuCredits === "number"
+        ? data.member.spendLimitAwuCredits
+        : null,
+  };
 }
 
 /**
@@ -51,7 +67,7 @@ async function fetchConsumedCredits(): Promise<number | null> {
  * always returns null (never throws) so this can't affect the rest of the
  * app.
  */
-export async function getConsumedCredits(): Promise<number | null> {
+export async function getConsumedCredits(): Promise<CreditsUsage | null> {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const result = await fetchConsumedCredits();

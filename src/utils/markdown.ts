@@ -9,7 +9,23 @@ function ensureConfigured(): void {
   if (configured) {
     return;
   }
-  marked.use(markedTerminal());
+  marked.use(
+    markedTerminal(
+      {},
+      // cli-highlight's default theme uses chalk.blue for keyword/literal/
+      // class/name tokens (e.g. Python's "def") - a dark ANSI blue that's
+      // low-contrast against a dark code-block background. blueBright is
+      // still recognizably blue but actually readable.
+      {
+        theme: {
+          keyword: chalk.blueBright,
+          literal: chalk.blueBright,
+          class: chalk.blueBright,
+          name: chalk.blueBright,
+        },
+      }
+    )
+  );
   // marked-terminal@7.3.0's heading renderer doesn't apply (confirmed even
   // with their own README example: "# Hello" is left completely untouched,
   // the "#" never gets stripped) — stacking this override on top fixes it

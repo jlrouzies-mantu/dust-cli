@@ -15,6 +15,7 @@ import React, {
 import type { TodoItem } from "../../mcp/tools/todoWrite.js";
 import { CODE_BLOCK_BG, MANTU_GOLD, MANTU_PURPLE } from "../../utils/brand.js";
 import type { ContextUsage } from "../../utils/contextUsage.js";
+import type { CreditsUsage } from "../../utils/creditsInfo.js";
 import type { MarkdownSegment } from "../../utils/markdown.js";
 import { formatFileSize, isImageFile } from "../../utils/fileHandling.js";
 import { getGitBranch } from "../../utils/gitInfo.js";
@@ -31,6 +32,13 @@ import { ThinkingIcon } from "./ThinkingIcon.js";
 
 function formatTokenCount(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
+function formatPercent(used: number, total: number): string {
+  if (total <= 0) {
+    return "0";
+  }
+  return ((used / total) * 100).toFixed(0);
 }
 
 export type ConversationItem = { key: string } & (
@@ -99,7 +107,7 @@ interface ConversationProps {
   showExitHint: boolean;
   agentName: string | null;
   workspaceName: string | null;
-  consumedCredits: number | null;
+  consumedCredits: CreditsUsage | null;
   contextUsage: ContextUsage | null;
   userInput: string;
   cursorPosition: number;
@@ -159,7 +167,7 @@ const _Conversation: FC<ConversationProps> = ({
   }, []);
 
   return (
-    <Box flexDirection="column" height="100%">
+    <Box flexDirection="column">
       <Static items={conversationItems}>
         {(item) => {
           return (
@@ -305,7 +313,12 @@ const _Conversation: FC<ConversationProps> = ({
               </Text>
               <Text color={MANTU_PURPLE}>
                 {formatTokenCount(contextUsage.contextUsage)}/
-                {formatTokenCount(contextUsage.contextSize)} tokens
+                {formatTokenCount(contextUsage.contextSize)} (
+                {formatPercent(
+                  contextUsage.contextUsage,
+                  contextUsage.contextSize
+                )}
+                %) context
               </Text>
             </>
           )}
@@ -315,7 +328,17 @@ const _Conversation: FC<ConversationProps> = ({
                 {" "}
                 ·{" "}
               </Text>
-              <Text color={MANTU_GOLD}>{consumedCredits} credits used</Text>
+              <Text color={MANTU_GOLD}>
+                {consumedCredits.consumed}
+                {consumedCredits.limit !== null &&
+                  `/${consumedCredits.limit}`}
+                {consumedCredits.limit !== null &&
+                  ` (${formatPercent(
+                    consumedCredits.consumed,
+                    consumedCredits.limit
+                  )}%)`}{" "}
+                credits used
+              </Text>
             </>
           )}
         </Text>

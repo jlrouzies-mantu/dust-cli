@@ -63,6 +63,7 @@ interface ConversationProps {
   isProcessingQuestion: boolean;
   actionStatus: string | null;
   thinkingPreview: string;
+  streamingContentPreview: string;
   userInput: string;
   cursorPosition: number;
   mentionPrefix: string;
@@ -88,6 +89,7 @@ const _Conversation: FC<ConversationProps> = ({
   isProcessingQuestion,
   actionStatus,
   thinkingPreview,
+  streamingContentPreview,
   userInput,
   cursorPosition,
   mentionPrefix,
@@ -115,11 +117,21 @@ const _Conversation: FC<ConversationProps> = ({
         }}
       </Static>
 
+      {isProcessingQuestion && streamingContentPreview && (
+        <Box flexDirection="column" marginLeft={2}>
+          <Text>{streamingContentPreview}</Text>
+        </Box>
+      )}
+
       {isProcessingQuestion && (
         <Box marginTop={1}>
           {actionStatus ? (
             <Text color="yellow">
               {actionStatus}
+              <Spinner type="simpleDots" />
+            </Text>
+          ) : streamingContentPreview ? (
+            <Text color="green">
               <Spinner type="simpleDots" />
             </Text>
           ) : (
@@ -166,7 +178,7 @@ const _Conversation: FC<ConversationProps> = ({
       {!showCommandSelector && !inlineSelector && (
         <Box marginTop={0} paddingLeft={1}>
           <Text dimColor>
-            ↵ to send · \↵ for new line · ESC to clear
+            ↵ to send · \↵ for new line · Ctrl+W delete word · ESC to clear
             {conversationId && " · Ctrl+G to open in browser"}
           </Text>
         </Box>

@@ -27,6 +27,7 @@ import {
 } from "../../utils/fileHandling.js";
 import { useAgents } from "../../utils/hooks/use_agents.js";
 import { useMe } from "../../utils/hooks/use_me.js";
+import { renderMarkdown } from "../../utils/markdown.js";
 import { clearTerminal } from "../../utils/terminal.js";
 import { toolsCache } from "../../utils/toolsCache.js";
 import { appendTranscriptEntry } from "../../utils/transcriptStore.js";
@@ -187,6 +188,7 @@ const CliChat: FC<CliChatProps> = ({
   );
   const [actionStatus, setActionStatus] = useState<string | null>(null);
   const [thinkingPreview, setThinkingPreview] = useState("");
+  const [streamingContentPreview, setStreamingContentPreview] = useState("");
   const updateIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const contentRef = useRef<string>("");
   const chainOfThoughtRef = useRef<string>("");
@@ -1029,6 +1031,7 @@ const CliChat: FC<CliChatProps> = ({
 
       setIsProcessingQuestion(true);
       setThinkingPreview("");
+      setStreamingContentPreview("");
       const controller = new AbortController();
       setAbortController(controller);
 
@@ -1051,23 +1054,26 @@ const CliChat: FC<CliChatProps> = ({
 
       // Hoisted out of the try block below so the crash-recovery path in
       // the catch block can also use it to render a recovered answer.
-      const pushFullLinesToConversationItems = (isStreaming: boolean) => {
-        // If isStreaming is true, we only consider lines are full up to the penultimate line,
-        // as we have no guarantee the last line is complete.
-        // If isStreaming is false, we consider all lines to be complete.
-        //
-        // Chain-of-thought is intentionally not included here: it's shown as
-        // a transient "Thinking…" status (see thinkingPreview state) rather
-        // than being permanently written to scrollback, matching how
-        // Claude Code/Cursor/Kimi Code hide raw reasoning by default.
-        const contentLines = contentRef.current.split("\n");
+      //
+      // Content is only ever committed to the permanent (Ink <Static>,
+      // append-only) conversationItems list once, when the agent message
+      // is complete — never incrementally while streaming. Static items
+      // can't be edited after the fact, and markdown constructs like code
+      // fences only render correctly once the full text is known, so
+      // partial markdown is shown separately via the transient
+      // streamingContentPreview state instead (see the interval below).
+      //
+      // Chain-of-thought is intentionally not included here either: it's
+      // shown as a transient "Thinking…" status (see thinkingPreview
+      // state) rather than being permanently written to scrollback,
+      // matching how Claude Code/Cursor/Kimi Code hide raw reasoning by
+      // default.
+      const pushFinalContentToConversationItems = () => {
+        const renderedLines = renderMarkdown(contentRef.current || " ").split(
+          "\n"
+        );
 
         setConversationItems((prev) => {
-          // Remove leading empty lines
-          while (contentLines.length > 0 && contentLines[0] === "") {
-            contentLines.shift();
-          }
-
           const lastAgentMessageHeader = getLastConversationItem<
             ConversationItem & { type: "agent_message_header" }
           >(prev, "agent_message_header");
@@ -1078,34 +1084,26 @@ const CliChat: FC<CliChatProps> = ({
 
           const agentMessageIndex = lastAgentMessageHeader.index;
 
-          const prevIds = new Set(prev.map((item) => item.key));
+          const contentItems = renderedLines.map(
+            (line, index) =>
+              ({
+                key: `agent_message_content_line_${agentMessageIndex}__${index}`,
+                type: "agent_message_content_line",
+                text: line || " ",
+                index,
+              }) satisfies ConversationItem & {
+                type: "agent_message_content_line";
+              }
+          );
 
-          const contentItems = contentLines
-            .map(
-              (line, index) =>
-                ({
-                  key: `agent_message_content_line_${agentMessageIndex}__${index}`,
-                  type: "agent_message_content_line",
-                  text: line || " ",
-                  index,
-                }) satisfies ConversationItem & {
-                  type: "agent_message_content_line";
-                }
-            )
-            .filter((item) => !prevIds.has(item.key))
-            .slice(0, isStreaming ? -1 : undefined);
-
-          const newItems = [...prev, ...contentItems];
-
-          // If we are done streaming, we insert a separator below the completed agent message.
-          if (!isStreaming) {
-            newItems.push({
+          return [
+            ...prev,
+            ...contentItems,
+            {
               key: `end_of_agent_message_separator_${agentMessageIndex}`,
               type: "separator",
-            });
-          }
-
-          return newItems;
+            },
+          ];
         });
       };
 
@@ -1305,8 +1303,8 @@ const CliChat: FC<CliChatProps> = ({
         }
 
         updateIntervalRef.current = setInterval(() => {
-          pushFullLinesToConversationItems(true);
           updateThinkingPreview();
+          setStreamingContentPreview(renderMarkdown(contentRef.current));
         }, 1000);
 
         for await (const event of streamRes.value.eventStream) {
@@ -1327,11 +1325,11 @@ const CliChat: FC<CliChatProps> = ({
             }
             setActionStatus(null);
             setError(null);
-            pushFullLinesToConversationItems(false);
             chainOfThoughtRef.current = "";
             setThinkingPreview("");
+            setStreamingContentPreview("");
             contentRef.current = contentRef.current || "[Cancelled]";
-            pushFullLinesToConversationItems(false);
+            pushFinalContentToConversationItems();
             contentRef.current = "";
             break;
           } else if (event.type === "agent_message_success") {
@@ -1340,7 +1338,8 @@ const CliChat: FC<CliChatProps> = ({
             }
             setActionStatus(null);
             setError(null);
-            pushFullLinesToConversationItems(false);
+            setStreamingContentPreview("");
+            pushFinalContentToConversationItems();
             void appendTranscriptEntry(conversation.sId, {
               role: "agent",
               text: contentRef.current,
@@ -1394,6 +1393,7 @@ const CliChat: FC<CliChatProps> = ({
 
           chainOfThoughtRef.current = "";
           setThinkingPreview("");
+          setStreamingContentPreview("");
           contentRef.current = "";
 
           setIsProcessingQuestion(false);
@@ -1410,8 +1410,9 @@ const CliChat: FC<CliChatProps> = ({
           setError(null);
           chainOfThoughtRef.current = "";
           setThinkingPreview("");
+          setStreamingContentPreview("");
           contentRef.current = recoveredText;
-          pushFullLinesToConversationItems(false);
+          pushFinalContentToConversationItems();
           appendRecoveredAgentTranscriptEntry(recoveredText);
           contentRef.current = "";
           setIsProcessingQuestion(false);
@@ -2157,6 +2158,7 @@ const CliChat: FC<CliChatProps> = ({
         isProcessingQuestion={isProcessingQuestion}
         actionStatus={actionStatus}
         thinkingPreview={thinkingPreview}
+        streamingContentPreview={streamingContentPreview}
         userInput={inlineSelector ? inlineSelector.query : userInput}
         cursorPosition={
           inlineSelector ? inlineSelector.query.length : cursorPosition

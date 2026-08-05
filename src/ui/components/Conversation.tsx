@@ -142,6 +142,7 @@ const _Conversation: FC<ConversationProps> = ({
             <Box
               key={`streaming_code_${index}`}
               flexDirection="column"
+              alignSelf="flex-start"
               marginLeft={2}
               marginBottom={1}
               paddingX={1}
@@ -384,6 +385,7 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
       return (
         <Box
           flexDirection="column"
+          alignSelf="flex-start"
           marginLeft={2}
           marginBottom={1}
           paddingX={1}

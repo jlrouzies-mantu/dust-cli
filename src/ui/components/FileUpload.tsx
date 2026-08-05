@@ -134,7 +134,7 @@ export const FileUpload: FC<FileUploadProps> = ({
 
   return (
     <Box flexDirection="column" marginY={1}>
-      <Box borderStyle="round" borderColor="blue" padding={1}>
+      <Box borderStyle="classic" borderColor="blue" padding={1}>
         <Box flexDirection="column">
           <Text color="blue" bold>
             📁 Uploading {files.length} file{files.length > 1 ? "s" : ""}

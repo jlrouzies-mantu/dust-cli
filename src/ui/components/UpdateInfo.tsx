@@ -53,7 +53,7 @@ const UpdateInfo: FC<UpdateInfoProps> = ({ onComplete }) => {
       <Box
         flexDirection="column"
         paddingY={1}
-        borderStyle="round"
+        borderStyle="classic"
         borderColor="cyan"
       >
         <Box paddingX={2}>

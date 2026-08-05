@@ -57,7 +57,7 @@ const Conversations: FC = () => {
   if (error) {
     return (
       <Box flexDirection="column">
-        <Box borderStyle="round" borderColor="red" padding={1}>
+        <Box borderStyle="classic" borderColor="red" padding={1}>
           <Text color="red">{error}</Text>
         </Box>
       </Box>

@@ -82,6 +82,8 @@ interface ConversationProps {
   thinkingPreview: string;
   streamingContentPreview: MarkdownSegment[];
   showExitHint: boolean;
+  agentName: string | null;
+  workspaceName: string | null;
   userInput: string;
   cursorPosition: number;
   mentionPrefix: string;
@@ -109,6 +111,8 @@ const _Conversation: FC<ConversationProps> = ({
   thinkingPreview,
   streamingContentPreview,
   showExitHint,
+  agentName,
+  workspaceName,
   userInput,
   cursorPosition,
   mentionPrefix,
@@ -122,6 +126,19 @@ const _Conversation: FC<ConversationProps> = ({
   autoAcceptEdits,
   inlineSelector,
 }: ConversationProps) => {
+  // Computed once per mount (not per keystroke) — getGitBranch spawns a
+  // subprocess, which would otherwise run on every render since this
+  // component re-renders on every keystroke.
+  const { displayPath, gitBranch } = useMemo(() => {
+    const cwd = process.cwd();
+    const home = process.env.HOME || "";
+    return {
+      displayPath:
+        home && cwd.startsWith(home) ? "~" + cwd.slice(home.length) : cwd,
+      gitBranch: getGitBranch(cwd),
+    };
+  }, []);
+
   return (
     <Box flexDirection="column" height="100%">
       <Static items={conversationItems}>
@@ -146,7 +163,7 @@ const _Conversation: FC<ConversationProps> = ({
               marginLeft={2}
               marginBottom={1}
               paddingX={1}
-              borderStyle="round"
+              borderStyle="classic"
               borderColor="gray"
             >
               <Text backgroundColor="black">{segment.content}</Text>
@@ -218,12 +235,21 @@ const _Conversation: FC<ConversationProps> = ({
       {!showCommandSelector && !inlineSelector && (
         <Box marginTop={0} paddingLeft={1}>
           <Text dimColor>
-            Enter to send · Ctrl+Enter or \+Enter for new line · Ctrl+W
+            Enter to send · Ctrl+Enter or Shift+Enter for new line · Ctrl+W
             delete word · ESC to clear
             {conversationId && " · Ctrl+G to open in browser"}
           </Text>
         </Box>
       )}
+      <Box paddingLeft={1}>
+        <Text dimColor>
+          {workspaceName && `${workspaceName} · `}
+          {agentName && `@${agentName} · `}
+          {displayPath}
+          {gitBranch && ` · ${gitBranch}`}
+          {conversationId && ` · ${conversationId.slice(0, 8)}`}
+        </Text>
+      </Box>
     </Box>
   );
 };
@@ -340,7 +366,7 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
     case "user_message_attachments":
       return (
         <Box flexDirection="column" marginLeft={2} marginBottom={1}>
-          <Box borderStyle="round" borderColor="gray" padding={1}>
+          <Box borderStyle="classic" borderColor="gray" padding={1}>
             <Box flexDirection="column">
               <Text color="gray" bold>
                 📎 {item.attachments.length} attachment
@@ -389,7 +415,7 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
           marginLeft={2}
           marginBottom={1}
           paddingX={1}
-          borderStyle="round"
+          borderStyle="classic"
           borderColor="gray"
         >
           <Text backgroundColor="black">{item.text}</Text>

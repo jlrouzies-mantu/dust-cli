@@ -202,6 +202,7 @@ const CliChat: FC<CliChatProps> = ({
     MarkdownSegment[]
   >([]);
   const [showExitHint, setShowExitHint] = useState(false);
+  const [workspaceName, setWorkspaceName] = useState<string | null>(null);
   const updateIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const contentRef = useRef<string>("");
   const chainOfThoughtRef = useRef<string>("");
@@ -219,6 +220,20 @@ const CliChat: FC<CliChatProps> = ({
   const { exit } = useApp();
 
   const { me, isLoading: isMeLoading, error: meError } = useMe();
+
+  // Resolve the active workspace's name for the persistent status bar.
+  useEffect(() => {
+    if (!me || workspaceName) {
+      return;
+    }
+    void (async () => {
+      const workspaceId = await AuthService.getSelectedWorkspaceId();
+      const workspace = me.workspaces.find((w) => w.sId === workspaceId);
+      if (workspace) {
+        setWorkspaceName(workspace.name);
+      }
+    })();
+  }, [me, workspaceName]);
 
   // Import useAgents hook for agent search functionality
   const {
@@ -697,7 +712,7 @@ const CliChat: FC<CliChatProps> = ({
   const showHelp = useCallback(() => {
     const helpText =
       "Commands: /help /switch /new /resume /attach /clear-files /auto /exit\n" +
-      "Shortcuts: Enter=send · Ctrl+Enter/\\Enter=newline · Ctrl+W=delete word · Esc=clear/cancel · Ctrl+G=browser";
+      "Shortcuts: Enter=send · Ctrl+Enter/Shift+Enter=newline · Ctrl+W=delete word · Esc=clear/cancel · Ctrl+G=browser";
     const lines = helpText.split("\n");
     setConversationItems((prev) => [
       ...prev,
@@ -1773,34 +1788,21 @@ const CliChat: FC<CliChatProps> = ({
       return;
     }
 
-    // Check for Ctrl+Enter or backslash + Enter to add new line, or regular
+    // Check for Ctrl+Enter or Shift+Enter to add a new line, or regular
     // Enter to submit
     if (key.return && !isInCommandMode) {
-      // Ctrl+Enter: insert a literal newline directly. Whether the
-      // terminal actually reports Enter with the ctrl modifier set
+      // Ctrl+Enter / Shift+Enter: insert a literal newline directly.
+      // Whether the terminal actually reports Enter with a modifier held
       // (rather than being indistinguishable from plain Enter) is
-      // terminal-dependent, so \+Enter below remains as a fallback that's
-      // guaranteed to work everywhere.
-      if (key.ctrl) {
+      // terminal-dependent — if neither is detected here, that's the
+      // terminal not reporting it, not a bug in this check.
+      if (key.ctrl || key.shift) {
         const newInput =
           userInput.slice(0, cursorPosition) +
           "\n" +
           userInput.slice(cursorPosition);
         setUserInput(newInput);
         setCursorPosition(cursorPosition + 1);
-        return;
-      }
-
-      // Check if the previous character is a backslash for multi-line input
-      if (cursorPosition > 0 && userInput[cursorPosition - 1] === "\\") {
-        // Remove the backslash and add a newline
-        const newInput =
-          userInput.slice(0, cursorPosition - 1) +
-          "\n" +
-          userInput.slice(cursorPosition);
-        setUserInput(newInput);
-        // Position cursor right after the newline character
-        setCursorPosition(cursorPosition); // Same position (we replaced \ with \n, both length 1)
         return;
       }
 
@@ -2131,7 +2133,7 @@ const CliChat: FC<CliChatProps> = ({
       <Box flexDirection="column" height="100%">
         <Box flexDirection="column" flexGrow={1}>
           <Box marginY={1}>
-            <Box borderStyle="round" borderColor="red" padding={1}>
+            <Box borderStyle="classic" borderColor="red" padding={1}>
               <Text>{error || agentsError}</Text>
             </Box>
           </Box>
@@ -2194,7 +2196,7 @@ const CliChat: FC<CliChatProps> = ({
       {/* Display uploaded files ready to be sent */}
       {uploadedFiles.length > 0 && !isUploadingFiles && (
         <Box flexDirection="column" marginY={1}>
-          <Box borderStyle="round" borderColor="green" padding={1}>
+          <Box borderStyle="classic" borderColor="green" padding={1}>
             <Box flexDirection="column">
               <Text color="green" bold>
                 📁 {uploadedFiles.length} file
@@ -2230,6 +2232,8 @@ const CliChat: FC<CliChatProps> = ({
         thinkingPreview={thinkingPreview}
         streamingContentPreview={streamingContentPreview}
         showExitHint={showExitHint}
+        agentName={selectedAgent?.name ?? null}
+        workspaceName={workspaceName}
         userInput={inlineSelector ? inlineSelector.query : userInput}
         cursorPosition={
           inlineSelector ? inlineSelector.query.length : cursorPosition

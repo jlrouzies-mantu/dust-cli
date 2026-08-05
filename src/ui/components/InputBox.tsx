@@ -42,7 +42,7 @@ export function InputBox({
   return (
     <Box flexDirection="column" marginTop={0} paddingTop={0}>
       <Box
-        borderStyle="round"
+        borderStyle="classic"
         borderColor="gray"
         padding={0}
         paddingX={1}

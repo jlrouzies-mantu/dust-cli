@@ -220,7 +220,7 @@ export const Select = <T extends BaseItem>({
         <Box
           flexDirection="column"
           marginTop={1}
-          borderStyle="round"
+          borderStyle="classic"
           paddingX={1}
         >
           <Text bold>Selected:</Text>

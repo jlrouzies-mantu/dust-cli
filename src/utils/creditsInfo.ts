@@ -27,9 +27,11 @@ async function fetchConsumedCredits(): Promise<number | null> {
     return null;
   }
 
-  const data = (await res.json()) as { consumedAwuCredits?: unknown };
-  return typeof data.consumedAwuCredits === "number"
-    ? data.consumedAwuCredits
+  const data = (await res.json()) as {
+    member?: { consumedAwuCredits?: unknown };
+  };
+  return typeof data.member?.consumedAwuCredits === "number"
+    ? data.member.consumedAwuCredits
     : null;
 }
 

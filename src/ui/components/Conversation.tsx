@@ -13,7 +13,7 @@ import React, {
 } from "react";
 
 import type { TodoItem } from "../../mcp/tools/todoWrite.js";
-import { MANTU_GOLD, MANTU_PURPLE } from "../../utils/brand.js";
+import { CODE_BLOCK_BG, MANTU_GOLD, MANTU_PURPLE } from "../../utils/brand.js";
 import type { ContextUsage } from "../../utils/contextUsage.js";
 import type { MarkdownSegment } from "../../utils/markdown.js";
 import { formatFileSize, isImageFile } from "../../utils/fileHandling.js";
@@ -185,7 +185,7 @@ const _Conversation: FC<ConversationProps> = ({
               borderStyle="classic"
               borderColor="gray"
             >
-              <Text backgroundColor="black">{segment.content}</Text>
+              <Text backgroundColor={CODE_BLOCK_BG}>{segment.content}</Text>
             </Box>
           ) : (
             <Box key={`streaming_text_${index}`} marginLeft={2}>
@@ -199,10 +199,6 @@ const _Conversation: FC<ConversationProps> = ({
           {actionStatus ? (
             <Text color="yellow">
               {actionStatus}
-              <Spinner type="simpleDots" />
-            </Text>
-          ) : streamingContentPreview ? (
-            <Text color="green">
               <Spinner type="simpleDots" />
             </Text>
           ) : (
@@ -492,7 +488,7 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
           borderStyle="classic"
           borderColor="gray"
         >
-          <Text backgroundColor="black">{item.text}</Text>
+          <Text backgroundColor={CODE_BLOCK_BG}>{item.text}</Text>
         </Box>
       );
     case "agent_message_cancelled":

@@ -35,22 +35,6 @@
 
 This fork exists to fix a specific, reproducible set of problems the official CLI has on Windows consoles without full VT/Unicode support (legacy `conhost`, PowerShell 5) — bad paste handling, unrecoverable crashes, no persistence — plus a set of UX upgrades. Auth, agent listing, and non-interactive mode are otherwise untouched.
 
-### 🐛 Fixed
-
-| Issue | Root cause |
-|---|---|
-| Multi-line paste corrupted the input / submitted early | Pasted text arrives as individual keystrokes (not one batched event) on terminals without bracketed-paste support; each embedded newline was hitting the same code path as a real Enter press |
-| Ctrl+Backspace did nothing; no Ctrl+Left/Right word-jump | Ctrl+Backspace was simply never implemented upstream. Word-jump only existed via `Meta+B`/`Meta+F` (the Mac convention) — Windows/Linux users had no working shortcut at all |
-| Any transient stream error showed a fatal, unrecoverable "Agent error" | The stream consumer never checked whether the answer had actually completed server-side before giving up |
-| Agent list / MCP registration / user-info fetches failed permanently on a single transient hiccup | No retry logic anywhere — the first error (even a passing gateway blip) went straight to the user |
-| `--resume` wiped the user's entire terminal scrollback | `clearTerminal()` sent `\x1b[3J`, which erases the terminal's *scrollback buffer* — not just the visible screen |
-| Several UI glyphs rendered as garbage or misaligned boxes | `↵`, `…`, `↑`/`↓`, `→`, and every `borderStyle="round"` box border are Unicode code points this console's font doesn't cover |
-| Code blocks rendered with a border stretching across the whole terminal, and a patchy background | Ink/Yoga's default column-flex stretches boxes to the parent's full width unless `alignSelf` is set; `Text`'s `backgroundColor` only paints behind actual characters, so shorter lines need explicit padding |
-| Markdown headings (`# Title`) were never rendered — the `#` stayed literal | Confirmed upstream bug in `marked-terminal@7.3.0`'s heading renderer, reproducible with their own README example verbatim |
-| `getConversation` crashed with a wall of `ZodError`s on some real conversations | `@dust-tt/client@1.2.6`'s response schema didn't expect an `agent_message` in a slot a generated-file response used — fixed by upgrading to `1.2.8` |
-| `npm run build` failed out of the box on Windows | The build scripts use bash-style `NODE_ENV=x cmd` syntax |
-| The app crashed on startup | The update-checker queried the npm registry for a package (`dustw`) that isn't published there |
-
 ### ✨ Added
 
 | Feature | Notes |
@@ -67,6 +51,20 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 | Mantu-branded header | Full-width separator, "MANTU FORK" + "Initiated by: Jean-Laurent" in brand colors |
 | `todo_write` tool | A Claude-Code-style persistent task checklist tool (`--with-tools` only), rendered as a boxed checklist snapshot each time the agent updates it |
 | Dust directive handling | Custom Dust-only markdown directives (e.g. `:preview_file{...}`, rendered as an interactive widget on the web app) are replaced with a readable placeholder instead of leaking raw syntax |
+
+### 🐛 Fixed
+
+| Issue | Root cause |
+|---|---|
+| Multi-line paste corrupted the input / submitted early | Pasted text arrives as individual keystrokes (not one batched event) on terminals without bracketed-paste support; each embedded newline was hitting the same code path as a real Enter press |
+| Ctrl+Backspace did nothing; no Ctrl+Left/Right word-jump | Ctrl+Backspace was simply never implemented upstream. Word-jump only existed via `Meta+B`/`Meta+F` (the Mac convention) — Windows/Linux users had no working shortcut at all |
+| Any transient stream error showed a fatal, unrecoverable "Agent error" | The stream consumer never checked whether the answer had actually completed server-side before giving up |
+| Agent list / MCP registration / user-info fetches failed permanently on a single transient hiccup | No retry logic anywhere — the first error (even a passing gateway blip) went straight to the user |
+| `--resume` wiped the user's entire terminal scrollback | `clearTerminal()` sent `\x1b[3J`, which erases the terminal's *scrollback buffer* — not just the visible screen |
+| Several UI glyphs rendered as garbage or misaligned boxes | `↵`, `…`, `↑`/`↓`, `→`, and every `borderStyle="round"` box border are Unicode code points this console's font doesn't cover |
+| Code blocks rendered with a border stretching across the whole terminal, and a patchy background | Ink/Yoga's default column-flex stretches boxes to the parent's full width unless `alignSelf` is set; `Text`'s `backgroundColor` only paints behind actual characters, so shorter lines need explicit padding |
+| Markdown headings (`# Title`) were never rendered — the `#` stayed literal | Confirmed upstream bug in `marked-terminal@7.3.0`'s heading renderer, reproducible with their own README example verbatim |
+| `npm run build` failed out of the box on Windows | The build scripts use bash-style `NODE_ENV=x cmd` syntax |
 
 ### 🔧 Changed
 

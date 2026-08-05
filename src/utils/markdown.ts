@@ -20,6 +20,20 @@ function ensureConfigured(): void {
         const text = this.parser.parseInline(token.tokens);
         return `${chalk.bold.underline(text)}\n\n`;
       },
+      // Same marked-terminal@7.3.0/marked@15 incompatibility as the heading
+      // fix above, but for inline formatting inside "tight" contexts (list
+      // items, and any other spot marked's lexer emits a bare "text" token
+      // instead of a "paragraph"): marked-terminal's text() renderer reads
+      // token.text directly instead of parsing token.tokens, so bold/italic/
+      // etc. inside a list item leaked as literal "**...**" instead of being
+      // rendered. Confirmed directly against marked-terminal's own renderer
+      // with "- **bold** item".
+      text(token: Tokens.Text | Tokens.Escape) {
+        if ("tokens" in token && token.tokens?.length) {
+          return this.parser.parseInline(token.tokens);
+        }
+        return token.text;
+      },
     },
   });
   configured = true;

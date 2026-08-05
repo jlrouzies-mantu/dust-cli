@@ -26,6 +26,7 @@ import type { UploadedFile } from "./FileUpload.js";
 import type { InlineSelectorItem } from "./InlineSelector.js";
 import { InlineSelector } from "./InlineSelector.js";
 import { InputBox } from "./InputBox.js";
+import { ThinkingIcon } from "./ThinkingIcon.js";
 
 function formatTokenCount(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
@@ -197,7 +198,7 @@ const _Conversation: FC<ConversationProps> = ({
             </Text>
           ) : (
             <Text color="green">
-              Thinking
+              <ThinkingIcon /> Thinking
               <Spinner type="simpleDots" />
               {thinkingPreview && (
                 <Text dimColor italic>

@@ -1,4 +1,5 @@
-import type { Token } from "marked";
+import chalk from "chalk";
+import type { Token, Tokens } from "marked";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
 
@@ -9,6 +10,18 @@ function ensureConfigured(): void {
     return;
   }
   marked.use(markedTerminal());
+  // marked-terminal@7.3.0's heading renderer doesn't apply (confirmed even
+  // with their own README example: "# Hello" is left completely untouched,
+  // the "#" never gets stripped) — stacking this override on top fixes it
+  // without needing to patch node_modules or pin an older marked-terminal.
+  marked.use({
+    renderer: {
+      heading(token: Tokens.Heading) {
+        const text = this.parser.parseInline(token.tokens);
+        return `${chalk.bold.underline(text)}\n\n`;
+      },
+    },
+  });
   configured = true;
 }
 

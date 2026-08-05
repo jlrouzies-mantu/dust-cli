@@ -36,6 +36,12 @@ Thumbs.db
 # Optional eslint cache
 .eslintcache
 
-# Debugging screenshots dropped in the repo root (may contain personal info)
+# Debugging screenshots/network captures dropped in the repo root (may
+# contain personal info, session data, etc.)
 /*.PNG
 /*.png
+*.har
+har*.json
+
+# Editor scratch files sometimes left behind mid-session
+/scratch-*

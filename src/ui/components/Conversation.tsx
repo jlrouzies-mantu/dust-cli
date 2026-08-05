@@ -13,6 +13,7 @@ import React, {
 } from "react";
 
 import { MANTU_GOLD, MANTU_PURPLE } from "../../utils/brand.js";
+import type { ContextUsage } from "../../utils/contextUsage.js";
 import type { MarkdownSegment } from "../../utils/markdown.js";
 import { formatFileSize, isImageFile } from "../../utils/fileHandling.js";
 import { getGitBranch } from "../../utils/gitInfo.js";
@@ -25,6 +26,10 @@ import type { UploadedFile } from "./FileUpload.js";
 import type { InlineSelectorItem } from "./InlineSelector.js";
 import { InlineSelector } from "./InlineSelector.js";
 import { InputBox } from "./InputBox.js";
+
+function formatTokenCount(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
 
 export type ConversationItem = { key: string } & (
   | {
@@ -84,6 +89,8 @@ interface ConversationProps {
   showExitHint: boolean;
   agentName: string | null;
   workspaceName: string | null;
+  consumedCredits: number | null;
+  contextUsage: ContextUsage | null;
   userInput: string;
   cursorPosition: number;
   mentionPrefix: string;
@@ -113,6 +120,8 @@ const _Conversation: FC<ConversationProps> = ({
   showExitHint,
   agentName,
   workspaceName,
+  consumedCredits,
+  contextUsage,
   userInput,
   cursorPosition,
   mentionPrefix,
@@ -243,11 +252,48 @@ const _Conversation: FC<ConversationProps> = ({
       )}
       <Box paddingLeft={1}>
         <Text dimColor>
-          {workspaceName && `${workspaceName} · `}
-          {agentName && `@${agentName} · `}
-          {displayPath}
-          {gitBranch && ` · ${gitBranch}`}
-          {conversationId && ` · ${conversationId.slice(0, 8)}`}
+          {workspaceName && (
+            <>
+              <Text>{workspaceName}</Text>
+              <Text> · </Text>
+            </>
+          )}
+          {agentName && (
+            <>
+              <Text bold color={MANTU_PURPLE}>
+                @{agentName}
+              </Text>
+              <Text> · </Text>
+            </>
+          )}
+          <Text color={MANTU_GOLD}>{displayPath}</Text>
+          {gitBranch && (
+            <>
+              <Text> · </Text>
+              <Text color={MANTU_PURPLE}>{gitBranch}</Text>
+            </>
+          )}
+          {conversationId && (
+            <>
+              <Text> · </Text>
+              <Text>{conversationId.slice(0, 8)}</Text>
+            </>
+          )}
+          {contextUsage && (
+            <>
+              <Text> · </Text>
+              <Text color={MANTU_PURPLE}>
+                {formatTokenCount(contextUsage.contextUsage)}/
+                {formatTokenCount(contextUsage.contextSize)} tokens
+              </Text>
+            </>
+          )}
+          {consumedCredits !== null && (
+            <>
+              <Text> · </Text>
+              <Text color={MANTU_GOLD}>{consumedCredits} credits used</Text>
+            </>
+          )}
         </Text>
       </Box>
     </Box>

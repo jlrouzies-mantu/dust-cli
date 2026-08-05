@@ -15,6 +15,9 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import { useFileSystemServer } from "../../mcp/servers/fsServer.js";
 import AuthService from "../../utils/authService.js";
+import type { ContextUsage } from "../../utils/contextUsage.js";
+import { getContextUsage } from "../../utils/contextUsage.js";
+import { getConsumedCredits } from "../../utils/creditsInfo.js";
 import { getDustClient } from "../../utils/dustClient.js";
 import { normalizeError } from "../../utils/errors.js";
 import type { FileInfo } from "../../utils/fileHandling.js";
@@ -203,6 +206,8 @@ const CliChat: FC<CliChatProps> = ({
   >([]);
   const [showExitHint, setShowExitHint] = useState(false);
   const [workspaceName, setWorkspaceName] = useState<string | null>(null);
+  const [consumedCredits, setConsumedCredits] = useState<number | null>(null);
+  const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
   const updateIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const contentRef = useRef<string>("");
   const chainOfThoughtRef = useRef<string>("");
@@ -233,6 +238,7 @@ const CliChat: FC<CliChatProps> = ({
         setWorkspaceName(workspace.name);
       }
     })();
+    void getConsumedCredits().then(setConsumedCredits);
   }, [me, workspaceName]);
 
   // Import useAgents hook for agent search functionality
@@ -707,6 +713,7 @@ const CliChat: FC<CliChatProps> = ({
     );
     setUploadedFiles([]);
     setPendingFiles([]);
+    setContextUsage(null);
   }, [selectedAgent]);
 
   const showHelp = useCallback(() => {
@@ -765,6 +772,7 @@ const CliChat: FC<CliChatProps> = ({
 
       await clearTerminal();
       setConversationItems(items);
+      void getContextUsage(convId).then(setContextUsage);
     },
     [selectedAgent]
   );
@@ -991,6 +999,7 @@ const CliChat: FC<CliChatProps> = ({
 
       await clearTerminal();
       setConversationItems(items);
+      void getContextUsage(conversationId).then(setContextUsage);
     })();
   }, [conversationId, selectedAgent]);
 
@@ -1207,6 +1216,13 @@ const CliChat: FC<CliChatProps> = ({
         }
       };
 
+      // Same closure-scoping reason as above.
+      const refreshContextUsage = (): void => {
+        if (conversation) {
+          void getContextUsage(conversation.sId).then(setContextUsage);
+        }
+      };
+
       try {
         let createdContentFragments = [];
         // If there are files to attach, create content fragments for each
@@ -1384,6 +1400,7 @@ const CliChat: FC<CliChatProps> = ({
             setError(null);
             setStreamingContentPreview([]);
             pushFinalContentToConversationItems();
+            void getContextUsage(conversation.sId).then(setContextUsage);
             void appendTranscriptEntry(conversation.sId, {
               role: "agent",
               text: contentRef.current,
@@ -1457,6 +1474,7 @@ const CliChat: FC<CliChatProps> = ({
           setStreamingContentPreview([]);
           contentRef.current = recoveredText;
           pushFinalContentToConversationItems();
+          refreshContextUsage();
           appendRecoveredAgentTranscriptEntry(recoveredText);
           contentRef.current = "";
           setIsProcessingQuestion(false);
@@ -2234,6 +2252,8 @@ const CliChat: FC<CliChatProps> = ({
         showExitHint={showExitHint}
         agentName={selectedAgent?.name ?? null}
         workspaceName={workspaceName}
+        consumedCredits={consumedCredits}
+        contextUsage={contextUsage}
         userInput={inlineSelector ? inlineSelector.query : userInput}
         cursorPosition={
           inlineSelector ? inlineSelector.query.length : cursorPosition

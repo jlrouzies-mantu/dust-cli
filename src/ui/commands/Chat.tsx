@@ -1173,7 +1173,13 @@ const CliChat: FC<CliChatProps> = ({
       // so TypeScript's definite-assignment analysis doesn't treat this as
       // a use of `conversation` before it's assigned.
       const getConversationIdSuffix = (): string => {
-        return conversation ? ` (conversationId: ${conversation.sId})` : "";
+        if (!conversation) {
+          return "";
+        }
+        const agentFlag = selectedAgent
+          ? ` --agent "${selectedAgent.name}"`
+          : "";
+        return `\n\nTo resume this conversation, run:\ndustw${agentFlag} --resume ${conversation.sId}`;
       };
 
       // Same closure-scoping reason as above.

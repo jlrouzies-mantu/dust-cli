@@ -396,7 +396,7 @@ export async function sendNonInteractiveMessage(
     }
 
     const conversationSuffix = conversation
-      ? ` (conversationId: ${conversation.sId})`
+      ? `\n\nTo resume this conversation, run:\ndustw --agent "${selectedAgent.name}" --resume ${conversation.sId}`
       : "";
     const errorMsg = `Unexpected error: ${normalizeError(error).message}${conversationSuffix}`;
     if (setError) {

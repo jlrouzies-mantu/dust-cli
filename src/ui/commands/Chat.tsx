@@ -27,7 +27,8 @@ import {
 } from "../../utils/fileHandling.js";
 import { useAgents } from "../../utils/hooks/use_agents.js";
 import { useMe } from "../../utils/hooks/use_me.js";
-import { renderMarkdown } from "../../utils/markdown.js";
+import type { MarkdownSegment } from "../../utils/markdown.js";
+import { renderMarkdownSegments } from "../../utils/markdown.js";
 import { clearTerminal } from "../../utils/terminal.js";
 import { toolsCache } from "../../utils/toolsCache.js";
 import { appendTranscriptEntry } from "../../utils/transcriptStore.js";
@@ -100,11 +101,23 @@ function buildConversationItemsFromHistory(
           index: agentMsgIdx,
         });
         if (msg.content) {
-          items.push({
-            key: `resumed_agent_content_${agentMsgIdx}`,
-            type: "agent_message_content_block",
-            text: renderMarkdown(msg.content.trim()),
-            index: agentMsgIdx,
+          const segments = renderMarkdownSegments(msg.content.trim());
+          segments.forEach((segment, segmentIdx) => {
+            items.push(
+              segment.type === "code"
+                ? {
+                    key: `resumed_agent_code_${agentMsgIdx}_${segmentIdx}`,
+                    type: "agent_message_code_block",
+                    text: segment.content,
+                    index: agentMsgIdx,
+                  }
+                : {
+                    key: `resumed_agent_text_${agentMsgIdx}_${segmentIdx}`,
+                    type: "agent_message_text_segment",
+                    text: segment.content,
+                    index: agentMsgIdx,
+                  }
+            );
           });
         }
         items.push({
@@ -185,7 +198,9 @@ const CliChat: FC<CliChatProps> = ({
   );
   const [actionStatus, setActionStatus] = useState<string | null>(null);
   const [thinkingPreview, setThinkingPreview] = useState("");
-  const [streamingContentPreview, setStreamingContentPreview] = useState("");
+  const [streamingContentPreview, setStreamingContentPreview] = useState<
+    MarkdownSegment[]
+  >([]);
   const [showExitHint, setShowExitHint] = useState(false);
   const updateIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const contentRef = useRef<string>("");
@@ -682,7 +697,7 @@ const CliChat: FC<CliChatProps> = ({
   const showHelp = useCallback(() => {
     const helpText =
       "Commands: /help /switch /new /resume /attach /clear-files /auto /exit\n" +
-      "Shortcuts: Enter=send  Ctrl+Enter or \\Enter=newline  Ctrl+W=delete word  ESC=clear/cancel  Ctrl+G=open in browser";
+      "Shortcuts: Enter=send · Ctrl+Enter/\\Enter=newline · Ctrl+W=delete word · Esc=clear/cancel · Ctrl+G=browser";
     const lines = helpText.split("\n");
     setConversationItems((prev) => [
       ...prev,
@@ -1034,7 +1049,7 @@ const CliChat: FC<CliChatProps> = ({
 
       setIsProcessingQuestion(true);
       setThinkingPreview("");
-      setStreamingContentPreview("");
+      setStreamingContentPreview([]);
       const controller = new AbortController();
       setAbortController(controller);
 
@@ -1072,7 +1087,7 @@ const CliChat: FC<CliChatProps> = ({
       // matching how Claude Code/Cursor/Kimi Code hide raw reasoning by
       // default.
       const pushFinalContentToConversationItems = () => {
-        const rendered = renderMarkdown(contentRef.current || " ");
+        const segments = renderMarkdownSegments(contentRef.current || " ");
 
         setConversationItems((prev) => {
           const lastAgentMessageHeader = getLastConversationItem<
@@ -1085,14 +1100,26 @@ const CliChat: FC<CliChatProps> = ({
 
           const agentMessageIndex = lastAgentMessageHeader.index;
 
+          const contentItems: ConversationItem[] = segments.map(
+            (segment, segmentIdx) =>
+              segment.type === "code"
+                ? {
+                    key: `agent_message_code_${agentMessageIndex}_${segmentIdx}`,
+                    type: "agent_message_code_block",
+                    text: segment.content,
+                    index: agentMessageIndex,
+                  }
+                : {
+                    key: `agent_message_text_${agentMessageIndex}_${segmentIdx}`,
+                    type: "agent_message_text_segment",
+                    text: segment.content,
+                    index: agentMessageIndex,
+                  }
+          );
+
           return [
             ...prev,
-            {
-              key: `agent_message_content_block_${agentMessageIndex}`,
-              type: "agent_message_content_block",
-              text: rendered,
-              index: agentMessageIndex,
-            },
+            ...contentItems,
             {
               key: `end_of_agent_message_separator_${agentMessageIndex}`,
               type: "separator",
@@ -1298,7 +1325,9 @@ const CliChat: FC<CliChatProps> = ({
 
         updateIntervalRef.current = setInterval(() => {
           updateThinkingPreview();
-          setStreamingContentPreview(renderMarkdown(contentRef.current));
+          setStreamingContentPreview(
+            renderMarkdownSegments(contentRef.current)
+          );
         }, 1000);
 
         for await (const event of streamRes.value.eventStream) {
@@ -1321,7 +1350,7 @@ const CliChat: FC<CliChatProps> = ({
             setError(null);
             chainOfThoughtRef.current = "";
             setThinkingPreview("");
-            setStreamingContentPreview("");
+            setStreamingContentPreview([]);
             contentRef.current = contentRef.current || "[Cancelled]";
             pushFinalContentToConversationItems();
             contentRef.current = "";
@@ -1332,7 +1361,7 @@ const CliChat: FC<CliChatProps> = ({
             }
             setActionStatus(null);
             setError(null);
-            setStreamingContentPreview("");
+            setStreamingContentPreview([]);
             pushFinalContentToConversationItems();
             void appendTranscriptEntry(conversation.sId, {
               role: "agent",
@@ -1387,7 +1416,7 @@ const CliChat: FC<CliChatProps> = ({
 
           chainOfThoughtRef.current = "";
           setThinkingPreview("");
-          setStreamingContentPreview("");
+          setStreamingContentPreview([]);
           contentRef.current = "";
 
           setIsProcessingQuestion(false);
@@ -1404,7 +1433,7 @@ const CliChat: FC<CliChatProps> = ({
           setError(null);
           chainOfThoughtRef.current = "";
           setThinkingPreview("");
-          setStreamingContentPreview("");
+          setStreamingContentPreview([]);
           contentRef.current = recoveredText;
           pushFinalContentToConversationItems();
           appendRecoveredAgentTranscriptEntry(recoveredText);

@@ -12,8 +12,10 @@ import React, {
   useState,
 } from "react";
 
-import { MANTU_GOLD, MANTU_PURPLE, MANTU_PURPLE_DARK } from "../../utils/brand.js";
+import { MANTU_GOLD, MANTU_PURPLE } from "../../utils/brand.js";
+import type { MarkdownSegment } from "../../utils/markdown.js";
 import { formatFileSize, isImageFile } from "../../utils/fileHandling.js";
+import { getGitBranch } from "../../utils/gitInfo.js";
 import { useTerminalSize } from "../../utils/hooks/use_terminal_size.js";
 import { clearTerminal } from "../../utils/terminal.js";
 import { CLI_VERSION } from "../../utils/version.js";
@@ -52,9 +54,16 @@ export type ConversationItem = { key: string } & (
       index: number;
     }
   | {
-      // The agent's final, markdown-rendered answer, as a single item (not
-      // one per line) so it can be wrapped in one bordered box.
-      type: "agent_message_content_block";
+      // A markdown-rendered prose segment of the agent's answer (not
+      // wrapped in a border — only code segments are, see below).
+      type: "agent_message_text_segment";
+      text: string;
+      index: number;
+    }
+  | {
+      // A code-fence segment of the agent's answer, rendered on its own
+      // (not the whole message) so only the code itself gets a border.
+      type: "agent_message_code_block";
       text: string;
       index: number;
     }
@@ -71,7 +80,7 @@ interface ConversationProps {
   isProcessingQuestion: boolean;
   actionStatus: string | null;
   thinkingPreview: string;
-  streamingContentPreview: string;
+  streamingContentPreview: MarkdownSegment[];
   showExitHint: boolean;
   userInput: string;
   cursorPosition: number;
@@ -127,19 +136,26 @@ const _Conversation: FC<ConversationProps> = ({
         }}
       </Static>
 
-      {isProcessingQuestion && streamingContentPreview && (
-        <Box
-          flexDirection="column"
-          marginLeft={2}
-          paddingX={1}
-          borderStyle="round"
-          borderColor={MANTU_PURPLE}
-        >
-          <Text backgroundColor={MANTU_PURPLE_DARK}>
-            {streamingContentPreview}
-          </Text>
-        </Box>
-      )}
+      {isProcessingQuestion &&
+        streamingContentPreview.map((segment, index) =>
+          segment.type === "code" ? (
+            <Box
+              key={`streaming_code_${index}`}
+              flexDirection="column"
+              marginLeft={2}
+              marginBottom={1}
+              paddingX={1}
+              borderStyle="round"
+              borderColor="gray"
+            >
+              <Text backgroundColor="black">{segment.content}</Text>
+            </Box>
+          ) : (
+            <Box key={`streaming_text_${index}`} marginLeft={2}>
+              <Text>{segment.content}</Text>
+            </Box>
+          )
+        )}
 
       {isProcessingQuestion && (
         <Box marginTop={1}>
@@ -229,13 +245,12 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
       const home = process.env.HOME || "";
       const displayPath =
         home && cwd.startsWith(home) ? "~" + cwd.slice(home.length) : cwd;
-
-      const separatorWidth = Math.min(terminalWidth, 60);
+      const gitBranch = getGitBranch(cwd);
 
       return (
         <Box flexDirection="column">
-          <Box marginTop={1}>
-            <Text color={MANTU_GOLD}>{"_".repeat(separatorWidth)}</Text>
+          <Box marginTop={1} marginBottom={1}>
+            <Text color={MANTU_GOLD}>{"_".repeat(terminalWidth)}</Text>
           </Box>
           <Box marginBottom={1}>
             <Box flexDirection="column" marginRight={2}>
@@ -274,9 +289,10 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
               <Text bold color={MANTU_PURPLE}>
                 MANTU FORK
               </Text>
-              <Text color={MANTU_GOLD}>Author: Jean-Laurent</Text>
+              <Text color={MANTU_GOLD}>Initiated by: Jean-Laurent</Text>
               <Text dimColor>
                 Dust CLI v{CLI_VERSION} · {displayPath}
+                {gitBranch && ` · branch: ${gitBranch}`}
               </Text>
               <Text dimColor>
                 Chatting with{" "}
@@ -293,6 +309,9 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
                 Type your message below and press Enter to send.
               </Text>
             </Box>
+          </Box>
+          <Box marginBottom={1}>
+            <Text color={MANTU_GOLD}>{"_".repeat(terminalWidth)}</Text>
           </Box>
         </Box>
       );
@@ -355,7 +374,13 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
           <Text>{item.text}</Text>
         </Box>
       );
-    case "agent_message_content_block":
+    case "agent_message_text_segment":
+      return (
+        <Box marginLeft={2}>
+          <Text>{item.text}</Text>
+        </Box>
+      );
+    case "agent_message_code_block":
       return (
         <Box
           flexDirection="column"
@@ -363,9 +388,9 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
           marginBottom={1}
           paddingX={1}
           borderStyle="round"
-          borderColor={MANTU_PURPLE}
+          borderColor="gray"
         >
-          <Text backgroundColor={MANTU_PURPLE_DARK}>{item.text}</Text>
+          <Text backgroundColor="black">{item.text}</Text>
         </Box>
       );
     case "agent_message_cancelled":

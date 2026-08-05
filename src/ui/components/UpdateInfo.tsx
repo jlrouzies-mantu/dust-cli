@@ -65,7 +65,7 @@ const UpdateInfo: FC<UpdateInfoProps> = ({ onComplete }) => {
         <Box paddingX={2} marginY={1}>
           <Text>
             <Text color="yellow">{updateInfo.currentVersion}</Text>
-            <Text color="dim"> → </Text>
+            <Text color="dim"> -{">"} </Text>
             <Text color="green" bold>
               {updateInfo.latestVersion}
             </Text>

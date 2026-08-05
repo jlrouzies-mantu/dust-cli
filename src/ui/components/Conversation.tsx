@@ -12,6 +12,7 @@ import React, {
   useState,
 } from "react";
 
+import { MANTU_GOLD, MANTU_PURPLE, MANTU_PURPLE_DARK } from "../../utils/brand.js";
 import { formatFileSize, isImageFile } from "../../utils/fileHandling.js";
 import { useTerminalSize } from "../../utils/hooks/use_terminal_size.js";
 import { clearTerminal } from "../../utils/terminal.js";
@@ -47,6 +48,13 @@ export type ConversationItem = { key: string } & (
     }
   | {
       type: "agent_message_content_line";
+      text: string;
+      index: number;
+    }
+  | {
+      // The agent's final, markdown-rendered answer, as a single item (not
+      // one per line) so it can be wrapped in one bordered box.
+      type: "agent_message_content_block";
       text: string;
       index: number;
     }
@@ -120,8 +128,16 @@ const _Conversation: FC<ConversationProps> = ({
       </Static>
 
       {isProcessingQuestion && streamingContentPreview && (
-        <Box flexDirection="column" marginLeft={2}>
-          <Text>{streamingContentPreview}</Text>
+        <Box
+          flexDirection="column"
+          marginLeft={2}
+          paddingX={1}
+          borderStyle="round"
+          borderColor={MANTU_PURPLE}
+        >
+          <Text backgroundColor={MANTU_PURPLE_DARK}>
+            {streamingContentPreview}
+          </Text>
         </Box>
       )}
 
@@ -185,7 +201,8 @@ const _Conversation: FC<ConversationProps> = ({
       {!showCommandSelector && !inlineSelector && (
         <Box marginTop={0} paddingLeft={1}>
           <Text dimColor>
-            ↵ to send · \↵ for new line · Ctrl+W delete word · ESC to clear
+            Enter to send · Ctrl+Enter or \+Enter for new line · Ctrl+W
+            delete word · ESC to clear
             {conversationId && " · Ctrl+G to open in browser"}
           </Text>
         </Box>
@@ -213,58 +230,69 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
       const displayPath =
         home && cwd.startsWith(home) ? "~" + cwd.slice(home.length) : cwd;
 
+      const separatorWidth = Math.min(terminalWidth, 60);
+
       return (
-        <Box marginTop={1} marginBottom={1}>
-          <Box flexDirection="column" marginRight={2}>
-            <Box>
-              <Text color="green" dimColor>
-                {"█"}
-              </Text>
-              <Text color="green">{"▀▄ "}</Text>
-              <Text color="red" dimColor>
-                {"█ █"}
-              </Text>
-            </Box>
-            <Box>
-              <Text color="green" dimColor>
-                {"█"}
-              </Text>
-              <Text color="green">{"▄▀ "}</Text>
-              <Text color="red">{"█▄█"}</Text>
-            </Box>
-            <Box>
-              <Text color="blue" dimColor>
-                {"█▀▀ "}
-              </Text>
-              <Text color="blue" dimColor>
-                {"▀█▀"}
-              </Text>
-            </Box>
-            <Box>
-              <Text color="blue">{"▄██ "}</Text>
-              <Text color="yellow" dimColor>
-                {" █ "}
-              </Text>
-            </Box>
+        <Box flexDirection="column">
+          <Box marginTop={1}>
+            <Text color={MANTU_GOLD}>{"_".repeat(separatorWidth)}</Text>
           </Box>
-          <Box flexDirection="column" justifyContent="center">
-            <Text dimColor>
-              Dust CLI v{CLI_VERSION} · {displayPath}
-            </Text>
-            <Text dimColor>
-              Chatting with{" "}
-              <Text bold dimColor>
-                @{item.agentName}
+          <Box marginBottom={1}>
+            <Box flexDirection="column" marginRight={2}>
+              <Box>
+                <Text color="green" dimColor>
+                  {"█"}
+                </Text>
+                <Text color="green">{"▀▄ "}</Text>
+                <Text color="red" dimColor>
+                  {"█ █"}
+                </Text>
+              </Box>
+              <Box>
+                <Text color="green" dimColor>
+                  {"█"}
+                </Text>
+                <Text color="green">{"▄▀ "}</Text>
+                <Text color="red">{"█▄█"}</Text>
+              </Box>
+              <Box>
+                <Text color="blue" dimColor>
+                  {"█▀▀ "}
+                </Text>
+                <Text color="blue" dimColor>
+                  {"▀█▀"}
+                </Text>
+              </Box>
+              <Box>
+                <Text color="blue">{"▄██ "}</Text>
+                <Text color="yellow" dimColor>
+                  {" █ "}
+                </Text>
+              </Box>
+            </Box>
+            <Box flexDirection="column" justifyContent="center">
+              <Text bold color={MANTU_PURPLE}>
+                MANTU FORK
               </Text>
-              {" · "}Use{" "}
-              <Text bold dimColor>
-                /switch
-              </Text>{" "}
-              to change agent.
-            </Text>
-            <Text dimColor>
-              Type your message below and press Enter to send.
-            </Text>
+              <Text color={MANTU_GOLD}>Author: Jean-Laurent</Text>
+              <Text dimColor>
+                Dust CLI v{CLI_VERSION} · {displayPath}
+              </Text>
+              <Text dimColor>
+                Chatting with{" "}
+                <Text bold dimColor>
+                  @{item.agentName}
+                </Text>
+                {" · "}Use{" "}
+                <Text bold dimColor>
+                  /switch
+                </Text>{" "}
+                to change agent.
+              </Text>
+              <Text dimColor>
+                Type your message below and press Enter to send.
+              </Text>
+            </Box>
           </Box>
         </Box>
       );
@@ -325,6 +353,19 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
       return (
         <Box marginLeft={2}>
           <Text>{item.text}</Text>
+        </Box>
+      );
+    case "agent_message_content_block":
+      return (
+        <Box
+          flexDirection="column"
+          marginLeft={2}
+          marginBottom={1}
+          paddingX={1}
+          borderStyle="round"
+          borderColor={MANTU_PURPLE}
+        >
+          <Text backgroundColor={MANTU_PURPLE_DARK}>{item.text}</Text>
         </Box>
       );
     case "agent_message_cancelled":

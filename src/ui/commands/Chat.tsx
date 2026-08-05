@@ -100,15 +100,12 @@ function buildConversationItemsFromHistory(
           index: agentMsgIdx,
         });
         if (msg.content) {
-          const contentLines = msg.content.trim().split("\n");
-          for (let i = 0; i < contentLines.length; i++) {
-            items.push({
-              key: `resumed_agent_content_${agentMsgIdx}_${i}`,
-              type: "agent_message_content_line",
-              text: contentLines[i] || " ",
-              index: i,
-            });
-          }
+          items.push({
+            key: `resumed_agent_content_${agentMsgIdx}`,
+            type: "agent_message_content_block",
+            text: renderMarkdown(msg.content.trim()),
+            index: agentMsgIdx,
+          });
         }
         items.push({
           key: `resumed_agent_sep_${agentMsgIdx}`,
@@ -685,7 +682,7 @@ const CliChat: FC<CliChatProps> = ({
   const showHelp = useCallback(() => {
     const helpText =
       "Commands: /help /switch /new /resume /attach /clear-files /auto /exit\n" +
-      "Shortcuts: Enter=send  \\Enter=newline  Ctrl+W=delete word  ESC=clear/cancel  Ctrl+G=open in browser";
+      "Shortcuts: Enter=send  Ctrl+Enter or \\Enter=newline  Ctrl+W=delete word  ESC=clear/cancel  Ctrl+G=open in browser";
     const lines = helpText.split("\n");
     setConversationItems((prev) => [
       ...prev,
@@ -1075,9 +1072,7 @@ const CliChat: FC<CliChatProps> = ({
       // matching how Claude Code/Cursor/Kimi Code hide raw reasoning by
       // default.
       const pushFinalContentToConversationItems = () => {
-        const renderedLines = renderMarkdown(contentRef.current || " ").split(
-          "\n"
-        );
+        const rendered = renderMarkdown(contentRef.current || " ");
 
         setConversationItems((prev) => {
           const lastAgentMessageHeader = getLastConversationItem<
@@ -1090,21 +1085,14 @@ const CliChat: FC<CliChatProps> = ({
 
           const agentMessageIndex = lastAgentMessageHeader.index;
 
-          const contentItems = renderedLines.map(
-            (line, index) =>
-              ({
-                key: `agent_message_content_line_${agentMessageIndex}__${index}`,
-                type: "agent_message_content_line",
-                text: line || " ",
-                index,
-              }) satisfies ConversationItem & {
-                type: "agent_message_content_line";
-              }
-          );
-
           return [
             ...prev,
-            ...contentItems,
+            {
+              key: `agent_message_content_block_${agentMessageIndex}`,
+              type: "agent_message_content_block",
+              text: rendered,
+              index: agentMessageIndex,
+            },
             {
               key: `end_of_agent_message_separator_${agentMessageIndex}`,
               type: "separator",
@@ -1123,7 +1111,7 @@ const CliChat: FC<CliChatProps> = ({
           .filter((l) => l.length > 0);
         const lastLine = lines[lines.length - 1] ?? "";
         setThinkingPreview(
-          lastLine.length > 100 ? `${lastLine.slice(0, 100)}…` : lastLine
+          lastLine.length > 100 ? `${lastLine.slice(0, 100)}...` : lastLine
         );
       };
 
@@ -1750,8 +1738,24 @@ const CliChat: FC<CliChatProps> = ({
       return;
     }
 
-    // Check for backslash + Enter to add new line, or regular Enter to submit
+    // Check for Ctrl+Enter or backslash + Enter to add new line, or regular
+    // Enter to submit
     if (key.return && !isInCommandMode) {
+      // Ctrl+Enter: insert a literal newline directly. Whether the
+      // terminal actually reports Enter with the ctrl modifier set
+      // (rather than being indistinguishable from plain Enter) is
+      // terminal-dependent, so \+Enter below remains as a fallback that's
+      // guaranteed to work everywhere.
+      if (key.ctrl) {
+        const newInput =
+          userInput.slice(0, cursorPosition) +
+          "\n" +
+          userInput.slice(cursorPosition);
+        setUserInput(newInput);
+        setCursorPosition(cursorPosition + 1);
+        return;
+      }
+
       // Check if the previous character is a backslash for multi-line input
       if (cursorPosition > 0 && userInput[cursorPosition - 1] === "\\") {
         // Remove the backslash and add a newline
@@ -2235,7 +2239,7 @@ const CliChat: FC<CliChatProps> = ({
                         ? "Select a conversation:"
                         : inlineSelector.mode === "approval" ||
                             inlineSelector.mode === "diff"
-                          ? "Use ↑/↓ to navigate, Enter to confirm, Esc to reject:"
+                          ? "Use Up/Down to navigate, Enter to confirm, Esc to reject:"
                           : undefined,
                 header:
                   inlineSelector.mode === "approval" &&

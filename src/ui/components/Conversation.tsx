@@ -252,11 +252,14 @@ const _Conversation: FC<ConversationProps> = ({
         </Box>
       )}
       <Box paddingLeft={1}>
-        <Text dimColor>
+        <Text>
           {workspaceName && (
             <>
-              <Text>{workspaceName}</Text>
-              <Text> · </Text>
+              <Text dimColor>{workspaceName}</Text>
+              <Text dimColor>
+                {" "}
+                ·{" "}
+              </Text>
             </>
           )}
           {agentName && (
@@ -264,25 +267,37 @@ const _Conversation: FC<ConversationProps> = ({
               <Text bold color={MANTU_PURPLE}>
                 @{agentName}
               </Text>
-              <Text> · </Text>
+              <Text dimColor>
+                {" "}
+                ·{" "}
+              </Text>
             </>
           )}
           <Text color={MANTU_GOLD}>{displayPath}</Text>
           {gitBranch && (
             <>
-              <Text> · </Text>
+              <Text dimColor>
+                {" "}
+                ·{" "}
+              </Text>
               <Text color={MANTU_PURPLE}>{gitBranch}</Text>
             </>
           )}
           {conversationId && (
             <>
-              <Text> · </Text>
-              <Text>{conversationId.slice(0, 8)}</Text>
+              <Text dimColor>
+                {" "}
+                ·{" "}
+              </Text>
+              <Text dimColor>{conversationId.slice(0, 8)}</Text>
             </>
           )}
           {contextUsage && (
             <>
-              <Text> · </Text>
+              <Text dimColor>
+                {" "}
+                ·{" "}
+              </Text>
               <Text color={MANTU_PURPLE}>
                 {formatTokenCount(contextUsage.contextUsage)}/
                 {formatTokenCount(contextUsage.contextSize)} tokens
@@ -291,7 +306,10 @@ const _Conversation: FC<ConversationProps> = ({
           )}
           {consumedCredits !== null && (
             <>
-              <Text> · </Text>
+              <Text dimColor>
+                {" "}
+                ·{" "}
+              </Text>
               <Text color={MANTU_GOLD}>{consumedCredits} credits used</Text>
             </>
           )}

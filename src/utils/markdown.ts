@@ -30,6 +30,34 @@ export interface MarkdownSegment {
   content: string;
 }
 
+// Dust's web app renders custom directives like
+// :preview_file{path="..." title="..." contentType="..."} as interactive
+// widgets (e.g. an inline file preview). marked has no idea what this
+// syntax means and passes it through as literal text, which just leaks
+// the raw `:name{...}` syntax in the CLI. Replace known/unknown
+// directives with a readable placeholder instead.
+function humanizeDustDirectives(text: string): string {
+  return text.replace(
+    /:(\w+)\{([^}]*)\}/g,
+    (_match, name: string, attrs: string) => {
+      const attrMap: Record<string, string> = {};
+      for (const m of attrs.matchAll(/(\w+)="([^"]*)"/g)) {
+        attrMap[m[1]] = m[2];
+      }
+
+      if (name === "preview_file") {
+        const label = attrMap.title || attrMap.path || "file";
+        return `[Generated file: ${label} — not viewable in the CLI, only on the Dust web app]`;
+      }
+
+      // Generic fallback for any other Dust-specific directive: show
+      // something readable instead of leaking raw `:name{...}` syntax.
+      const label = attrMap.title || attrMap.name || attrMap.path || name;
+      return `[${label}]`;
+    }
+  );
+}
+
 // Strips SGR color/style escape sequences (the only kind cli-highlight /
 // marked-terminal emit) so line width can be measured on visible
 // characters only, not the ANSI bytes.
@@ -64,7 +92,7 @@ export function renderMarkdownSegments(text: string): MarkdownSegment[] {
   }
   ensureConfigured();
   try {
-    const tokens = marked.lexer(text);
+    const tokens = marked.lexer(humanizeDustDirectives(text));
     const segments: MarkdownSegment[] = [];
     let textGroup: Token[] = [];
 

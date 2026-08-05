@@ -1,14 +1,14 @@
 {
-  "name": "dustw",
-  "version": "0.4.5-dustw.1",
+  "name": "dust-cli",
+  "version": "0.4.5-mantu.1",
   "engines": {
     "node": ">=24.16.0"
   },
-  "description": "Patched fork of the Dust CLI (paste/crash/persistence fixes for legacy Windows consoles).",
+  "description": "Mantu fork of the Dust CLI (paste/crash/persistence fixes for legacy Windows consoles).",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "dustw": "dist/index.js"
+    "dust": "dist/index.js"
   },
   "files": [
     "dist"

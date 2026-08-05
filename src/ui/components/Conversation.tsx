@@ -13,7 +13,13 @@ import React, {
 } from "react";
 
 import type { TodoItem } from "../../mcp/tools/todoWrite.js";
-import { CODE_BLOCK_BG, MANTU_GOLD, MANTU_PURPLE } from "../../utils/brand.js";
+import {
+  CODE_BLOCK_BG,
+  MANTU_CREAM,
+  MANTU_GOLD,
+  MANTU_MUTED_VIOLET,
+  MANTU_PURPLE,
+} from "../../utils/brand.js";
 import type { ContextUsage } from "../../utils/contextUsage.js";
 import type { CreditsUsage } from "../../utils/creditsInfo.js";
 import type { MarkdownSegment } from "../../utils/markdown.js";
@@ -211,6 +217,7 @@ const _Conversation: FC<ConversationProps> = ({
             </Text>
           ) : (
             <Text color="green">
+              {" "}
               <ThinkingIcon /> Thinking
               <Spinner type="simpleDots" />
               {thinkingPreview && (
@@ -375,32 +382,32 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
           <Box>
             <Box flexDirection="column" marginRight={2}>
               <Box>
-                <Text color="green" dimColor>
+                <Text color={MANTU_PURPLE} dimColor>
                   {"█"}
                 </Text>
-                <Text color="green">{"▀▄ "}</Text>
-                <Text color="red" dimColor>
+                <Text color={MANTU_PURPLE}>{"▀▄ "}</Text>
+                <Text color={MANTU_PURPLE} dimColor>
                   {"█ █"}
                 </Text>
               </Box>
               <Box>
-                <Text color="green" dimColor>
+                <Text color={MANTU_PURPLE} dimColor>
                   {"█"}
                 </Text>
-                <Text color="green">{"▄▀ "}</Text>
-                <Text color="red">{"█▄█"}</Text>
+                <Text color={MANTU_PURPLE}>{"▄▀ "}</Text>
+                <Text color={MANTU_PURPLE}>{"█▄█"}</Text>
               </Box>
               <Box>
-                <Text color="blue" dimColor>
+                <Text color={MANTU_GOLD} dimColor>
                   {"█▀▀ "}
                 </Text>
-                <Text color="blue" dimColor>
+                <Text color={MANTU_GOLD} dimColor>
                   {"▀█▀"}
                 </Text>
               </Box>
               <Box>
-                <Text color="blue">{"▄██ "}</Text>
-                <Text color="yellow" dimColor>
+                <Text color={MANTU_GOLD}>{"▄██ "}</Text>
+                <Text color={MANTU_GOLD} dimColor>
                   {" █ "}
                 </Text>
               </Box>
@@ -409,7 +416,9 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
               <Text bold color={MANTU_PURPLE}>
                 MANTU FORK
               </Text>
-              <Text color={MANTU_GOLD}>Initiated by: Jean-Laurent</Text>
+              <Text color={MANTU_GOLD}>
+                Report bug here: https://github.com/jlrouzies-mantu/dust-cli
+              </Text>
               <Text dimColor>
                 Dust CLI v{CLI_VERSION} · {displayPath}
                 {gitBranch && ` · branch: ${gitBranch}`}
@@ -440,7 +449,7 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
       return (
         <Box flexDirection="column" marginBottom={1}>
           <Box>
-            <Text bold color="green">
+            <Text bold color={MANTU_CREAM}>
               {item.firstName ?? "You"}
             </Text>
           </Box>
@@ -483,7 +492,7 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
     case "agent_message_header":
       return (
         <Box>
-          <Text bold color="blue">
+          <Text bold color={MANTU_MUTED_VIOLET}>
             {item.agentName}
           </Text>
         </Box>

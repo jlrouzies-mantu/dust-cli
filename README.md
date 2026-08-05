@@ -47,7 +47,7 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 | Local crash-safe transcripts | Every turn appended to `~/.dust-cli/transcripts/<id>.jsonl` |
 | Ctrl+C safety net | Cancels generation if running; otherwise double-press within 2s to exit |
 | Markdown rendering | Syntax-highlighted code fences, boxed on their own |
-| Transient "Thinking…" status | Custom ASCII pulse icon instead of a permanent scrollback dump — safe on PowerShell 5 |
+| Transient "Thinking…" status | `◊` icon pulsing between brand colors instead of a permanent scrollback dump |
 | Persistent, colorized status bar | Workspace, agent, folder, branch, tokens, credits — see [Status bar](#status-bar) |
 | Ctrl+Enter / Shift+Enter | Multi-line input |
 | Mantu-branded header | Full-width separator + brand colors |
@@ -79,9 +79,9 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 
 **Markdown rendering** — headings, lists, task lists, links, inline code, tables, and syntax-highlighted code blocks:
 
-![Markdown showcase](./img/markdown.PNG)
-
-![C# code block](./img/codesnippet.PNG)
+<p align="center">
+  <img src="./img/markdown.PNG" alt="Markdown showcase" width="340"/>
+</p>
 
 **Status bar** — workspace, agent, folder, branch, conversation ID, context usage, and consumed credits:
 

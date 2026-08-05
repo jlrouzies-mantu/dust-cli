@@ -8,6 +8,12 @@ export interface CreditsUsage {
   limit: number | null;
 }
 
+// Cached at module scope (outside any component's state) so the last good
+// value survives regardless of what triggers a re-fetch - a React state
+// reset, a remount, whatever. Once we've shown a real number in the status
+// bar, a later transient failure should never regress it back to nothing.
+let lastKnownCredits: CreditsUsage | null = null;
+
 async function fetchConsumedCredits(): Promise<CreditsUsage | null> {
   const accessTokenRes = await AuthService.getValidAccessToken();
   if (accessTokenRes.isErr() || !accessTokenRes.value) {
@@ -72,6 +78,7 @@ export async function getConsumedCredits(): Promise<CreditsUsage | null> {
     try {
       const result = await fetchConsumedCredits();
       if (result !== null) {
+        lastKnownCredits = result;
         return result;
       }
     } catch {
@@ -81,5 +88,5 @@ export async function getConsumedCredits(): Promise<CreditsUsage | null> {
       await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
     }
   }
-  return null;
+  return lastKnownCredits;
 }

@@ -34,7 +34,7 @@
     "directory": "cli/dust-cli"
   },
   "dependencies": {
-    "@dust-tt/client": "^1.2.6",
+    "@dust-tt/client": "^1.2.8",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "chalk": "^5.4.1",
     "clipboardy": "^4.0.0",

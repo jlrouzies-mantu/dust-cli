@@ -30,6 +30,87 @@ $RepoDir      = Join-Path $InstallRoot "dust-cli"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 $OutputEncoding = [System.Text.UTF8Encoding]::new()
 
+# Collapsed-step spinner: pulses the same diamond glyph through the same
+# 12-frame purple<->gold gradient as src/ui/components/ThinkingIcon.tsx in
+# the main app. Each long-running command collapses to one refreshing
+# line while it runs; only expands into full captured output if it fails.
+function Ansi($code) { "$([char]27)[${code}m" }
+$AnsiReset   = Ansi "0"
+$AnsiFgGreen = Ansi "38;2;120;220;120"
+$AnsiFgRed   = Ansi "38;2;255;90;90"
+$AnsiFgGray  = Ansi "38;2;150;150;150"
+$ClearLine   = "$([char]27)[K"
+$PulseFrom = @(183, 100, 255) # brand purple, #b764ff
+$PulseTo   = @(248, 240, 96)  # gold, #f8f060
+$PulseSteps = 12
+$PulseIntervalMs = 120
+$PulseIcon = [char]0x25C6 # same glyph as ThinkingIcon.tsx
+
+function Get-PulseColor {
+    param([int]$Frame)
+    $half = $PulseSteps / 2
+    $t = if ($Frame -lt $half) { $Frame / $half } else { ($PulseSteps - $Frame) / $half }
+    $r = [Math]::Round($PulseFrom[0] + ($PulseTo[0] - $PulseFrom[0]) * $t)
+    $g = [Math]::Round($PulseFrom[1] + ($PulseTo[1] - $PulseFrom[1]) * $t)
+    $b = [Math]::Round($PulseFrom[2] + ($PulseTo[2] - $PulseFrom[2]) * $t)
+    return Ansi "38;2;$r;$g;$b"
+}
+
+function Invoke-CollapsedStep {
+    <#
+        Runs $ScriptBlock as a background job while showing one refreshing
+        status line (pulsing icon) instead of letting the command's real
+        output stream straight to the console. On success, collapses to a
+        single [OK] line. On failure, expands to show everything the
+        command actually printed, for diagnosis.
+
+        $ScriptBlock must throw on failure (e.g. after checking
+        $LASTEXITCODE for an external command) - a non-zero exit code
+        alone does not fail a job. Reference outer variables via $using:
+        (e.g. $using:npmCommandPath), since the job runs in a separate
+        process with its own session state.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Title,
+        [Parameter(Mandatory)][scriptblock]$ScriptBlock
+    )
+
+    $job = Start-Job -ScriptBlock $ScriptBlock
+    $frame = 0
+    while ($job.State -eq "Running" -or $job.State -eq "NotStarted") {
+        $color = Get-PulseColor -Frame $frame
+        Write-Host -NoNewline "`r$ClearLine$color$PulseIcon$AnsiReset  Installing - $Title..."
+        Start-Sleep -Milliseconds $PulseIntervalMs
+        $frame = ($frame + 1) % $PulseSteps
+    }
+
+    # Single Receive-Job call, since it drains the job's output buffer -
+    # calling it twice (e.g. once to try, once in a catch block) can silently
+    # lose output. 2>&1 merges error records into the same stream so a
+    # failure's captured output (printed before it threw) isn't lost either.
+    $output = Receive-Job -Job $job -ErrorAction SilentlyContinue 2>&1
+    $succeeded = $job.State -eq "Completed"
+    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+
+    if ($succeeded) {
+        Write-Host "`r$ClearLine$AnsiFgGreen[OK]$AnsiReset      $Title"
+        return $output
+    }
+    else {
+        Write-Host "`r$ClearLine$AnsiFgRed[FAILED]$AnsiReset  $Title"
+        Write-Host "$AnsiFgRed  --- output ---$AnsiReset"
+        $lastErrorMessage = "unknown error"
+        $output | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                $lastErrorMessage = $_.Exception.Message
+            }
+            Write-Host "$AnsiFgGray    $_$AnsiReset"
+        }
+        Write-Host "$AnsiFgRed  --------------$AnsiReset"
+        throw "$Title failed: $lastErrorMessage"
+    }
+}
+
 function Write-Banner {
     Write-Host ""
     Write-Host "============================================================" -ForegroundColor Magenta
@@ -129,16 +210,13 @@ try {
 
     Write-Header "Step 2/7 - Installing NVM for Windows"
 
-    Write-Step "Downloading nvm-windows from:"
-    Write-Info $NvmZipUrl
+    Invoke-CollapsedStep -Title "Downloading nvm-windows" -ScriptBlock {
+        Invoke-WebRequest -Uri $using:NvmZipUrl -OutFile $using:NvmZipPath
+    } | Out-Null
 
-    Invoke-WebRequest -Uri $NvmZipUrl -OutFile $NvmZipPath
-
-    Write-Success "Downloaded to: $NvmZipPath"
-
-    Write-Step "Extracting nvm-windows into: $NvmRoot"
-    Expand-Archive -Path $NvmZipPath -DestinationPath $NvmRoot -Force
-    Write-Success "Extraction complete."
+    Invoke-CollapsedStep -Title "Extracting nvm-windows into $NvmRoot" -ScriptBlock {
+        Expand-Archive -Path $using:NvmZipPath -DestinationPath $using:NvmRoot -Force
+    } | Out-Null
 
     $NodeJsSymlink = Join-Path $NvmRoot "nodejs"
 
@@ -197,11 +275,15 @@ try {
 
     Write-Header "Step 3/7 - Installing Node.js $NodeVersion"
 
-    Write-Step "Installing Node.js $NodeVersion via NVM..."
-    & $nvmExe install $NodeVersion
+    Invoke-CollapsedStep -Title "Installing Node.js $NodeVersion via NVM" -ScriptBlock {
+        & $using:nvmExe install $using:NodeVersion
+        if ($LASTEXITCODE -ne 0) { throw "nvm install failed with exit code $LASTEXITCODE" }
+    } | Out-Null
 
-    Write-Step "Selecting Node.js $NodeVersion..."
-    & $nvmExe use $NodeVersion
+    Invoke-CollapsedStep -Title "Selecting Node.js $NodeVersion" -ScriptBlock {
+        & $using:nvmExe use $using:NodeVersion
+        if ($LASTEXITCODE -ne 0) { throw "nvm use failed with exit code $LASTEXITCODE" }
+    } | Out-Null
 
     Write-Success "Node.js $NodeVersion is now active."
 
@@ -239,8 +321,10 @@ try {
     }
     Write-Success "npm found at: $npmCommandPath"
 
-    Write-Step "Updating npm to the latest version..."
-    & $npmCommandPath install -g npm@latest
+    Invoke-CollapsedStep -Title "Updating npm to the latest version" -ScriptBlock {
+        & $using:npmCommandPath install -g npm@latest
+        if ($LASTEXITCODE -ne 0) { throw "npm install -g npm@latest failed with exit code $LASTEXITCODE" }
+    } | Out-Null
     Write-Success "npm is up to date."
 
     Write-Header "Step 5/7 - Downloading the Mantu fork"
@@ -249,38 +333,73 @@ try {
         New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
     }
 
-    Write-Step "Downloading jlrouzies-mantu/dust-cli@main..."
-    Invoke-WebRequest -Uri $RepoZipUrl -OutFile $RepoZipPath
-    Write-Success "Downloaded to: $RepoZipPath"
+    Invoke-CollapsedStep -Title "Downloading jlrouzies-mantu/dust-cli@main" -ScriptBlock {
+        Invoke-WebRequest -Uri $using:RepoZipUrl -OutFile $using:RepoZipPath
+    } | Out-Null
 
-    Write-Step "Extracting..."
-    if (Test-Path $RepoExtractDir) {
-        Remove-Item -Recurse -Force $RepoExtractDir
-    }
-    Expand-Archive -Path $RepoZipPath -DestinationPath $InstallRoot -Force
-    Remove-Item -Force $RepoZipPath
+    Invoke-CollapsedStep -Title "Extracting the Mantu fork" -ScriptBlock {
+        if (Test-Path $using:RepoExtractDir) {
+            Remove-Item -Recurse -Force $using:RepoExtractDir
+        }
+        Expand-Archive -Path $using:RepoZipPath -DestinationPath $using:InstallRoot -Force
+        Remove-Item -Force $using:RepoZipPath
 
-    if (Test-Path $RepoDir) {
-        Remove-Item -Recurse -Force $RepoDir
-    }
-    Move-Item -Path $RepoExtractDir -Destination $RepoDir
+        if (Test-Path $using:RepoDir) {
+            Remove-Item -Recurse -Force $using:RepoDir
+        }
+        Move-Item -Path $using:RepoExtractDir -Destination $using:RepoDir
+    } | Out-Null
     Write-Success "Ready at: $RepoDir"
 
     Write-Header "Step 6/7 - Building the CLI"
 
     Push-Location $RepoDir
     try {
-        Write-Step "Installing dependencies (npm install)..."
-        & $npmCommandPath install
-        if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
+        Invoke-CollapsedStep -Title "Installing dependencies (npm install)" -ScriptBlock {
+            & $using:npmCommandPath install
+            if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
+        } | Out-Null
 
-        Write-Step "Building production bundle (npm run build:prod)..."
-        & $npmCommandPath run build:prod
-        if ($LASTEXITCODE -ne 0) { throw "npm run build:prod failed with exit code $LASTEXITCODE" }
+        # keytar (secure OS-credential storage) ships a native module that
+        # npm install doesn't always manage to build - a corporate
+        # ignore-scripts policy, a proxy blocking github.com, or antivirus
+        # interference can all silently leave it missing, with npm install
+        # still reporting success. Verify it explicitly instead of letting
+        # the user hit a cryptic MODULE_NOT_FOUND crash later at `login`.
+        Invoke-CollapsedStep -Title "Verifying keytar's native module (secure credential storage)" -ScriptBlock {
+            $keytarDir = Join-Path $using:RepoDir "node_modules\keytar"
+            $keytarBinary = Join-Path $keytarDir "build\Release\keytar.node"
+            if (-not (Test-Path $keytarBinary)) {
+                Write-Output "keytar.node missing after npm install - forcing a direct rebuild..."
+                $prebuildInstallBin = Join-Path $using:RepoDir "node_modules\prebuild-install\bin.js"
+                if (Test-Path $prebuildInstallBin) {
+                    Push-Location $keytarDir
+                    try {
+                        & $using:nodeCommandPath $prebuildInstallBin --verbose
+                    }
+                    finally {
+                        Pop-Location
+                    }
+                }
+                if (-not (Test-Path $keytarBinary)) {
+                    throw "keytar's native module (keytar.node) could not be installed. This usually means npm scripts are disabled (check 'npm config get ignore-scripts'), a proxy/firewall is blocking https://github.com, or antivirus is interfering with node_modules. Fix that, then re-run this installer."
+                }
+                Write-Output "keytar.node installed via direct rebuild."
+            }
+            else {
+                Write-Output "keytar.node present."
+            }
+        } | Out-Null
 
-        Write-Step "Linking the 'dustm' command globally (npm link)..."
-        & $npmCommandPath link
-        if ($LASTEXITCODE -ne 0) { throw "npm link failed with exit code $LASTEXITCODE" }
+        Invoke-CollapsedStep -Title "Building production bundle (npm run build:prod)" -ScriptBlock {
+            & $using:npmCommandPath run build:prod
+            if ($LASTEXITCODE -ne 0) { throw "npm run build:prod failed with exit code $LASTEXITCODE" }
+        } | Out-Null
+
+        Invoke-CollapsedStep -Title "Linking the 'dustm' command globally (npm link)" -ScriptBlock {
+            & $using:npmCommandPath link
+            if ($LASTEXITCODE -ne 0) { throw "npm link failed with exit code $LASTEXITCODE" }
+        } | Out-Null
     }
     finally {
         Pop-Location

@@ -18,6 +18,7 @@ import {
   MANTU_AGENT_ACCENT,
   MANTU_GOLD,
   MANTU_PURPLE,
+  MANTU_THINKING_PINK,
   MANTU_USER_ACCENT,
 } from "../../utils/brand.js";
 import type { ContextUsage } from "../../utils/contextUsage.js";
@@ -216,7 +217,7 @@ const _Conversation: FC<ConversationProps> = ({
               <Spinner type="simpleDots" />
             </Text>
           ) : (
-            <Text color="green">
+            <Text color={MANTU_THINKING_PINK}>
               {" "}
               <ThinkingIcon /> Thinking
               <Spinner type="simpleDots" />

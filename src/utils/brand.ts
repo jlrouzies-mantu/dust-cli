@@ -13,6 +13,10 @@ export const MANTU_GOLD = "#D4A72C";
 export const MANTU_USER_ACCENT = "#E8A548";
 export const MANTU_AGENT_ACCENT = "#CC7DE0";
 
+// Muted pink for the "Thinking…" status line - dimmer than
+// MANTU_AGENT_ACCENT so it doesn't compete with it.
+export const MANTU_THINKING_PINK = "#C97B94";
+
 // Dark gray instead of pure black - a solid black fill is indistinguishable
 // from a terminal's own black background (e.g. default PowerShell 7), so
 // code blocks need a shade that actually reads as "a different surface".

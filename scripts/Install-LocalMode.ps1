@@ -1,34 +1,38 @@
+param(
+    [string]$Branch = "dev"
+)
+
 $ErrorActionPreference = "Stop"
 
 # ============================================================
-# Mantu fork of Dust CLI - automated installer
+# Mantu fork of Dust CLI - LOCAL/DEV installer
 #
-# Bootstraps NVM for Windows, installs the required Node.js
-# version, then downloads, builds, and links this fork
-# (jlrouzies-mantu/dust-cli) so the `dustm` command is available
-# globally - deliberately not named `dust`, so it can coexist with
-# the official Dust CLI on the same machine if needed. Safe to
-# re-run - it re-downloads and rebuilds fresh each time, which is
-# also how you pick up updates.
+# Same as Install-DustCLI.ps1, except it fetches the fork via
+# `git clone`/`git pull` on a chosen branch instead of downloading a
+# zip of `main` - for testing changes pushed to a branch (e.g. `dev`)
+# without merging to main first. Installs to a separate directory
+# from Install-DustCLI.ps1's, so a "stable main" install and a
+# "local dev" checkout can coexist.
 #
 # Usage:
-#   irm "https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/Install-DustCLI.ps1?nocache=$((Get-Date).Ticks)" | iex
+#   .\scripts\Install-LocalMode.ps1                    # branch: dev
+#   .\scripts\Install-LocalMode.ps1 -Branch my-feature
 #
-# The ?nocache=... query string works around raw.githubusercontent.com's
-# CDN, which caches by full URL for a few minutes and can otherwise serve a
-# stale copy right after a fresh push.
+# Requires git. Re-run any time to pull the latest commits on that
+# branch and rebuild - `git reset --hard origin/<branch>` is used, so
+# any local edits inside the install directory itself are discarded;
+# push your changes to the branch first, then re-run this.
 # ============================================================
+
+$RepoUrl = "https://github.com/jlrouzies-mantu/dust-cli.git"
 
 $NvmZipUrl   = "https://github.com/coreybutler/nvm-windows/releases/download/1.2.2/nvm-noinstall.zip"
 $NvmRoot     = "C:\Temp\Nvm"
 $NvmZipPath  = Join-Path $NvmRoot "nvm-noinstall.zip"
 $NodeVersion = "24.16.0"
 
-$RepoZipUrl   = "https://github.com/jlrouzies-mantu/dust-cli/archive/refs/heads/main.zip"
-$InstallRoot  = Join-Path $env:USERPROFILE ".dust-cli-mantu"
-$RepoZipPath  = Join-Path $InstallRoot "dust-cli-main.zip"
-$RepoExtractDir = Join-Path $InstallRoot "dust-cli-main"
-$RepoDir      = Join-Path $InstallRoot "dust-cli"
+$InstallRoot = Join-Path $env:USERPROFILE ".dust-cli-mantu"
+$RepoDir     = Join-Path $InstallRoot "dust-cli-local"
 
 # Force console output to UTF-8
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
@@ -99,10 +103,6 @@ function Invoke-CollapsedStep {
         $frame = ($frame + 1) % $PulseSteps
     }
 
-    # Single Receive-Job call, since it drains the job's output buffer -
-    # calling it twice (e.g. once to try, once in a catch block) can silently
-    # lose output. 2>&1 merges error records into the same stream so a
-    # failure's captured output (printed before it threw) isn't lost either.
     $output = Receive-Job -Job $job -ErrorAction SilentlyContinue 2>&1
     $succeeded = $job.State -eq "Completed"
     Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
@@ -153,8 +153,8 @@ function Write-Banner {
     Write-BannerBorder
     Write-Host ""
     Write-BannerBorder
-    Write-BannerBar -Text "Dust CLI - Mantu fork Installer" -FgColor $AnsiFgWhite -BgColor $AnsiBgPurpleDark
-    Write-BannerBar -Text "A hardened, restyled build of the Dust CLI for Windows, macOS, and Linux" -FgColor $AnsiFgGold -BgColor $AnsiBgPurpleDark
+    Write-BannerBar -Text "Dust CLI - LOCAL MODE (branch: $Branch)" -FgColor $AnsiFgWhite -BgColor $AnsiBgPurpleDark
+    Write-BannerBar -Text "For testing pushed branches without merging to main" -FgColor $AnsiFgGold -BgColor $AnsiBgPurpleDark
     Write-BannerBorder
     Write-Host ""
 }
@@ -186,52 +186,6 @@ function Write-Info {
 function Write-ErrorMsg {
     param([string]$Message)
     Write-Host "  [FAILED] $Message" -ForegroundColor Red
-}
-
-function Write-DustCliCommand {
-    param([string]$Command, [string]$Description)
-    Write-Host "  $Command " -ForegroundColor White -NoNewline
-    Write-Host "($Description)" -ForegroundColor Gray
-}
-
-function Write-DustCliCheatSheet {
-    Write-Header "Quick commands"
-
-    Write-Host ""
-    Write-Host "Authentication:" -ForegroundColor DarkYellow
-    Write-DustCliCommand "dustm login" "Login to your Dust account."
-    Write-DustCliCommand "dustm login --force" "Force re-authentication if needed."
-    Write-DustCliCommand "dustm status" "Check whether you are authenticated."
-    Write-DustCliCommand "dustm logout" "Logout from your Dust account."
-
-    Write-Host ""
-    Write-Host "Interactive chat:" -ForegroundColor DarkYellow
-    Write-DustCliCommand "dustm" "Start the default interactive chat."
-    Write-DustCliCommand "dustm chat --agent `"My Agent`"" "Start a chat with a specific agent by name."
-    Write-DustCliCommand "dustm chat --resume <conversationId>" "Resume a past conversation."
-
-    Write-Host ""
-    Write-Host "Non-interactive examples:" -ForegroundColor DarkYellow
-    Write-DustCliCommand "dustm chat --agent `"My Agent`" --message `"Summarize this folder`"" "Send one message and exit."
-
-    Write-Host ""
-    Write-Host "Local coding workflow:" -ForegroundColor DarkYellow
-    Write-DustCliCommand "dustm skill:init" "Install the Dust skill for local coding agents."
-
-    Write-Host ""
-    Write-Host "Inside interactive chat:" -ForegroundColor DarkYellow
-    Write-DustCliCommand "/exit" "Exit the chat session."
-    Write-DustCliCommand "/switch" "Switch to a different agent."
-    Write-DustCliCommand "/resume" "Resume a previous conversation."
-    Write-DustCliCommand "/attach" "Attach a local file (or a clipboard image on Windows)."
-    Write-DustCliCommand "/clear-files" "Clear attached files."
-    Write-DustCliCommand "/auto" "Toggle auto-approval of file edits."
-
-    Write-Host ""
-    Write-Host "Repo: " -ForegroundColor DarkYellow -NoNewline
-    Write-Host "https://github.com/jlrouzies-mantu/dust-cli" -ForegroundColor White
-
-    Write-Success "`nRun 'dustm login' to authenticate, then 'dustm' to start chatting."
 }
 
 try {
@@ -369,29 +323,38 @@ try {
     } | Out-Null
     Write-Success "npm is up to date."
 
-    Write-Header "Step 5/7 - Downloading the Mantu fork"
+    Write-Header "Step 5/7 - Fetching branch '$Branch' via git"
+
+    $gitCommand = Get-Command git -ErrorAction SilentlyContinue
+    if (-not $gitCommand) {
+        throw "git is required for Install-LocalMode.ps1 (it clones/pulls a branch instead of downloading a zip of main). Install Git for Windows, or use Install-DustCLI.ps1 instead."
+    }
 
     if (-not (Test-Path $InstallRoot)) {
         New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
     }
 
-    Invoke-CollapsedStep -Title "Downloading jlrouzies-mantu/dust-cli@main" -ScriptBlock {
-        Invoke-WebRequest -Uri $using:RepoZipUrl -OutFile $using:RepoZipPath
-    } | Out-Null
-
-    Invoke-CollapsedStep -Title "Extracting the Mantu fork" -ScriptBlock {
-        if (Test-Path $using:RepoExtractDir) {
-            Remove-Item -Recurse -Force $using:RepoExtractDir
+    if (Test-Path (Join-Path $RepoDir ".git")) {
+        Invoke-CollapsedStep -Title "Fetching and resetting to origin/$Branch" -ScriptBlock {
+            Set-Location $using:RepoDir
+            & git fetch origin $using:Branch
+            if ($LASTEXITCODE -ne 0) { throw "git fetch failed with exit code $LASTEXITCODE" }
+            & git checkout $using:Branch
+            if ($LASTEXITCODE -ne 0) { throw "git checkout failed with exit code $LASTEXITCODE" }
+            & git reset --hard "origin/$using:Branch"
+            if ($LASTEXITCODE -ne 0) { throw "git reset failed with exit code $LASTEXITCODE" }
+        } | Out-Null
+    }
+    else {
+        if (Test-Path $RepoDir) {
+            Remove-Item -Recurse -Force $RepoDir
         }
-        Expand-Archive -Path $using:RepoZipPath -DestinationPath $using:InstallRoot -Force
-        Remove-Item -Force $using:RepoZipPath
-
-        if (Test-Path $using:RepoDir) {
-            Remove-Item -Recurse -Force $using:RepoDir
-        }
-        Move-Item -Path $using:RepoExtractDir -Destination $using:RepoDir
-    } | Out-Null
-    Write-Success "Ready at: $RepoDir"
+        Invoke-CollapsedStep -Title "Cloning branch '$Branch'" -ScriptBlock {
+            & git clone --branch $using:Branch --single-branch $using:RepoUrl $using:RepoDir
+            if ($LASTEXITCODE -ne 0) { throw "git clone failed with exit code $LASTEXITCODE" }
+        } | Out-Null
+    }
+    Write-Success "Ready at: $RepoDir (branch: $Branch)"
 
     Write-Header "Step 6/7 - Building the CLI"
 
@@ -467,9 +430,8 @@ try {
     Write-Success "dustm found at: $($dustCommand.Source)"
 
     Write-Header "All done"
-    Write-Success "NVM, Node.js, and the Mantu fork of Dust CLI are ready."
-
-    Write-DustCliCheatSheet
+    Write-Success "Local-mode build from branch '$Branch' is ready at $RepoDir."
+    Write-Success "Push more commits to '$Branch' and re-run this script any time to update."
 }
 catch {
     Write-ErrorMsg $_.Exception.Message

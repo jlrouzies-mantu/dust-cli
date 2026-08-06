@@ -10,7 +10,11 @@
 # rebuilds fresh each time, which is also how you pick up updates.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/install-dustcli.sh | bash
+#   curl -fsSL "https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/install-dustcli.sh?nocache=$(date +%s)" | bash
+#
+# The ?nocache=... query string works around raw.githubusercontent.com's
+# CDN, which caches by full URL for a few minutes and can otherwise serve a
+# stale copy right after a fresh push.
 # ============================================================
 
 set -euo pipefail
@@ -23,19 +27,25 @@ REPO_ZIP_PATH="$INSTALL_ROOT/dust-cli-main.zip"
 REPO_EXTRACT_DIR="$INSTALL_ROOT/dust-cli-main"
 REPO_DIR="$INSTALL_ROOT/dust-cli"
 
-MAGENTA=$'\033[35m'
 YELLOW=$'\033[33m'
 GREEN=$'\033[32m'
 GRAY=$'\033[90m'
 RED=$'\033[31m'
-WHITE=$'\033[97m'
 RESET=$'\033[0m'
+
+# Mantu brand palette (sampled from img/mantutheme.bmp) as true 24-bit ANSI
+# colors - safe on real macOS/Linux terminals. Also used for the
+# collapsed-step spinner below, which pulses the same diamond glyph through
+# the same 12-frame purple<->gold gradient as
+# src/ui/components/ThinkingIcon.tsx in the main app.
+BANNER_BG_PURPLE=$'\033[48;2;69;4;112m'      # darkest sampled purple, #450470
+BANNER_BG_PURPLE_DARK=$'\033[48;2;35;2;56m'  # darker still, for the installer title box
+BANNER_FG_BORDER=$'\033[38;2;226;193;255m'   # lilac, #e2c1ff - bright, reads clearly against the dark bar
+BANNER_FG_WHITE=$'\033[38;2;255;255;255m'
+BANNER_FG_YELLOW=$'\033[38;2;248;240;96m'    # #f8f060
+BANNER_WIDTH=76
 CLEAR_LINE=$'\033[K'
 
-# Collapsed-step spinner: pulses the same diamond glyph through the same
-# 12-frame purple<->gold gradient as src/ui/components/ThinkingIcon.tsx in
-# the main app. Each long-running command collapses to one refreshing line
-# while it runs; only expands into full captured output if it fails.
 PULSE_ICON=$'\xe2\x97\x86' # UTF-8 bytes for U+25C6, "♦"
 PULSE_STEPS=12
 PULSE_INTERVAL="0.12"
@@ -104,18 +114,47 @@ invoke_collapsed_step() {
   return "$exit_code"
 }
 
+banner_border() {
+  printf '%s+%s+%s\n' "$BANNER_FG_BORDER" "$(printf -- '-%.0s' $(seq 1 "$BANNER_WIDTH"))" "$RESET"
+}
+
+banner_bar() {
+  local text="${1:-}"
+  local fg="${2:-$BANNER_FG_WHITE}"
+  local bg="${3:-$BANNER_BG_PURPLE}"
+  local text_len=${#text}
+  local pad_total=$(( BANNER_WIDTH - text_len ))
+  local pad_left=$(( pad_total / 2 ))
+  local pad_right=$(( pad_total - pad_left ))
+  printf '%s|%s%*s%s%s%s%*s%s|%s\n' \
+    "$BANNER_FG_BORDER" "$bg" "$pad_left" "" \
+    "$fg" "$text" "$bg" "$pad_right" "" \
+    "$RESET$BANNER_FG_BORDER" "$RESET"
+}
+
 banner() {
   echo ""
-  echo -e "${MAGENTA}============================================================${RESET}"
-  echo -e "${MAGENTA}  MANTU  //  Dust CLI Installer${RESET}"
-  echo -e "${YELLOW}  A hardened, restyled build of the Dust CLI for Windows, macOS, and Linux${RESET}"
-  echo -e "${MAGENTA}============================================================${RESET}"
+  banner_border
+  banner_bar ""
+  banner_bar "M A N T U" "$BANNER_FG_WHITE"
+  banner_bar "Audacious ideas, delivered beyond." "$BANNER_FG_YELLOW"
+  banner_bar ""
+  banner_border
+  echo ""
+  banner_border
+  banner_bar "Dust CLI - Mantu fork Installer" "$BANNER_FG_WHITE" "$BANNER_BG_PURPLE_DARK"
+  banner_bar "A hardened, restyled build of the Dust CLI for Windows, macOS, and Linux" "$BANNER_FG_YELLOW" "$BANNER_BG_PURPLE_DARK"
+  banner_border
   echo ""
 }
 
 header() {
+  local rule
+  rule=$(printf -- '-%.0s' $(seq 1 "$BANNER_WIDTH"))
   echo ""
-  echo -e "${MAGENTA}-- $1${RESET}"
+  echo -e "${BANNER_FG_BORDER}${rule}${RESET}"
+  echo -e "${BANNER_FG_YELLOW}  $1${RESET}"
+  echo -e "${BANNER_FG_BORDER}${rule}${RESET}"
 }
 
 step() {
@@ -174,7 +213,7 @@ cheat_sheet() {
 
   echo ""
   echo -ne "${YELLOW}Repo: ${RESET}"
-  echo -e "${WHITE}https://github.com/jlrouzies-mantu/dust-cli${RESET}"
+  echo -e "${BANNER_FG_WHITE}https://github.com/jlrouzies-mantu/dust-cli${RESET}"
 
   echo ""
   success "Run 'dustm login' to authenticate, then 'dustm' to start chatting."

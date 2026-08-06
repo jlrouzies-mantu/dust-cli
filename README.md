@@ -224,26 +224,19 @@ node dist/index.js <command>
 
 ### Versioning
 
-`0.4.5-mantu.X.Y.Z` — `0.4.5` is the upstream Dust CLI base version (only changes on a resync, see below); `X.Y.Z` is this fork's own version, bumped on every change so the version shown in the header (`Dust CLI v...`) always tells you whether you're actually running the latest build. Bump `Z` for a routine fix, `Y` for a batch of related changes, `X` for a major rework or an upstream resync.
+Plain semver (`X.Y.Z`), independent of whatever version upstream `dust-tt/dust` is on — these are this fork's first releases, so it starts at `0.1.0` rather than pretending to be further along. Bump `Z` for a routine fix, `Y` for a batch of related changes, `X` for a major rework or an upstream resync. Pushing a tag `vX.Y.Z` triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds and publishes the Windows/macOS installable release.
 
 ## Relationship to Upstream
 
 This is a **standalone repository**, not a GitHub-native fork of [`dust-tt/dust`](https://github.com/dust-tt/dust). GitHub can only fork an entire repository, and `dust-tt/dust` is a large monorepo containing Dust's whole platform — forking all of it just to maintain one CLI subdirectory (`cli/dust-cli`) would be unnecessarily heavy and awkward to keep in sync. Instead, this repo contains just that subdirectory's contents at its root.
 
-An `upstream` remote is configured for reference:
+### Keeping this fork up to date
 
-```bash
-git remote -v
-# upstream  https://github.com/dust-tt/dust.git
-```
+To pull in upstream fixes/features, just ask your coding agent (Claude Code, Codex CLI, etc.):
 
-Because this repo's file layout doesn't mirror upstream's `cli/dust-cli/` prefix, native tools like `git subtree` don't cleanly apply here. To pull in new upstream fixes:
+> Follow [`AGENTS.md`](AGENTS.md) and sync any new upstream changes from `dust-tt/dust` into this fork.
 
-1. `git fetch upstream`
-2. `git log upstream/main -- cli/dust-cli` to see what's changed since the last sync
-3. Review each relevant commit and port it by hand (an AI assistant reviewing the diff and reconciling it against this fork's changes works well here, since several of this fork's changes touch the same files upstream is likely to keep evolving)
-
-Base import: `dust-tt/dust` @ `8f55d2a`.
+[`AGENTS.md`](AGENTS.md) tracks exactly which upstream commit this fork was last synced against, lists the Mantu-specific changes that a sync must not blindly overwrite, and has the step-by-step procedure for diffing and porting upstream's `cli/dust-cli` changes by hand (there's no shared git history to `git merge`/`git subtree` against, since this repo only contains that one subdirectory's contents).
 
 ## License
 

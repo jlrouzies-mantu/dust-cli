@@ -1,5 +1,5 @@
 param(
-    [string]$Branch = "dev"
+    [string]$Branch = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,20 +8,24 @@ $ErrorActionPreference = "Stop"
 # Mantu fork of Dust CLI - LOCAL/DEV installer
 #
 # Same as Install-DustCLI.ps1, except it fetches the fork via
-# `git clone`/`git pull` on a chosen branch instead of downloading a
-# zip of `main` - for testing changes pushed to a branch (e.g. `dev`)
-# without merging to main first. Installs to a separate directory
-# from Install-DustCLI.ps1's, so a "stable main" install and a
-# "local dev" checkout can coexist.
+# `git clone`/`git pull` instead of downloading a zip of `main` - for
+# testing changes pushed to a branch without merging to main first.
+# Installs to a separate directory from Install-DustCLI.ps1's, so a
+# "stable main" install and a "local dev" checkout can coexist.
+#
+# Simple by design: the first run clones (optionally a specific
+# branch via -Branch; otherwise whatever GitHub considers the default
+# branch). Every run after that just `git pull`s whatever branch is
+# currently checked out in that clone - re-run any time you push more
+# commits. To switch branches, `git checkout <branch>` inside
+# %USERPROFILE%\.dust-cli-mantu\dust-cli-local yourself once; this
+# script will keep pulling that branch from then on.
 #
 # Usage:
-#   .\scripts\Install-LocalMode.ps1                    # branch: dev
-#   .\scripts\Install-LocalMode.ps1 -Branch my-feature
+#   .\scripts\Install-LocalMode.ps1
+#   .\scripts\Install-LocalMode.ps1 -Branch my-feature   # first run only
 #
-# Requires git. Re-run any time to pull the latest commits on that
-# branch and rebuild - `git reset --hard origin/<branch>` is used, so
-# any local edits inside the install directory itself are discarded;
-# push your changes to the branch first, then re-run this.
+# Requires git.
 # ============================================================
 
 $RepoUrl = "https://github.com/jlrouzies-mantu/dust-cli.git"
@@ -153,7 +157,7 @@ function Write-Banner {
     Write-BannerBorder
     Write-Host ""
     Write-BannerBorder
-    Write-BannerBar -Text "Dust CLI - LOCAL MODE (branch: $Branch)" -FgColor $AnsiFgWhite -BgColor $AnsiBgPurpleDark
+    Write-BannerBar -Text "Dust CLI - LOCAL MODE" -FgColor $AnsiFgWhite -BgColor $AnsiBgPurpleDark
     Write-BannerBar -Text "For testing pushed branches without merging to main" -FgColor $AnsiFgGold -BgColor $AnsiBgPurpleDark
     Write-BannerBorder
     Write-Host ""
@@ -323,11 +327,11 @@ try {
     } | Out-Null
     Write-Success "npm is up to date."
 
-    Write-Header "Step 5/7 - Fetching branch '$Branch' via git"
+    Write-Header "Step 5/7 - Fetching the Mantu fork via git"
 
     $gitCommand = Get-Command git -ErrorAction SilentlyContinue
     if (-not $gitCommand) {
-        throw "git is required for Install-LocalMode.ps1 (it clones/pulls a branch instead of downloading a zip of main). Install Git for Windows, or use Install-DustCLI.ps1 instead."
+        throw "git is required for Install-LocalMode.ps1 (it clones/pulls instead of downloading a zip of main). Install Git for Windows, or use Install-DustCLI.ps1 instead."
     }
 
     if (-not (Test-Path $InstallRoot)) {
@@ -335,26 +339,29 @@ try {
     }
 
     if (Test-Path (Join-Path $RepoDir ".git")) {
-        Invoke-CollapsedStep -Title "Fetching and resetting to origin/$Branch" -ScriptBlock {
+        Invoke-CollapsedStep -Title "Pulling the latest changes" -ScriptBlock {
             Set-Location $using:RepoDir
-            & git fetch origin $using:Branch
-            if ($LASTEXITCODE -ne 0) { throw "git fetch failed with exit code $LASTEXITCODE" }
-            & git checkout $using:Branch
-            if ($LASTEXITCODE -ne 0) { throw "git checkout failed with exit code $LASTEXITCODE" }
-            & git reset --hard "origin/$using:Branch"
-            if ($LASTEXITCODE -ne 0) { throw "git reset failed with exit code $LASTEXITCODE" }
+            & git pull
+            if ($LASTEXITCODE -ne 0) { throw "git pull failed with exit code $LASTEXITCODE" }
         } | Out-Null
     }
     else {
         if (Test-Path $RepoDir) {
             Remove-Item -Recurse -Force $RepoDir
         }
-        Invoke-CollapsedStep -Title "Cloning branch '$Branch'" -ScriptBlock {
-            & git clone --branch $using:Branch --single-branch $using:RepoUrl $using:RepoDir
+        Invoke-CollapsedStep -Title "Cloning the repository" -ScriptBlock {
+            if ([string]::IsNullOrWhiteSpace($using:Branch)) {
+                & git clone $using:RepoUrl $using:RepoDir
+            }
+            else {
+                & git clone --branch $using:Branch --single-branch $using:RepoUrl $using:RepoDir
+            }
             if ($LASTEXITCODE -ne 0) { throw "git clone failed with exit code $LASTEXITCODE" }
         } | Out-Null
     }
-    Write-Success "Ready at: $RepoDir (branch: $Branch)"
+
+    $currentBranch = (& git -C $RepoDir rev-parse --abbrev-ref HEAD).Trim()
+    Write-Success "Ready at: $RepoDir (branch: $currentBranch)"
 
     Write-Header "Step 6/7 - Building the CLI"
 
@@ -430,8 +437,8 @@ try {
     Write-Success "dustm found at: $($dustCommand.Source)"
 
     Write-Header "All done"
-    Write-Success "Local-mode build from branch '$Branch' is ready at $RepoDir."
-    Write-Success "Push more commits to '$Branch' and re-run this script any time to update."
+    Write-Success "Local-mode build from branch '$currentBranch' is ready at $RepoDir."
+    Write-Success "Push more commits to '$currentBranch' and re-run this script any time to update."
 }
 catch {
     Write-ErrorMsg $_.Exception.Message

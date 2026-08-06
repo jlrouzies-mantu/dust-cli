@@ -15,10 +15,10 @@ import React, {
 import type { TodoItem } from "../../mcp/tools/todoWrite.js";
 import {
   CODE_BLOCK_BG,
-  MANTU_CREAM,
+  MANTU_AGENT_ACCENT,
   MANTU_GOLD,
-  MANTU_MUTED_VIOLET,
   MANTU_PURPLE,
+  MANTU_USER_ACCENT,
 } from "../../utils/brand.js";
 import type { ContextUsage } from "../../utils/contextUsage.js";
 import type { CreditsUsage } from "../../utils/creditsInfo.js";
@@ -449,7 +449,7 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
       return (
         <Box flexDirection="column" marginBottom={1}>
           <Box>
-            <Text bold color={MANTU_CREAM}>
+            <Text bold color={MANTU_USER_ACCENT}>
               {item.firstName ?? "You"}
             </Text>
           </Box>
@@ -492,7 +492,7 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
     case "agent_message_header":
       return (
         <Box>
-          <Text bold color={MANTU_MUTED_VIOLET}>
+          <Text bold color={MANTU_AGENT_ACCENT}>
             {item.agentName}
           </Text>
         </Box>

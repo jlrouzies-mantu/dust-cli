@@ -367,11 +367,27 @@ const CliChat: FC<CliChatProps> = ({
     void resolveSpace();
   }, [projectName, projectId, conversationId]);
 
+  // Lightweight, non-fatal inline notice appended to the transcript - unlike
+  // setError, which renders a full-screen "Press Ctrl+C to exit" box that
+  // replaces the whole chat UI. Reserve setError for genuinely unrecoverable
+  // failures; use this for routine, retryable notices (e.g. "no image on
+  // the clipboard").
+  const pushNotice = useCallback((text: string) => {
+    setConversationItems((prev) => [
+      ...prev,
+      {
+        key: `notice_${Date.now()}`,
+        type: "agent_message_content_line",
+        text,
+        index: 0,
+      },
+    ]);
+  }, []);
+
   const triggerAgentSwitch = useCallback(() => {
     // Clear all input states before switching.
     setUserInput("");
     setCursorPosition(0);
-    pastedBlocksRef.current = [];
     setShowCommandSelector(false);
     setCommandQuery("");
     setSelectedCommandIndex(0);
@@ -685,7 +701,6 @@ const CliChat: FC<CliChatProps> = ({
 
     setUserInput("");
     setCursorPosition(0);
-    pastedBlocksRef.current = [];
     setShowCommandSelector(false);
     setCommandQuery("");
     setSelectedCommandIndex(0);
@@ -912,7 +927,6 @@ const CliChat: FC<CliChatProps> = ({
 
     setUserInput("");
     setCursorPosition(0);
-    pastedBlocksRef.current = [];
     setShowCommandSelector(false);
     setCommandQuery("");
     setSelectedCommandIndex(0);
@@ -1770,13 +1784,13 @@ const CliChat: FC<CliChatProps> = ({
               void (async () => {
                 const clipRes = await getClipboardImagePath();
                 if (clipRes.isErr()) {
-                  setError(
+                  pushNotice(
                     `Failed to read clipboard image: ${clipRes.error.message}`
                   );
                   return;
                 }
                 if (clipRes.value === null) {
-                  setError("No image found on the clipboard.");
+                  pushNotice("No image found on the clipboard.");
                   return;
                 }
                 await handleFileSelected(clipRes.value);
@@ -1937,6 +1951,34 @@ const CliChat: FC<CliChatProps> = ({
     // Shift+Tab to toggle auto-approval mode
     if (key.tab && key.shift) {
       setAutoAcceptEdits((prev) => !prev);
+      return;
+    }
+
+    // Ctrl+V for an image: when the clipboard holds only an image (no
+    // text), most terminals - including Windows Terminal - have nothing to
+    // paste as text, so they pass the raw Ctrl+V keystroke through instead
+    // of intercepting it. That's what this relies on. When the clipboard
+    // *does* have text, the terminal consumes Ctrl+V for the normal text
+    // paste instead and this branch never fires - no conflict either way.
+    if (
+      key.ctrl &&
+      input === "v" &&
+      !isInCommandMode &&
+      process.platform === "win32"
+    ) {
+      void (async () => {
+        const clipRes = await getClipboardImagePath();
+        if (clipRes.isErr()) {
+          pushNotice(
+            `Failed to read clipboard image: ${clipRes.error.message}`
+          );
+          return;
+        }
+        if (clipRes.value === null) {
+          return;
+        }
+        await handleFileSelected(clipRes.value);
+      })();
       return;
     }
 

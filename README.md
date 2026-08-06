@@ -51,13 +51,11 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 | Transient "Thinking…" status | `◊` icon pulsing between brand colors instead of a permanent scrollback dump |
 | Persistent, colorized status bar | Workspace, agent, folder, branch, tokens, credits — see [Status bar](#status-bar) |
 | Ctrl+Enter / Shift+Enter | Multi-line input |
-| Mantu-branded header | Full-width separator + brand colors |
 | `todo_write` tool | Claude-Code-style task checklist (`--with-tools` only) |
 | Dust directive handling | Web-only directives (e.g. `:preview_file{...}`) shown as readable placeholders |
 | Clipboard image paste | Attach a screenshot straight from the clipboard via `/attach` (Windows) — see [In-Chat Commands](#in-chat-commands) |
 | Paste compaction | Large multi-line pastes collapse to a `[Pasted N lines of text]` placeholder in the input instead of dumping the raw text inline |
 | Portable content search | `search_content` (`--with-tools`) no longer shells out to the system `grep` binary, and supports lines of context around each match |
-| One-line installer | `scripts/Install-DustCLI.ps1` — see [Quick install (Windows)](#quick-install-windows) |
 
 ### 🐛 Fixed
 
@@ -92,6 +90,14 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 **Status bar** — workspace, agent, folder, branch, conversation ID, context usage, and consumed credits:
 
 ![Status bar](./img/credits-context-folder-branch.PNG)
+
+**Clipboard image paste** — `/attach` offers a "Paste image from clipboard" option (Windows), which the agent can then read like any other attachment:
+
+<p align="center">
+  <img src="./img/command-attach-picture-from-clipboard.PNG" alt="Paste image from clipboard" width="480"/>
+</p>
+
+![Attached clipboard image analyzed by the agent](./img/image-path-attachment.PNG)
 
 ---
 

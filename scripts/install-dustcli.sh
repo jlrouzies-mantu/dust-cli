@@ -334,7 +334,11 @@ fi
 
 header "Step 2/6 - Installing Node.js $NODE_VERSION"
 
-invoke_collapsed_step "Installing Node.js $NODE_VERSION via nvm" nvm install "$NODE_VERSION"
+if [ -d "$NVM_DIR/versions/node/v$NODE_VERSION" ]; then
+  info "Node.js $NODE_VERSION is already installed via nvm - skipping."
+else
+  invoke_collapsed_step "Installing Node.js $NODE_VERSION via nvm" nvm install "$NODE_VERSION"
+fi
 invoke_collapsed_step "Selecting Node.js $NODE_VERSION" nvm use "$NODE_VERSION"
 success "Node.js $NODE_VERSION is now active."
 

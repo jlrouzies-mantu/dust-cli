@@ -53,7 +53,7 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 | Ctrl+Enter / Shift+Enter | Multi-line input |
 | `todo_write` tool | Claude-Code-style task checklist (`--with-tools` only) |
 | Dust directive handling | Web-only directives (e.g. `:preview_file{...}`) shown as readable placeholders |
-| Clipboard image paste | Attach a screenshot straight from the clipboard via `/attach` (Windows) — see [In-Chat Commands](#in-chat-commands) |
+| Clipboard image paste | Attach a screenshot straight from the clipboard via Ctrl+V or `/attach` — Windows tested, macOS untested — see [In-Chat Commands](#in-chat-commands) |
 | Paste compaction | Large multi-line pastes collapse to a `[Pasted N lines of text]` placeholder in the input instead of dumping the raw text inline |
 | Portable content search | `search_content` (`--with-tools`) no longer shells out to the system `grep` binary, and supports lines of context around each match |
 
@@ -91,13 +91,15 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 
 ![Status bar](./img/credits-context-folder-branch.PNG)
 
-**Clipboard image paste** — `/attach` offers a "Paste image from clipboard" option (Windows), which the agent can then read like any other attachment:
+**Clipboard image paste** — Ctrl+V or `/attach`'s "Paste image from clipboard" option, which the agent can then read like any other attachment. Verified on Windows; the macOS path uses the same approach via AppleScript but hasn't been tested on a real Mac yet:
 
 <p align="center">
-  <img src="./img/command-attach-picture-from-clipboard.PNG" alt="Paste image from clipboard" width="480"/>
+  <img src="./img/command-attach-picture-from-clipboard.PNG" alt="Paste image from clipboard" width="336"/>
 </p>
 
-![Attached clipboard image analyzed by the agent](./img/image-path-attachment.PNG)
+<p align="center">
+  <img src="./img/image-path-attachment.PNG" alt="Attached clipboard image analyzed by the agent" width="382"/>
+</p>
 
 ---
 
@@ -182,7 +184,7 @@ Context-window usage and consumed credits come from endpoints the Dust web dashb
 
 - **`/exit`** — exit the chat session
 - **`/switch`** — switch to a different agent
-- **`/attach`** — open a file selector to attach a file (includes a "Paste image from clipboard" option on Windows)
+- **`/attach`** — open a file selector to attach a file (includes a "Paste image from clipboard" option — also bound to Ctrl+V directly; Windows tested, macOS untested)
 - **`/clear-files`** — clear any attached files
 - **`/auto`** — toggle auto-approval of file edits
 

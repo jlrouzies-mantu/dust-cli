@@ -9,26 +9,24 @@ import { normalizeError } from "./errors.js";
 
 // Terminals deliver a real OS paste (Ctrl+V) as plain text keystrokes over
 // stdin - there is no way to receive binary clipboard image data that way.
-// So this reads the clipboard directly via a small PowerShell snippet
-// instead of going through the terminal at all. Windows-only for now: the
-// System.Windows.Forms.Clipboard API this relies on has no equivalent this
-// simple on macOS/Linux.
+// So this reads the clipboard directly via a small platform script instead
+// of going through the terminal at all.
 //
-// Handles two distinct cases, since both are common ways to "copy an
-// image" on Windows and they use entirely different clipboard formats:
-//   1. Raw image data (Clipboard.ContainsImage()) - e.g. Snipping Tool,
-//      Win+Shift+S, a browser's "Copy image".
-//   2. A file reference (Clipboard.ContainsFileDropList()) - e.g.
-//      Ctrl+C on an image file in Explorer. GetImage() returns nothing
-//      for this case even though there visibly "is an image" copied.
-const CLIPBOARD_IMAGE_SCRIPT = `
+// Handles two distinct cases on both platforms, since both are common ways
+// to "copy an image":
+//   1. Raw image data - e.g. Snipping Tool, Win+Shift+S, macOS
+//      Cmd+Ctrl+Shift+4, a browser's "Copy image".
+//   2. A file reference - e.g. Ctrl+C on an image file in Explorer, or
+//      Cmd+C on a Finder selection. The raw-image-data check alone misses
+//      this case even though there visibly "is an image" copied.
+const WINDOWS_SCRIPT = `
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 if ([System.Windows.Forms.Clipboard]::ContainsImage()) {
   $img = [System.Windows.Forms.Clipboard]::GetImage()
-  $img.Save("__OUT_PATH__", [System.Drawing.Imaging.ImageFormat]::Png)
-  Write-Output "OK:__OUT_PATH__"
+  $img.Save("__OUT_PATH_PNG__", [System.Drawing.Imaging.ImageFormat]::Png)
+  Write-Output "OK:__OUT_PATH_PNG__"
 }
 elseif ([System.Windows.Forms.Clipboard]::ContainsFileDropList()) {
   $imageExtensions = @(".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")
@@ -46,35 +44,45 @@ else {
 }
 `;
 
-/**
- * Resolves the current clipboard image (if any) to a file path - either a
- * freshly-saved temp PNG (raw image data case) or the original file's own
- * path (file-reference case). Returns Ok(null) - not an error - when the
- * platform is unsupported or the clipboard simply doesn't contain an image
- * right now.
- */
-export async function getClipboardImagePath(): Promise<
-  Result<string | null, Error>
-> {
-  if (process.platform !== "win32") {
-    return new Ok(null);
-  }
+// Untested - there was no macOS machine available to verify this against a
+// real clipboard. «class furl»/«class PNGf»/«class TIFF» are the standard
+// AppleScript class codes for a Finder file reference, PNG data, and TIFF
+// data respectively; this is the commonly-documented approach for reading
+// clipboard images via osascript with no extra dependency (no pngpaste
+// etc.), but please verify it actually works before relying on it.
+const MACOS_SCRIPT = `
+try
+  set fileRef to (the clipboard as «class furl»)
+  return "OK:" & (POSIX path of fileRef)
+end try
 
-  let tmpDir: string;
-  try {
-    tmpDir = await mkdtemp(path.join(os.tmpdir(), "dust-cli-clipboard-"));
-  } catch (error) {
-    return new Err(normalizeError(error));
-  }
-  const outPath = path.join(tmpDir, `pasted-${Date.now()}.png`);
-  const script = CLIPBOARD_IMAGE_SCRIPT.replaceAll("__OUT_PATH__", outPath);
+try
+  set imgData to (the clipboard as «class PNGf»)
+  set outFile to open for access (POSIX file "__OUT_PATH_PNG__") with write permission
+  set eof outFile to 0
+  write imgData to outFile
+  close access outFile
+  return "OK:__OUT_PATH_PNG__"
+end try
 
+try
+  set imgData to (the clipboard as «class TIFF»)
+  set outFile to open for access (POSIX file "__OUT_PATH_TIFF__") with write permission
+  set eof outFile to 0
+  write imgData to outFile
+  close access outFile
+  return "OK:__OUT_PATH_TIFF__"
+end try
+
+return "NO_IMAGE"
+`;
+
+function runScript(
+  command: string,
+  args: string[]
+): Promise<Result<string, Error>> {
   return new Promise((resolve) => {
-    const child = spawn(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-Command", script],
-      { windowsHide: true }
-    );
+    const child = spawn(command, args, { windowsHide: true });
 
     let stdout = "";
     let stderr = "";
@@ -91,15 +99,59 @@ export async function getClipboardImagePath(): Promise<
       if (code !== 0) {
         resolve(
           new Err(
-            new Error(
-              stderr.trim() || `powershell.exe exited with code ${code}`
-            )
+            new Error(stderr.trim() || `${command} exited with code ${code}`)
           )
         );
         return;
       }
-      const match = stdout.match(/OK:(.+)/s);
-      resolve(new Ok(match ? match[1].trim() : null));
+      resolve(new Ok(stdout));
     });
   });
+}
+
+/**
+ * Resolves the current clipboard image (if any) to a file path - either a
+ * freshly-saved temp file (raw image data case) or the original file's own
+ * path (file-reference case). Returns Ok(null) - not an error - when the
+ * platform is unsupported or the clipboard simply doesn't contain an image
+ * right now.
+ */
+export async function getClipboardImagePath(): Promise<
+  Result<string | null, Error>
+> {
+  if (process.platform !== "win32" && process.platform !== "darwin") {
+    return new Ok(null);
+  }
+
+  let tmpDir: string;
+  try {
+    tmpDir = await mkdtemp(path.join(os.tmpdir(), "dust-cli-clipboard-"));
+  } catch (error) {
+    return new Err(normalizeError(error));
+  }
+  const outPathPng = path.join(tmpDir, `pasted-${Date.now()}.png`);
+  const outPathTiff = path.join(tmpDir, `pasted-${Date.now()}.tiff`);
+
+  const runRes =
+    process.platform === "win32"
+      ? await runScript("powershell.exe", [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          WINDOWS_SCRIPT.replaceAll("__OUT_PATH_PNG__", outPathPng),
+        ])
+      : await runScript("osascript", [
+          "-e",
+          MACOS_SCRIPT.replaceAll("__OUT_PATH_PNG__", outPathPng).replaceAll(
+            "__OUT_PATH_TIFF__",
+            outPathTiff
+          ),
+        ]);
+
+  if (runRes.isErr()) {
+    return runRes;
+  }
+
+  const match = runRes.value.match(/OK:(.+)/s);
+  return new Ok(match ? match[1].trim() : null);
 }

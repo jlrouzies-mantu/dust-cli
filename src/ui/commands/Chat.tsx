@@ -65,6 +65,10 @@ interface CliChatProps {
 // input box instead of dumping the raw text inline.
 const PASTE_COMPACT_LINE_THRESHOLD = 4;
 
+// See clipboardImage.ts - Windows is tested, macOS is best-effort/unverified.
+const SUPPORTS_CLIPBOARD_IMAGE =
+  process.platform === "win32" || process.platform === "darwin";
+
 function getLastConversationItem<T extends ConversationItem>(
   items: ConversationItem[],
   type: T["type"]
@@ -414,9 +418,8 @@ const CliChat: FC<CliChatProps> = ({
 
       // Clipboard image paste has no terminal-level "paste" event to hook
       // into (a real OS paste only ever delivers text over stdin), so it's
-      // offered here as a selectable entry instead. Windows-only for now,
-      // see clipboardImage.ts.
-      if (process.platform === "win32") {
+      // offered here as a selectable entry instead. See clipboardImage.ts.
+      if (SUPPORTS_CLIPBOARD_IMAGE) {
         items.push({
           id: "__clipboard__",
           label: "📋 Paste image from clipboard",
@@ -1964,7 +1967,7 @@ const CliChat: FC<CliChatProps> = ({
       key.ctrl &&
       input === "v" &&
       !isInCommandMode &&
-      process.platform === "win32"
+      SUPPORTS_CLIPBOARD_IMAGE
     ) {
       void (async () => {
         const clipRes = await getClipboardImagePath();

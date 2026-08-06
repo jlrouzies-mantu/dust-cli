@@ -167,6 +167,32 @@ header "Step 5/6 - Building the CLI"
   step "Installing dependencies (npm install)..."
   npm install
 
+  # keytar (secure OS-credential storage) ships a native module that npm
+  # install doesn't always manage to build - a corporate ignore-scripts
+  # policy, a proxy blocking github.com, or missing build tools can all
+  # silently leave it missing, with npm install still reporting success.
+  # Verify it explicitly instead of letting the user hit a cryptic
+  # MODULE_NOT_FOUND crash later at `login`.
+  step "Verifying keytar's native module (secure credential storage)..."
+  KEYTAR_BINARY="$REPO_DIR/node_modules/keytar/build/Release/keytar.node"
+  if [ ! -f "$KEYTAR_BINARY" ]; then
+    info "keytar.node missing after npm install - forcing a direct rebuild..."
+    PREBUILD_INSTALL_BIN="$REPO_DIR/node_modules/prebuild-install/bin.js"
+    if [ -f "$PREBUILD_INSTALL_BIN" ]; then
+      (cd "$REPO_DIR/node_modules/keytar" && node "$PREBUILD_INSTALL_BIN" --verbose)
+    fi
+    if [ ! -f "$KEYTAR_BINARY" ]; then
+      fail "keytar's native module (keytar.node) could not be installed."
+      echo "  This usually means npm scripts are disabled (check 'npm config get ignore-scripts'),"
+      echo "  a proxy/firewall is blocking https://github.com, or Xcode Command Line Tools /"
+      echo "  build-essential aren't installed for a local compile fallback."
+      exit 1
+    fi
+    success "keytar.node installed via direct rebuild."
+  else
+    success "keytar.node present."
+  fi
+
   step "Building production bundle (npm run build:prod)..."
   npm run build:prod
 

@@ -274,6 +274,36 @@ try {
         & $npmCommandPath install
         if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
 
+        # keytar (secure OS-credential storage) ships a native module that
+        # npm install doesn't always manage to build - a corporate
+        # ignore-scripts policy, a proxy blocking github.com, or antivirus
+        # interference can all silently leave it missing, with npm install
+        # still reporting success. Verify it explicitly instead of letting
+        # the user hit a cryptic MODULE_NOT_FOUND crash later at `login`.
+        Write-Step "Verifying keytar's native module (secure credential storage)..."
+        $keytarDir = Join-Path $RepoDir "node_modules\keytar"
+        $keytarBinary = Join-Path $keytarDir "build\Release\keytar.node"
+        if (-not (Test-Path $keytarBinary)) {
+            Write-Info "keytar.node missing after npm install - forcing a direct rebuild..."
+            $prebuildInstallBin = Join-Path $RepoDir "node_modules\prebuild-install\bin.js"
+            if (Test-Path $prebuildInstallBin) {
+                Push-Location $keytarDir
+                try {
+                    & $nodeCommandPath $prebuildInstallBin --verbose
+                }
+                finally {
+                    Pop-Location
+                }
+            }
+            if (-not (Test-Path $keytarBinary)) {
+                throw "keytar's native module (keytar.node) could not be installed. This usually means npm scripts are disabled (check 'npm config get ignore-scripts'), a proxy/firewall is blocking https://github.com, or antivirus is interfering with node_modules. Fix that, then re-run this installer."
+            }
+            Write-Success "keytar.node installed via direct rebuild."
+        }
+        else {
+            Write-Success "keytar.node present."
+        }
+
         Write-Step "Building production bundle (npm run build:prod)..."
         & $npmCommandPath run build:prod
         if ($LASTEXITCODE -ne 0) { throw "npm run build:prod failed with exit code $LASTEXITCODE" }

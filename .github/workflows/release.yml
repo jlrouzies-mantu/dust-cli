@@ -61,6 +61,18 @@ jobs:
       - name: Prune to production dependencies
         run: npm prune --omit=dev
 
+      # Catches exactly the class of bug that shipped once already: a
+      # package needed at runtime (e.g. imported directly in src/) getting
+      # pruned above because it was also (redundantly, and incorrectly)
+      # listed in devDependencies, which made npm's lockfile mark it
+      # dev-only. `--version` exits immediately with no auth/network calls
+      # (see App.tsx), so this only exercises module resolution - if
+      # anything actually needed at runtime got pruned, this fails the
+      # build here instead of shipping a release that crashes for everyone
+      # on the very first run.
+      - name: Smoke test the built CLI
+        run: node dist/index.js --version
+
       - name: Package release (Windows)
         if: runner.os == 'Windows'
         shell: pwsh

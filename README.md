@@ -145,17 +145,19 @@ When no command is given, `chat` is used by default.
 
 ### Commands
 
-- **`login`** — authenticate with your Dust account (`--force` to re-authenticate)
-- **`status`** — check your current authentication status
-- **`logout`** — log out
-- **`skill:init`** — install the dust skill for coding CLIs (Claude Code, Codex)
-- **`chat`** — chat with a Dust agent (default)
-  - `--agent "<name>"` / `-a` — search for and use an agent by name
-  - `--sId <sId>` / `-s` — specify an agent's sId directly
-  - `--resume <conversationId>` / `-r` — resume a past conversation
-  - `--auto` — automatically accept all file-edit operations without prompting
-  - `--message "<text>"` / `-m` — send one message non-interactively and exit
-- **`help`** — display help information
+| Command | Description |
+|---|---|
+| `login` | Authenticate with your Dust account (`--force` to re-authenticate) |
+| `status` | Check your current authentication status |
+| `logout` | Log out |
+| `skill:init` | Install the dust skill for coding CLIs (Claude Code, Codex) |
+| `chat` | Chat with a Dust agent (default command) |
+| &nbsp;&nbsp;`--agent "<name>"` / `-a` | Search for and use an agent by name |
+| &nbsp;&nbsp;`--sId <sId>` / `-s` | Specify an agent's sId directly |
+| &nbsp;&nbsp;`--resume <conversationId>` / `-r` | Resume a past conversation |
+| &nbsp;&nbsp;`--auto` | Automatically accept all file-edit operations without prompting |
+| &nbsp;&nbsp;`--message "<text>"` / `-m` | Send one message non-interactively and exit |
+| `help` | Display help information |
 
 ### Shortcuts
 

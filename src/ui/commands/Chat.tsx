@@ -8,6 +8,7 @@ import chalk from "chalk";
 import { structuredPatch } from "diff";
 import { readdir, stat } from "fs/promises";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
+import Spinner from "ink-spinner";
 import open from "open";
 import path from "path";
 import type { FC } from "react";
@@ -17,6 +18,7 @@ import { useFileSystemServer } from "../../mcp/servers/fsServer.js";
 import type { TodoItem } from "../../mcp/tools/todoWrite.js";
 import { todoListEmitter } from "../../mcp/tools/todoWrite.js";
 import AuthService from "../../utils/authService.js";
+import { MANTU_THINKING_PINK } from "../../utils/brand.js";
 import { getClipboardImagePath } from "../../utils/clipboardImage.js";
 import type { ContextUsage } from "../../utils/contextUsage.js";
 import { getContextUsage } from "../../utils/contextUsage.js";
@@ -46,6 +48,7 @@ import Conversation from "../components/Conversation.js";
 import type { UploadedFile } from "../components/FileUpload.js";
 import { FileUpload } from "../components/FileUpload.js";
 import type { InlineSelectorItem } from "../components/InlineSelector.js";
+import { ThinkingIcon } from "../components/ThinkingIcon.js";
 import { resolveSpaceId, validateProjectFlags } from "./chat/nonInteractive.js";
 import { createCommands } from "./types.js";
 
@@ -2383,7 +2386,10 @@ const CliChat: FC<CliChatProps> = ({
     if (!requestedAgentId) {
       return (
         <Box flexDirection="column">
-          <Text color="green">Loading...</Text>
+          <Text color={MANTU_THINKING_PINK}>
+            <ThinkingIcon /> Loading dustm
+            <Spinner type="simpleDots" />
+          </Text>
         </Box>
       );
     }

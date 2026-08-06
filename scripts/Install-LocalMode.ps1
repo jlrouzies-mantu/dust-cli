@@ -1,24 +1,21 @@
 $ErrorActionPreference = "Stop"
 
 # ============================================================
-# Mantu fork of Dust CLI - automated installer
+# Mantu fork of Dust CLI - LOCAL/DEV installer
 #
-# Bootstraps NVM for Windows, installs the required Node.js
-# version, then downloads a prebuilt release of this fork
-# (jlrouzies-mantu/dust-cli, built by CI on a matching Windows
-# runner - see .github/workflows/release.yml) and links it so the
-# `dustm` command is available globally - deliberately not named
-# `dust`, so it can coexist with the official Dust CLI on the same
-# machine if needed. Safe to re-run - it re-downloads the latest
-# release fresh each time, which is also how you pick up updates.
-# No npm install/build happens on your machine.
+# Same as Install-DustCLI.ps1, except it builds IN PLACE from
+# whatever checkout it's run from, instead of downloading a zip of
+# `main` - for testing changes on a branch (or uncommitted local
+# edits) without merging to main first.
+#
+# Never clones or touches git beyond reading the current branch name.
+# Run it by dot-sourcing (or just invoking) the copy that lives inside
+# your own dust-cli clone; check out/switch branches yourself, then
+# re-run this script whenever you want to rebuild/relink from whatever
+# is currently checked out.
 #
 # Usage:
-#   irm "https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/Install-DustCLI.ps1?nocache=$((Get-Date).Ticks)" | iex
-#
-# The ?nocache=... query string works around raw.githubusercontent.com's
-# CDN, which caches by full URL for a few minutes and can otherwise serve a
-# stale copy right after a fresh push.
+#   . .\scripts\Install-LocalMode.ps1
 # ============================================================
 
 $NvmZipUrl   = "https://github.com/coreybutler/nvm-windows/releases/download/1.2.2/nvm-noinstall.zip"
@@ -26,11 +23,7 @@ $NvmRoot     = "C:\Temp\Nvm"
 $NvmZipPath  = Join-Path $NvmRoot "nvm-noinstall.zip"
 $NodeVersion = "24.16.0"
 
-$ReleaseAsset   = "dustm-windows-x64.zip"
-$ReleaseZipUrl  = "https://github.com/jlrouzies-mantu/dust-cli/releases/latest/download/$ReleaseAsset"
-$InstallRoot    = Join-Path $env:USERPROFILE ".dust-cli-mantu"
-$ReleaseZipPath = Join-Path $InstallRoot $ReleaseAsset
-$RepoDir        = Join-Path $InstallRoot "dust-cli"
+$RepoDir = Split-Path -Parent $PSScriptRoot
 
 # Force console output to UTF-8
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
@@ -101,10 +94,6 @@ function Invoke-CollapsedStep {
         $frame = ($frame + 1) % $PulseSteps
     }
 
-    # Single Receive-Job call, since it drains the job's output buffer -
-    # calling it twice (e.g. once to try, once in a catch block) can silently
-    # lose output. 2>&1 merges error records into the same stream so a
-    # failure's captured output (printed before it threw) isn't lost either.
     $output = Receive-Job -Job $job -ErrorAction SilentlyContinue 2>&1
     $succeeded = $job.State -eq "Completed"
     Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
@@ -155,8 +144,8 @@ function Write-Banner {
     Write-BannerBorder
     Write-Host ""
     Write-BannerBorder
-    Write-BannerBar -Text "Dust CLI - Mantu fork Installer" -FgColor $AnsiFgWhite -BgColor $AnsiBgPurpleDark
-    Write-BannerBar -Text "A hardened, restyled build of the Dust CLI for Windows, macOS, and Linux" -FgColor $AnsiFgGold -BgColor $AnsiBgPurpleDark
+    Write-BannerBar -Text "Dust CLI - LOCAL MODE" -FgColor $AnsiFgWhite -BgColor $AnsiBgPurpleDark
+    Write-BannerBar -Text "For testing pushed branches without merging to main" -FgColor $AnsiFgGold -BgColor $AnsiBgPurpleDark
     Write-BannerBorder
     Write-Host ""
 }
@@ -188,52 +177,6 @@ function Write-Info {
 function Write-ErrorMsg {
     param([string]$Message)
     Write-Host "  [FAILED] $Message" -ForegroundColor Red
-}
-
-function Write-DustCliCommand {
-    param([string]$Command, [string]$Description)
-    Write-Host "  $Command " -ForegroundColor White -NoNewline
-    Write-Host "($Description)" -ForegroundColor Gray
-}
-
-function Write-DustCliCheatSheet {
-    Write-Header "Quick commands"
-
-    Write-Host ""
-    Write-Host "Authentication:" -ForegroundColor DarkYellow
-    Write-DustCliCommand "dustm login" "Login to your Dust account."
-    Write-DustCliCommand "dustm login --force" "Force re-authentication if needed."
-    Write-DustCliCommand "dustm status" "Check whether you are authenticated."
-    Write-DustCliCommand "dustm logout" "Logout from your Dust account."
-
-    Write-Host ""
-    Write-Host "Interactive chat:" -ForegroundColor DarkYellow
-    Write-DustCliCommand "dustm" "Start the default interactive chat."
-    Write-DustCliCommand "dustm chat --agent `"My Agent`"" "Start a chat with a specific agent by name."
-    Write-DustCliCommand "dustm chat --resume <conversationId>" "Resume a past conversation."
-
-    Write-Host ""
-    Write-Host "Non-interactive examples:" -ForegroundColor DarkYellow
-    Write-DustCliCommand "dustm chat --agent `"My Agent`" --message `"Summarize this folder`"" "Send one message and exit."
-
-    Write-Host ""
-    Write-Host "Local coding workflow:" -ForegroundColor DarkYellow
-    Write-DustCliCommand "dustm skill:init" "Install the Dust skill for local coding agents."
-
-    Write-Host ""
-    Write-Host "Inside interactive chat:" -ForegroundColor DarkYellow
-    Write-DustCliCommand "/exit" "Exit the chat session."
-    Write-DustCliCommand "/switch" "Switch to a different agent."
-    Write-DustCliCommand "/resume" "Resume a previous conversation."
-    Write-DustCliCommand "/attach" "Attach a local file (or a clipboard image on Windows)."
-    Write-DustCliCommand "/clear-files" "Clear attached files."
-    Write-DustCliCommand "/auto" "Toggle auto-approval of file edits."
-
-    Write-Host ""
-    Write-Host "Repo: " -ForegroundColor DarkYellow -NoNewline
-    Write-Host "https://github.com/jlrouzies-mantu/dust-cli" -ForegroundColor White
-
-    Write-Success "`nRun 'dustm login' to authenticate, then 'dustm' to start chatting."
 }
 
 try {
@@ -385,39 +328,66 @@ try {
     } | Out-Null
     Write-Success "npm is up to date."
 
-    Write-Header "Step 5/7 - Downloading the prebuilt Mantu fork release"
+    Write-Header "Step 5/7 - Verifying the local git checkout"
 
-    if (-not (Test-Path $InstallRoot)) {
-        New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
+    $gitCommand = Get-Command git -ErrorAction SilentlyContinue
+    if (-not $gitCommand) {
+        throw "git is required for Install-LocalMode.ps1 (used to report the current branch). Install Git for Windows."
     }
 
-    Invoke-CollapsedStep -Title "Downloading $ReleaseAsset (latest release)" -ScriptBlock {
-        Invoke-WebRequest -Uri $using:ReleaseZipUrl -OutFile $using:ReleaseZipPath
-    } | Out-Null
+    if (-not (Test-Path (Join-Path $RepoDir ".git"))) {
+        throw "$RepoDir is not a git checkout. Run this script from inside your dust-cli clone (e.g. '. .\scripts\Install-LocalMode.ps1'), not standalone."
+    }
 
-    Invoke-CollapsedStep -Title "Extracting the release" -ScriptBlock {
-        if (Test-Path $using:RepoDir) {
-            Remove-Item -Recurse -Force $using:RepoDir
+    $currentBranch = (& git -C $RepoDir rev-parse --abbrev-ref HEAD).Trim()
+    Write-Success "Building in place at: $RepoDir (branch: $currentBranch)"
+
+    # The linked command's name comes from package.json's "bin" field, which
+    # is not the same on every branch (e.g. some branches still say "dust"
+    # rather than the Mantu-renamed "dustm"). Read it rather than hardcoding
+    # it, so `npm link` and the verification step always agree - and so this
+    # script never has to rewrite a tracked file in your working checkout.
+    $packageJsonPath = Join-Path $RepoDir "package.json"
+    $packageJson = Get-Content $packageJsonPath -Raw | ConvertFrom-Json
+    if ($packageJson.bin -is [string]) {
+        $binName = $packageJson.name
+    }
+    else {
+        $binNames = @()
+        foreach ($binProperty in $packageJson.bin.PSObject.Properties) { $binNames += $binProperty.Name }
+        $binName = $binNames[0]
+        if ($binNames.Count -gt 1) {
+            Write-Info "package.json declares multiple bin entries ($($binNames -join ', ')) - using '$binName'."
         }
-        Expand-Archive -Path $using:ReleaseZipPath -DestinationPath $using:RepoDir -Force
-        Remove-Item -Force $using:ReleaseZipPath
-    } | Out-Null
-    Write-Success "Ready at: $RepoDir"
+    }
+    if ($binName -ne "dustm") {
+        Write-Info "This branch's package.json names its bin '$binName', not the Mantu fork's usual 'dustm' - continuing with '$binName'."
+    }
 
-    Write-Header "Step 6/7 - Installing the CLI"
+    Write-Header "Step 6/7 - Building the CLI"
 
     Push-Location $RepoDir
     try {
-        # keytar (secure OS-credential storage) ships a native module.
-        # CI already built and verified it for windows-x64 as part of this
-        # release (see .github/workflows/release.yml) - this is just a
-        # sanity check, with the same direct-rebuild fallback as before, in
-        # case the zip transfer itself ever corrupts it.
+        Invoke-CollapsedStep -Title "Installing dependencies (npm install)" -ScriptBlock {
+            # Start-Job's child process does NOT inherit the caller's
+            # Push-Location - it starts in its own default directory. Set
+            # it explicitly or npm runs against the wrong (or no) project.
+            Set-Location $using:RepoDir
+            & $using:npmCommandPath install
+            if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
+        } | Out-Null
+
+        # keytar (secure OS-credential storage) ships a native module that
+        # npm install doesn't always manage to build - a corporate
+        # ignore-scripts policy, a proxy blocking github.com, or antivirus
+        # interference can all silently leave it missing, with npm install
+        # still reporting success. Verify it explicitly instead of letting
+        # the user hit a cryptic MODULE_NOT_FOUND crash later at `login`.
         Invoke-CollapsedStep -Title "Verifying keytar's native module (secure credential storage)" -ScriptBlock {
             $keytarDir = Join-Path $using:RepoDir "node_modules\keytar"
             $keytarBinary = Join-Path $keytarDir "build\Release\keytar.node"
             if (-not (Test-Path $keytarBinary)) {
-                Write-Output "keytar.node missing from the release - forcing a direct rebuild..."
+                Write-Output "keytar.node missing after npm install - forcing a direct rebuild..."
                 $prebuildInstallBin = Join-Path $using:RepoDir "node_modules\prebuild-install\bin.js"
                 if (Test-Path $prebuildInstallBin) {
                     Push-Location $keytarDir
@@ -429,7 +399,7 @@ try {
                     }
                 }
                 if (-not (Test-Path $keytarBinary)) {
-                    throw "keytar's native module (keytar.node) could not be installed. This usually means a proxy/firewall is blocking https://github.com, or antivirus is interfering with node_modules. Fix that, then re-run this installer."
+                    throw "keytar's native module (keytar.node) could not be installed. This usually means npm scripts are disabled (check 'npm config get ignore-scripts'), a proxy/firewall is blocking https://github.com, or antivirus is interfering with node_modules. Fix that, then re-run this installer."
                 }
                 Write-Output "keytar.node installed via direct rebuild."
             }
@@ -438,7 +408,13 @@ try {
             }
         } | Out-Null
 
-        Invoke-CollapsedStep -Title "Linking the 'dustm' command globally (npm link)" -ScriptBlock {
+        Invoke-CollapsedStep -Title "Building production bundle (npm run build:prod)" -ScriptBlock {
+            Set-Location $using:RepoDir
+            & $using:npmCommandPath run build:prod
+            if ($LASTEXITCODE -ne 0) { throw "npm run build:prod failed with exit code $LASTEXITCODE" }
+        } | Out-Null
+
+        Invoke-CollapsedStep -Title "Linking the '$binName' command globally (npm link)" -ScriptBlock {
             Set-Location $using:RepoDir
             & $using:npmCommandPath link
             if ($LASTEXITCODE -ne 0) { throw "npm link failed with exit code $LASTEXITCODE" }
@@ -448,29 +424,28 @@ try {
         Pop-Location
     }
 
-    Write-Success "Install complete."
+    Write-Success "Build complete."
 
-    Write-Header "Step 7/7 - Verifying the 'dustm' command"
+    Write-Header "Step 7/7 - Verifying the '$binName' command"
 
-    $dustCommand = Get-Command dustm -ErrorAction SilentlyContinue
+    $dustCommand = Get-Command $binName -ErrorAction SilentlyContinue
     if (-not $dustCommand) {
-        Write-Info "dustm was not found immediately in PATH. Refreshing PATH once more."
+        Write-Info "$binName was not found immediately in PATH. Refreshing PATH once more."
         $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
         $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
         $env:Path = [string]::Join(";", @($env:NVM_HOME, $env:NVM_SYMLINK, $userPath, $machinePath))
-        $dustCommand = Get-Command dustm -ErrorAction SilentlyContinue
+        $dustCommand = Get-Command $binName -ErrorAction SilentlyContinue
     }
 
     if (-not $dustCommand) {
-        throw "dust-cli was built, but the 'dustm' command was not found in PATH. Open a new terminal and try again."
+        throw "dust-cli was built, but the '$binName' command was not found in PATH. Open a new terminal and try again."
     }
 
-    Write-Success "dustm found at: $($dustCommand.Source)"
+    Write-Success "$binName found at: $($dustCommand.Source)"
 
     Write-Header "All done"
-    Write-Success "NVM, Node.js, and the Mantu fork of Dust CLI are ready."
-
-    Write-DustCliCheatSheet
+    Write-Success "Local-mode build from branch '$currentBranch' is ready at $RepoDir."
+    Write-Success "To update: git pull (or checkout) inside $RepoDir yourself, then re-run this script."
 }
 catch {
     Write-ErrorMsg $_.Exception.Message

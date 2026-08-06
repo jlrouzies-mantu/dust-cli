@@ -3,14 +3,23 @@
 # Mantu fork of Dust CLI - automated installer (macOS/Linux)
 #
 # Bootstraps nvm, installs the required Node.js version, then
-# downloads, builds, and links this fork (jlrouzies-mantu/dust-cli)
-# so the `dustm` command is available globally - deliberately not
-# named `dust`, so it can coexist with the official Dust CLI on the
-# same machine if needed. Safe to re-run - it re-downloads and
-# rebuilds fresh each time, which is also how you pick up updates.
+# fetches this fork (jlrouzies-mantu/dust-cli) and links it so the
+# `dustm` command is available globally - deliberately not named
+# `dust`, so it can coexist with the official Dust CLI on the same
+# machine if needed. Safe to re-run - it re-fetches fresh each time,
+# which is also how you pick up updates.
+#
+# On macOS, this downloads a prebuilt release (built by CI on a
+# matching macOS runner/arch - see .github/workflows/release.yml),
+# so no npm install/build happens on your machine. Linux has no
+# prebuilt release yet, so it still builds from source there.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/install-dustcli.sh | bash
+#   curl -fsSL "https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/install-dustcli.sh?nocache=$(date +%s)" | bash
+#
+# The ?nocache=... query string works around raw.githubusercontent.com's
+# CDN, which caches by full URL for a few minutes and can otherwise serve a
+# stale copy right after a fresh push.
 # ============================================================
 
 set -euo pipefail
@@ -18,24 +27,57 @@ set -euo pipefail
 NODE_VERSION="24.16.0"
 NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 REPO_ZIP_URL="https://github.com/jlrouzies-mantu/dust-cli/archive/refs/heads/main.zip"
+RELEASE_BASE_URL="https://github.com/jlrouzies-mantu/dust-cli/releases/latest/download"
 INSTALL_ROOT="$HOME/.dust-cli-mantu"
 REPO_ZIP_PATH="$INSTALL_ROOT/dust-cli-main.zip"
 REPO_EXTRACT_DIR="$INSTALL_ROOT/dust-cli-main"
 REPO_DIR="$INSTALL_ROOT/dust-cli"
 
-MAGENTA=$'\033[35m'
+# macOS ships a prebuilt release per-arch (Apple Silicon vs Intel); Linux
+# still builds from source until a Linux release artifact exists too.
+USE_PREBUILT_RELEASE=0
+RELEASE_ASSET=""
+case "$(uname -s)" in
+  Darwin)
+    USE_PREBUILT_RELEASE=1
+    case "$(uname -m)" in
+      arm64)  RELEASE_ASSET="dustm-macos-arm64.zip" ;;
+      x86_64) RELEASE_ASSET="dustm-macos-x64.zip" ;;
+      *)
+        echo "Unsupported macOS architecture: $(uname -m)" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  Linux)
+    USE_PREBUILT_RELEASE=0
+    ;;
+  *)
+    echo "Unsupported OS: $(uname -s)" >&2
+    exit 1
+    ;;
+esac
+RELEASE_ZIP_PATH="$INSTALL_ROOT/$RELEASE_ASSET"
+
 YELLOW=$'\033[33m'
 GREEN=$'\033[32m'
 GRAY=$'\033[90m'
 RED=$'\033[31m'
-WHITE=$'\033[97m'
 RESET=$'\033[0m'
+
+# Mantu brand palette (sampled from img/mantutheme.bmp) as true 24-bit ANSI
+# colors - safe on real macOS/Linux terminals. Also used for the
+# collapsed-step spinner below, which pulses the same diamond glyph through
+# the same 12-frame purple<->gold gradient as
+# src/ui/components/ThinkingIcon.tsx in the main app.
+BANNER_BG_PURPLE=$'\033[48;2;69;4;112m'      # darkest sampled purple, #450470
+BANNER_BG_PURPLE_DARK=$'\033[48;2;35;2;56m'  # darker still, for the installer title box
+BANNER_FG_BORDER=$'\033[38;2;226;193;255m'   # lilac, #e2c1ff - bright, reads clearly against the dark bar
+BANNER_FG_WHITE=$'\033[38;2;255;255;255m'
+BANNER_FG_YELLOW=$'\033[38;2;248;240;96m'    # #f8f060
+BANNER_WIDTH=76
 CLEAR_LINE=$'\033[K'
 
-# Collapsed-step spinner: pulses the same diamond glyph through the same
-# 12-frame purple<->gold gradient as src/ui/components/ThinkingIcon.tsx in
-# the main app. Each long-running command collapses to one refreshing line
-# while it runs; only expands into full captured output if it fails.
 PULSE_ICON=$'\xe2\x97\x86' # UTF-8 bytes for U+25C6, "♦"
 PULSE_STEPS=12
 PULSE_INTERVAL="0.12"
@@ -104,18 +146,47 @@ invoke_collapsed_step() {
   return "$exit_code"
 }
 
+banner_border() {
+  printf '%s+%s+%s\n' "$BANNER_FG_BORDER" "$(printf -- '-%.0s' $(seq 1 "$BANNER_WIDTH"))" "$RESET"
+}
+
+banner_bar() {
+  local text="${1:-}"
+  local fg="${2:-$BANNER_FG_WHITE}"
+  local bg="${3:-$BANNER_BG_PURPLE}"
+  local text_len=${#text}
+  local pad_total=$(( BANNER_WIDTH - text_len ))
+  local pad_left=$(( pad_total / 2 ))
+  local pad_right=$(( pad_total - pad_left ))
+  printf '%s|%s%*s%s%s%s%*s%s|%s\n' \
+    "$BANNER_FG_BORDER" "$bg" "$pad_left" "" \
+    "$fg" "$text" "$bg" "$pad_right" "" \
+    "$RESET$BANNER_FG_BORDER" "$RESET"
+}
+
 banner() {
   echo ""
-  echo -e "${MAGENTA}============================================================${RESET}"
-  echo -e "${MAGENTA}  MANTU  //  Dust CLI Installer${RESET}"
-  echo -e "${YELLOW}  A hardened, restyled build of the Dust CLI for Windows, macOS, and Linux${RESET}"
-  echo -e "${MAGENTA}============================================================${RESET}"
+  banner_border
+  banner_bar ""
+  banner_bar "M A N T U" "$BANNER_FG_WHITE"
+  banner_bar "Audacious ideas, delivered beyond." "$BANNER_FG_YELLOW"
+  banner_bar ""
+  banner_border
+  echo ""
+  banner_border
+  banner_bar "Dust CLI - Mantu fork Installer" "$BANNER_FG_WHITE" "$BANNER_BG_PURPLE_DARK"
+  banner_bar "A hardened, restyled build of the Dust CLI for Windows, macOS, and Linux" "$BANNER_FG_YELLOW" "$BANNER_BG_PURPLE_DARK"
+  banner_border
   echo ""
 }
 
 header() {
+  local rule
+  rule=$(printf -- '-%.0s' $(seq 1 "$BANNER_WIDTH"))
   echo ""
-  echo -e "${MAGENTA}-- $1${RESET}"
+  echo -e "${BANNER_FG_BORDER}${rule}${RESET}"
+  echo -e "${BANNER_FG_YELLOW}  $1${RESET}"
+  echo -e "${BANNER_FG_BORDER}${rule}${RESET}"
 }
 
 step() {
@@ -174,7 +245,7 @@ cheat_sheet() {
 
   echo ""
   echo -ne "${YELLOW}Repo: ${RESET}"
-  echo -e "${WHITE}https://github.com/jlrouzies-mantu/dust-cli${RESET}"
+  echo -e "${BANNER_FG_WHITE}https://github.com/jlrouzies-mantu/dust-cli${RESET}"
 
   echo ""
   success "Run 'dustm login' to authenticate, then 'dustm' to start chatting."
@@ -198,6 +269,13 @@ extract_mantu_fork_step() {
   mv "$REPO_EXTRACT_DIR" "$REPO_DIR"
 }
 
+extract_prebuilt_release_step() {
+  rm -rf "$REPO_DIR"
+  mkdir -p "$REPO_DIR"
+  unzip -q -o "$RELEASE_ZIP_PATH" -d "$REPO_DIR"
+  rm -f "$RELEASE_ZIP_PATH"
+}
+
 npm_install_step() {
   cd "$REPO_DIR"
   npm install
@@ -213,7 +291,7 @@ verify_keytar_step() {
   cd "$REPO_DIR"
   local keytar_binary="$REPO_DIR/node_modules/keytar/build/Release/keytar.node"
   if [ ! -f "$keytar_binary" ]; then
-    echo "keytar.node missing after npm install - forcing a direct rebuild..."
+    echo "keytar.node missing - forcing a direct rebuild..."
     local prebuild_install_bin="$REPO_DIR/node_modules/prebuild-install/bin.js"
     if [ -f "$prebuild_install_bin" ]; then
       (cd "$REPO_DIR/node_modules/keytar" && node "$prebuild_install_bin" --verbose)
@@ -268,23 +346,39 @@ header "Step 3/6 - Verifying npm"
 invoke_collapsed_step "Updating npm to the latest version" npm install -g npm@latest
 success "npm is up to date ($(npm --version))."
 
-header "Step 4/6 - Downloading the Mantu fork"
-
 mkdir -p "$INSTALL_ROOT"
 
-invoke_collapsed_step "Downloading jlrouzies-mantu/dust-cli@main" \
-  curl -fsSL "$REPO_ZIP_URL" -o "$REPO_ZIP_PATH"
-invoke_collapsed_step "Extracting the Mantu fork" extract_mantu_fork_step
-success "Ready at: $REPO_DIR"
+if [ "$USE_PREBUILT_RELEASE" -eq 1 ]; then
+  header "Step 4/6 - Downloading the prebuilt Mantu fork release"
 
-header "Step 5/6 - Building the CLI"
+  invoke_collapsed_step "Downloading $RELEASE_ASSET (latest release)" \
+    curl -fsSL "$RELEASE_BASE_URL/$RELEASE_ASSET" -o "$RELEASE_ZIP_PATH"
+  invoke_collapsed_step "Extracting the release" extract_prebuilt_release_step
+  success "Ready at: $REPO_DIR"
 
-invoke_collapsed_step "Installing dependencies (npm install)" npm_install_step
-invoke_collapsed_step "Verifying keytar's native module (secure credential storage)" verify_keytar_step
-invoke_collapsed_step "Building production bundle (npm run build:prod)" npm_build_step
-invoke_collapsed_step "Linking the 'dustm' command globally (npm link)" npm_link_step
+  header "Step 5/6 - Installing the CLI"
 
-success "Build complete."
+  invoke_collapsed_step "Verifying keytar's native module (secure credential storage)" verify_keytar_step
+  invoke_collapsed_step "Linking the 'dustm' command globally (npm link)" npm_link_step
+
+  success "Install complete."
+else
+  header "Step 4/6 - Downloading the Mantu fork"
+
+  invoke_collapsed_step "Downloading jlrouzies-mantu/dust-cli@main" \
+    curl -fsSL "$REPO_ZIP_URL" -o "$REPO_ZIP_PATH"
+  invoke_collapsed_step "Extracting the Mantu fork" extract_mantu_fork_step
+  success "Ready at: $REPO_DIR"
+
+  header "Step 5/6 - Building the CLI"
+
+  invoke_collapsed_step "Installing dependencies (npm install)" npm_install_step
+  invoke_collapsed_step "Verifying keytar's native module (secure credential storage)" verify_keytar_step
+  invoke_collapsed_step "Building production bundle (npm run build:prod)" npm_build_step
+  invoke_collapsed_step "Linking the 'dustm' command globally (npm link)" npm_link_step
+
+  success "Build complete."
+fi
 
 header "Step 6/6 - Verifying the 'dustm' command"
 

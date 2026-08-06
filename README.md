@@ -111,20 +111,16 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 One line, no prerequisites — installs NVM for Windows, Node.js, and builds and links this fork:
 
 ```powershell
-irm https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/Install-DustCLI.ps1 | iex
+irm "https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/Install-DustCLI.ps1?nocache=$((Get-Date).Ticks)" | iex
 ```
-
-Re-run the same command any time to update to the latest version. The script lives at [`scripts/Install-DustCLI.ps1`](./scripts/Install-DustCLI.ps1) — read it before running it, as with any install script piped from the internet.
 
 ### Quick install (macOS / Linux)
 
 Same idea, via `nvm` instead of NVM for Windows — untested on a real Mac/Linux box, please report back if it doesn't work:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/install-dustcli.sh | bash
+curl -fsSL "https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/install-dustcli.sh?nocache=$(date +%s)" | bash
 ```
-
-Script lives at [`scripts/install-dustcli.sh`](./scripts/install-dustcli.sh) — same "read before piping into a shell" caveat applies.
 
 ### Manual install
 

@@ -37,7 +37,7 @@ jobs:
             asset: dustm-windows-x64
           - os: macos-14 # Apple Silicon (arm64)
             asset: dustm-macos-arm64
-          - os: macos-13 # Intel (x64)
+          - os: macos-15-intel # Intel (x64) - macos-13 was fully retired Dec 2025
             asset: dustm-macos-x64
     runs-on: ${{ matrix.os }}
     steps:

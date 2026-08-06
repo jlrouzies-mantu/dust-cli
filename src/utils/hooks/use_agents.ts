@@ -29,7 +29,7 @@ export function useAgents() {
       const workspaceId = await AuthService.getSelectedWorkspaceId();
       if (!workspaceId) {
         setError(
-          "No workspace selected. Run `dust login` to select a workspace."
+          "No workspace selected. Run `dustm login` to select a workspace."
         );
         setIsLoading(false);
         return;
@@ -60,7 +60,7 @@ export function useAgents() {
 
       const dustClient = dustClientRes.value;
       if (!dustClient) {
-        setError("Authentication required. Run `dust login` first.");
+        setError("Authentication required. Run `dustm login` first.");
         setIsLoading(false);
         return;
       }

@@ -23,7 +23,7 @@ const Conversations: FC = () => {
       }
       const dustClient = dustClientRes.value;
       if (!dustClient) {
-        setError("Authentication required. Run `dust login` first.");
+        setError("Authentication required. Run `dustm login` first.");
         setLoading(false);
         return;
       }
@@ -96,7 +96,7 @@ const Conversations: FC = () => {
         );
       })}
       <Box height={1} />
-      <Text dimColor>Resume with: dust --resume &lt;conversationId&gt;</Text>
+      <Text dimColor>Resume with: dustm --resume &lt;conversationId&gt;</Text>
     </Box>
   );
 };

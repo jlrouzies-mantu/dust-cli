@@ -52,7 +52,7 @@ export const FileUpload: FC<FileUploadProps> = ({
 
       const dustClient = dustClientRes.value;
       if (!dustClient) {
-        onUploadError("Authentication required. Run `dust login` first.");
+        onUploadError("Authentication required. Run `dustm login` first.");
         return;
       }
 

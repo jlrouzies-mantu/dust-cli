@@ -32,8 +32,8 @@ const Help: FC = () => {
       </Box>
       <Box marginLeft={2}>
         <Text>
-          <Text bold>skill:init</Text> Install the dust skill for coding CLIs
-          (Claude Code, Codex)
+          <Text bold>skill:init</Text> Install the dustm skill for coding
+          CLIs (Claude Code, Codex)
         </Text>
       </Box>
       <Box marginLeft={2}>

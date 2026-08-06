@@ -349,7 +349,7 @@ const CliChat: FC<CliChatProps> = ({
 
       const dustClient = dustClientRes.value;
       if (!dustClient) {
-        setError("Authentication required. Run `dust login` first.");
+        setError("Authentication required. Run `dustm login` first.");
         setIsResolvingSpace(false);
         return;
       }
@@ -738,7 +738,7 @@ const CliChat: FC<CliChatProps> = ({
 
       const dustClient = dustClientRes.value;
       if (!dustClient) {
-        setError("Authentication required. Run `dust login` first.");
+        setError("Authentication required. Run `dustm login` first.");
         return null;
       }
 
@@ -851,7 +851,7 @@ const CliChat: FC<CliChatProps> = ({
       }
       const dustClient = dustClientRes.value;
       if (!dustClient) {
-        setError("Authentication required. Run `dust login` first.");
+        setError("Authentication required. Run `dustm login` first.");
         return;
       }
 
@@ -895,7 +895,7 @@ const CliChat: FC<CliChatProps> = ({
     }
     const dustClient = dustClientRes.value;
     if (!dustClient) {
-      setError("Authentication required. Run `dust login` first.");
+      setError("Authentication required. Run `dustm login` first.");
       return;
     }
 
@@ -1038,7 +1038,7 @@ const CliChat: FC<CliChatProps> = ({
       }
       const dustClient = dustClientRes.value;
       if (!dustClient) {
-        setError("Authentication required. Run `dust login` first.");
+        setError("Authentication required. Run `dustm login` first.");
         return;
       }
 
@@ -1080,7 +1080,7 @@ const CliChat: FC<CliChatProps> = ({
       }
       const dustClient = dustClientRes.value;
       if (!dustClient) {
-        setError("Authentication required. Run `dust login` first.");
+        setError("Authentication required. Run `dustm login` first.");
         return;
       }
 
@@ -1202,7 +1202,7 @@ const CliChat: FC<CliChatProps> = ({
 
       const dustClient = dustClientRes.value;
       if (!dustClient) {
-        setError("Authentication required. Run `dust login` first.");
+        setError("Authentication required. Run `dustm login` first.");
         setIsProcessingQuestion(false);
         setConversationItems((prev) => prev.slice(0, -1));
         return;
@@ -1320,7 +1320,7 @@ const CliChat: FC<CliChatProps> = ({
         const agentFlag = selectedAgent
           ? ` --agent "${selectedAgent.name}"`
           : "";
-        return `\n\nTo resume this conversation, run:\ndustw${agentFlag} --resume ${conversation.sId}`;
+        return `\n\nTo resume this conversation, run:\ndustm${agentFlag} --resume ${conversation.sId}`;
       };
 
       // Same closure-scoping reason as above.

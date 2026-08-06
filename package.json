@@ -1,6 +1,6 @@
 {
   "name": "dust-cli",
-  "version": "0.4.5-mantu.1.1.0",
+  "version": "0.4.5-mantu.2.0.0",
   "engines": {
     "node": ">=24.16.0"
   },
@@ -8,7 +8,7 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "dust": "dist/index.js"
+    "dustm": "dist/index.js"
   },
   "files": [
     "dist"

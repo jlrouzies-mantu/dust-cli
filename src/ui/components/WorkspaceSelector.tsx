@@ -37,7 +37,7 @@ const WorkspaceSelector: FC<WorkspaceSelectorProps> = ({ onComplete }) => {
         const client = clientRes.value;
         if (!client) {
           setError(
-            "Failed to initialize the API client. Please authenticate first using `dust login`."
+            "Failed to initialize the API client. Please authenticate first using `dustm login`."
           );
           setIsLoading(false);
           return;

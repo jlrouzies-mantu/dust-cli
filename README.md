@@ -21,6 +21,7 @@
 - [Screenshots](#screenshots)
 - [Installation](#installation)
   - [Quick install (Windows)](#quick-install-windows)
+  - [Quick install (macOS / Linux)](#quick-install-macos--linux)
 - [Usage](#usage)
   - [Commands](#commands)
   - [Shortcuts](#shortcuts)
@@ -74,7 +75,7 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 
 ### 🔧 Changed
 
-- Renamed package/bin from `@dust-tt/dust-cli`/`dust` to **`dust-cli`**/`dust` — installing this fork shadows the official npm package's `dust` command on `PATH` (intentional; this is meant to replace it, not coexist alongside it)
+- Renamed package/bin from `@dust-tt/dust-cli`/`dust` to **`dust-cli`**/**`dustm`** — installing this fork no longer shadows the official npm package's `dust` command on `PATH`, so both can be installed side by side if needed
 - Build config no longer generates `.d.ts` output (irrelevant for a CLI binary, and was crashing on an unrelated `rollup-plugin-dts` incompatibility)
 
 ---
@@ -115,6 +116,16 @@ irm https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/Inst
 
 Re-run the same command any time to update to the latest version. The script lives at [`scripts/Install-DustCLI.ps1`](./scripts/Install-DustCLI.ps1) — read it before running it, as with any install script piped from the internet.
 
+### Quick install (macOS / Linux)
+
+Same idea, via `nvm` instead of NVM for Windows — untested on a real Mac/Linux box, please report back if it doesn't work:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/install-dustcli.sh | bash
+```
+
+Script lives at [`scripts/install-dustcli.sh`](./scripts/install-dustcli.sh) — same "read before piping into a shell" caveat applies.
+
 ### Manual install
 
 ```bash
@@ -122,12 +133,12 @@ git clone <this-repo-url>
 cd dust-cli
 npm install
 npm run build:prod
-npm link   # optional: makes `dust` available globally
+npm link   # optional: makes `dustm` available globally
 ```
 
 ### Linux
 
-`dust` depends on [`keytar`](https://www.npmjs.com/package/keytar) for storing credentials. On Linux, `keytar` requires `libsecret`:
+`dustm` depends on [`keytar`](https://www.npmjs.com/package/keytar) for storing credentials. On Linux, `keytar` requires `libsecret`:
 
 - Debian/Ubuntu: `sudo apt-get install libsecret-1-dev`
 - Red Hat-based: `sudo yum install libsecret-devel`
@@ -138,7 +149,7 @@ This fork reads the exact same credentials the official CLI stores — if you've
 ## Usage
 
 ```bash
-dust [command] [options]
+dustm [command] [options]
 ```
 
 When no command is given, `chat` is used by default.
@@ -150,7 +161,7 @@ When no command is given, `chat` is used by default.
 | `login` | Authenticate with your Dust account (`--force` to re-authenticate) |
 | `status` | Check your current authentication status |
 | `logout` | Log out |
-| `skill:init` | Install the dust skill for coding CLIs (Claude Code, Codex) |
+| `skill:init` | Install the dustm skill for coding CLIs (Claude Code, Codex) |
 | `chat` | Chat with a Dust agent (default command) |
 | &nbsp;&nbsp;`--agent "<name>"` / `-a` | Search for and use an agent by name |
 | &nbsp;&nbsp;`--sId <sId>` / `-s` | Specify an agent's sId directly |
@@ -197,12 +208,12 @@ For CI/CD and automated workflows, skip interactive login entirely:
 ```bash
 export DUST_API_KEY="sk_your_api_key_here"
 export DUST_WORKSPACE_ID="ws_abc123"
-dust chat --agent "MyAgent" --message "hello"
+dustm chat --agent "MyAgent" --message "hello"
 ```
 
-or via flags: `dust chat --wId ws_abc123 --key sk_your_api_key_here`.
+or via flags: `dustm chat --wId ws_abc123 --key sk_your_api_key_here`.
 
-**Note:** this auth path only works for chat/messages — the local filesystem/shell tool-use subsystem (`--with-tools`) requires a full OAuth session (`dust login`), not a workspace API key.
+**Note:** this auth path only works for chat/messages — the local filesystem/shell tool-use subsystem (`--with-tools`) requires a full OAuth session (`dustm login`), not a workspace API key.
 
 ## Development
 

@@ -5,9 +5,11 @@ $ErrorActionPreference = "Stop"
 #
 # Bootstraps NVM for Windows, installs the required Node.js
 # version, then downloads, builds, and links this fork
-# (jlrouzies-mantu/dust-cli) so the `dust` command is available
-# globally. Safe to re-run - it re-downloads and rebuilds fresh
-# each time, which is also how you pick up updates.
+# (jlrouzies-mantu/dust-cli) so the `dustm` command is available
+# globally - deliberately not named `dust`, so it can coexist with
+# the official Dust CLI on the same machine if needed. Safe to
+# re-run - it re-downloads and rebuilds fresh each time, which is
+# also how you pick up updates.
 #
 # Usage:
 #   irm https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/Install-DustCLI.ps1 | iex
@@ -74,24 +76,24 @@ function Write-DustCliCheatSheet {
 
     Write-Host ""
     Write-Host "Authentication:" -ForegroundColor DarkYellow
-    Write-DustCliCommand "dust login" "Login to your Dust account."
-    Write-DustCliCommand "dust login --force" "Force re-authentication if needed."
-    Write-DustCliCommand "dust status" "Check whether you are authenticated."
-    Write-DustCliCommand "dust logout" "Logout from your Dust account."
+    Write-DustCliCommand "dustm login" "Login to your Dust account."
+    Write-DustCliCommand "dustm login --force" "Force re-authentication if needed."
+    Write-DustCliCommand "dustm status" "Check whether you are authenticated."
+    Write-DustCliCommand "dustm logout" "Logout from your Dust account."
 
     Write-Host ""
     Write-Host "Interactive chat:" -ForegroundColor DarkYellow
-    Write-DustCliCommand "dust" "Start the default interactive chat."
-    Write-DustCliCommand "dust chat --agent `"My Agent`"" "Start a chat with a specific agent by name."
-    Write-DustCliCommand "dust chat --resume <conversationId>" "Resume a past conversation."
+    Write-DustCliCommand "dustm" "Start the default interactive chat."
+    Write-DustCliCommand "dustm chat --agent `"My Agent`"" "Start a chat with a specific agent by name."
+    Write-DustCliCommand "dustm chat --resume <conversationId>" "Resume a past conversation."
 
     Write-Host ""
     Write-Host "Non-interactive examples:" -ForegroundColor DarkYellow
-    Write-DustCliCommand "dust chat --agent `"My Agent`" --message `"Summarize this folder`"" "Send one message and exit."
+    Write-DustCliCommand "dustm chat --agent `"My Agent`" --message `"Summarize this folder`"" "Send one message and exit."
 
     Write-Host ""
     Write-Host "Local coding workflow:" -ForegroundColor DarkYellow
-    Write-DustCliCommand "dust skill:init" "Install the Dust skill for local coding agents."
+    Write-DustCliCommand "dustm skill:init" "Install the Dust skill for local coding agents."
 
     Write-Host ""
     Write-Host "Inside interactive chat:" -ForegroundColor DarkYellow
@@ -106,7 +108,7 @@ function Write-DustCliCheatSheet {
     Write-Host "Repo: " -ForegroundColor DarkYellow -NoNewline
     Write-Host "https://github.com/jlrouzies-mantu/dust-cli" -ForegroundColor White
 
-    Write-Success "`nRun 'dust login' to authenticate, then 'dust' to start chatting."
+    Write-Success "`nRun 'dustm login' to authenticate, then 'dustm' to start chatting."
 }
 
 try {
@@ -276,7 +278,7 @@ try {
         & $npmCommandPath run build:prod
         if ($LASTEXITCODE -ne 0) { throw "npm run build:prod failed with exit code $LASTEXITCODE" }
 
-        Write-Step "Linking the 'dust' command globally (npm link)..."
+        Write-Step "Linking the 'dustm' command globally (npm link)..."
         & $npmCommandPath link
         if ($LASTEXITCODE -ne 0) { throw "npm link failed with exit code $LASTEXITCODE" }
     }
@@ -286,22 +288,22 @@ try {
 
     Write-Success "Build complete."
 
-    Write-Header "Step 7/7 - Verifying the 'dust' command"
+    Write-Header "Step 7/7 - Verifying the 'dustm' command"
 
-    $dustCommand = Get-Command dust -ErrorAction SilentlyContinue
+    $dustCommand = Get-Command dustm -ErrorAction SilentlyContinue
     if (-not $dustCommand) {
-        Write-Info "dust was not found immediately in PATH. Refreshing PATH once more."
+        Write-Info "dustm was not found immediately in PATH. Refreshing PATH once more."
         $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
         $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
         $env:Path = [string]::Join(";", @($env:NVM_HOME, $env:NVM_SYMLINK, $userPath, $machinePath))
-        $dustCommand = Get-Command dust -ErrorAction SilentlyContinue
+        $dustCommand = Get-Command dustm -ErrorAction SilentlyContinue
     }
 
     if (-not $dustCommand) {
-        throw "dust-cli was built, but the 'dust' command was not found in PATH. Open a new terminal and try again."
+        throw "dust-cli was built, but the 'dustm' command was not found in PATH. Open a new terminal and try again."
     }
 
-    Write-Success "dust found at: $($dustCommand.Source)"
+    Write-Success "dustm found at: $($dustCommand.Source)"
 
     Write-Header "All done"
     Write-Success "NVM, Node.js, and the Mantu fork of Dust CLI are ready."

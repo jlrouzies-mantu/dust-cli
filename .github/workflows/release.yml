@@ -7,11 +7,22 @@ name: Release
 # source on the target machine - this is what actually builds it, on a
 # runner matching the target OS/arch, so a broken native module (keytar)
 # fails loudly here instead of silently on a user's machine.
+#
+# Merging a PR to main does NOT publish a release by itself - only a
+# pushed version tag does, or a manual run below (Actions tab -> Release
+# -> Run workflow), which builds whichever branch you pick and tags/
+# publishes it under the tag you type in.
 
 on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create/update (e.g. v1.0.0)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -83,12 +94,25 @@ jobs:
           find artifacts -name '*.zip' -exec cp {} release/ \;
           ls -la release
 
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create or update the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${{ steps.tag.outputs.value }}"
           if ! gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release create "$TAG" --repo "${{ github.repository }}" --title "$TAG" --generate-notes
+            # --target pins the tag to the exact commit this workflow run
+            # actually built - important for workflow_dispatch, where the
+            # tag doesn't exist yet and would otherwise default to whatever
+            # the default branch points to by the time this step runs.
+            gh release create "$TAG" --repo "${{ github.repository }}" --title "$TAG" --target "${{ github.sha }}" --generate-notes
           fi
           gh release upload "$TAG" release/*.zip --repo "${{ github.repository }}" --clobber

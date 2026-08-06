@@ -1,42 +1,29 @@
-param(
-    [string]$Branch = ""
-)
-
 $ErrorActionPreference = "Stop"
 
 # ============================================================
 # Mantu fork of Dust CLI - LOCAL/DEV installer
 #
-# Same as Install-DustCLI.ps1, except it fetches the fork via
-# `git clone` instead of downloading a zip of `main` - for testing
-# changes pushed to a branch without merging to main first. Installs
-# to a separate directory from Install-DustCLI.ps1's, so a "stable
-# main" install and a "local dev" checkout can coexist.
+# Same as Install-DustCLI.ps1, except it builds IN PLACE from
+# whatever checkout it's run from, instead of downloading a zip of
+# `main` - for testing changes on a branch (or uncommitted local
+# edits) without merging to main first.
 #
-# Simple by design: the first run clones (optionally a specific
-# branch via -Branch; otherwise whatever GitHub considers the default
-# branch). This script never pulls or touches git on later runs - the
-# clone at %USERPROFILE%\.dust-cli-mantu\dust-cli-local is yours to
-# manage (git pull, git checkout, etc.) by hand; re-run this script
-# afterwards whenever you want to rebuild/relink from whatever is
-# currently checked out there.
+# Never clones or touches git beyond reading the current branch name.
+# Run it by dot-sourcing (or just invoking) the copy that lives inside
+# your own dust-cli clone; check out/switch branches yourself, then
+# re-run this script whenever you want to rebuild/relink from whatever
+# is currently checked out.
 #
 # Usage:
-#   .\scripts\Install-LocalMode.ps1
-#   .\scripts\Install-LocalMode.ps1 -Branch my-feature   # first run only
-#
-# Requires git.
+#   . .\scripts\Install-LocalMode.ps1
 # ============================================================
-
-$RepoUrl = "https://github.com/jlrouzies-mantu/dust-cli.git"
 
 $NvmZipUrl   = "https://github.com/coreybutler/nvm-windows/releases/download/1.2.2/nvm-noinstall.zip"
 $NvmRoot     = "C:\Temp\Nvm"
 $NvmZipPath  = Join-Path $NvmRoot "nvm-noinstall.zip"
 $NodeVersion = "24.16.0"
 
-$InstallRoot = Join-Path $env:USERPROFILE ".dust-cli-mantu"
-$RepoDir     = Join-Path $InstallRoot "dust-cli-local"
+$RepoDir = Split-Path -Parent $PSScriptRoot
 
 # Force console output to UTF-8
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
@@ -283,6 +270,20 @@ try {
     Invoke-CollapsedStep -Title "Selecting Node.js $NodeVersion" -ScriptBlock {
         & $using:nvmExe use $using:NodeVersion
         if ($LASTEXITCODE -ne 0) { throw "nvm use failed with exit code $LASTEXITCODE" }
+
+        # Right after nvm (re)points the nodejs symlink, the filesystem can
+        # take a brief moment before Test-Path/Get-Item reflect it - poll
+        # briefly instead of trusting the very first check (or re-running
+        # nvm use, which doesn't help and just duplicates its output).
+        $expectedNodeExe = Join-Path $using:NodeJsSymlink "node.exe"
+        $found = $false
+        for ($i = 0; $i -lt 10; $i++) {
+            if (Test-Path $expectedNodeExe) { $found = $true; break }
+            Start-Sleep -Milliseconds 500
+        }
+        if (-not $found) {
+            throw "nvm use reported success but node.exe was not found at: $expectedNodeExe (waited 5s)"
+        }
     } | Out-Null
 
     Write-Success "Node.js $NodeVersion is now active."
@@ -327,43 +328,51 @@ try {
     } | Out-Null
     Write-Success "npm is up to date."
 
-    Write-Header "Step 5/7 - Fetching the Mantu fork via git"
+    Write-Header "Step 5/7 - Verifying the local git checkout"
 
     $gitCommand = Get-Command git -ErrorAction SilentlyContinue
     if (-not $gitCommand) {
-        throw "git is required for Install-LocalMode.ps1 (it clones/pulls instead of downloading a zip of main). Install Git for Windows, or use Install-DustCLI.ps1 instead."
+        throw "git is required for Install-LocalMode.ps1 (used to report the current branch). Install Git for Windows."
     }
 
-    if (-not (Test-Path $InstallRoot)) {
-        New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
-    }
-
-    if (Test-Path (Join-Path $RepoDir ".git")) {
-        Write-Info "Repository already cloned at $RepoDir - using it as-is (pull/checkout manually if needed)."
-    }
-    else {
-        if (Test-Path $RepoDir) {
-            Remove-Item -Recurse -Force $RepoDir
-        }
-        Invoke-CollapsedStep -Title "Cloning the repository" -ScriptBlock {
-            if ([string]::IsNullOrWhiteSpace($using:Branch)) {
-                & git clone $using:RepoUrl $using:RepoDir
-            }
-            else {
-                & git clone --branch $using:Branch --single-branch $using:RepoUrl $using:RepoDir
-            }
-            if ($LASTEXITCODE -ne 0) { throw "git clone failed with exit code $LASTEXITCODE" }
-        } | Out-Null
+    if (-not (Test-Path (Join-Path $RepoDir ".git"))) {
+        throw "$RepoDir is not a git checkout. Run this script from inside your dust-cli clone (e.g. '. .\scripts\Install-LocalMode.ps1'), not standalone."
     }
 
     $currentBranch = (& git -C $RepoDir rev-parse --abbrev-ref HEAD).Trim()
-    Write-Success "Ready at: $RepoDir (branch: $currentBranch)"
+    Write-Success "Building in place at: $RepoDir (branch: $currentBranch)"
+
+    # The linked command's name comes from package.json's "bin" field, which
+    # is not the same on every branch (e.g. some branches still say "dust"
+    # rather than the Mantu-renamed "dustm"). Read it rather than hardcoding
+    # it, so `npm link` and the verification step always agree - and so this
+    # script never has to rewrite a tracked file in your working checkout.
+    $packageJsonPath = Join-Path $RepoDir "package.json"
+    $packageJson = Get-Content $packageJsonPath -Raw | ConvertFrom-Json
+    if ($packageJson.bin -is [string]) {
+        $binName = $packageJson.name
+    }
+    else {
+        $binNames = @()
+        foreach ($binProperty in $packageJson.bin.PSObject.Properties) { $binNames += $binProperty.Name }
+        $binName = $binNames[0]
+        if ($binNames.Count -gt 1) {
+            Write-Info "package.json declares multiple bin entries ($($binNames -join ', ')) - using '$binName'."
+        }
+    }
+    if ($binName -ne "dustm") {
+        Write-Info "This branch's package.json names its bin '$binName', not the Mantu fork's usual 'dustm' - continuing with '$binName'."
+    }
 
     Write-Header "Step 6/7 - Building the CLI"
 
     Push-Location $RepoDir
     try {
         Invoke-CollapsedStep -Title "Installing dependencies (npm install)" -ScriptBlock {
+            # Start-Job's child process does NOT inherit the caller's
+            # Push-Location - it starts in its own default directory. Set
+            # it explicitly or npm runs against the wrong (or no) project.
+            Set-Location $using:RepoDir
             & $using:npmCommandPath install
             if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
         } | Out-Null
@@ -400,11 +409,13 @@ try {
         } | Out-Null
 
         Invoke-CollapsedStep -Title "Building production bundle (npm run build:prod)" -ScriptBlock {
+            Set-Location $using:RepoDir
             & $using:npmCommandPath run build:prod
             if ($LASTEXITCODE -ne 0) { throw "npm run build:prod failed with exit code $LASTEXITCODE" }
         } | Out-Null
 
-        Invoke-CollapsedStep -Title "Linking the 'dustm' command globally (npm link)" -ScriptBlock {
+        Invoke-CollapsedStep -Title "Linking the '$binName' command globally (npm link)" -ScriptBlock {
+            Set-Location $using:RepoDir
             & $using:npmCommandPath link
             if ($LASTEXITCODE -ne 0) { throw "npm link failed with exit code $LASTEXITCODE" }
         } | Out-Null
@@ -415,22 +426,22 @@ try {
 
     Write-Success "Build complete."
 
-    Write-Header "Step 7/7 - Verifying the 'dustm' command"
+    Write-Header "Step 7/7 - Verifying the '$binName' command"
 
-    $dustCommand = Get-Command dustm -ErrorAction SilentlyContinue
+    $dustCommand = Get-Command $binName -ErrorAction SilentlyContinue
     if (-not $dustCommand) {
-        Write-Info "dustm was not found immediately in PATH. Refreshing PATH once more."
+        Write-Info "$binName was not found immediately in PATH. Refreshing PATH once more."
         $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
         $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
         $env:Path = [string]::Join(";", @($env:NVM_HOME, $env:NVM_SYMLINK, $userPath, $machinePath))
-        $dustCommand = Get-Command dustm -ErrorAction SilentlyContinue
+        $dustCommand = Get-Command $binName -ErrorAction SilentlyContinue
     }
 
     if (-not $dustCommand) {
-        throw "dust-cli was built, but the 'dustm' command was not found in PATH. Open a new terminal and try again."
+        throw "dust-cli was built, but the '$binName' command was not found in PATH. Open a new terminal and try again."
     }
 
-    Write-Success "dustm found at: $($dustCommand.Source)"
+    Write-Success "$binName found at: $($dustCommand.Source)"
 
     Write-Header "All done"
     Write-Success "Local-mode build from branch '$currentBranch' is ready at $RepoDir."

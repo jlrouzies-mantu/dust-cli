@@ -325,6 +325,20 @@ try {
     Invoke-CollapsedStep -Title "Selecting Node.js $NodeVersion" -ScriptBlock {
         & $using:nvmExe use $using:NodeVersion
         if ($LASTEXITCODE -ne 0) { throw "nvm use failed with exit code $LASTEXITCODE" }
+
+        # Right after nvm (re)points the nodejs symlink, the filesystem can
+        # take a brief moment before Test-Path/Get-Item reflect it - poll
+        # briefly instead of trusting the very first check (or re-running
+        # nvm use, which doesn't help and just duplicates its output).
+        $expectedNodeExe = Join-Path $using:NodeJsSymlink "node.exe"
+        $found = $false
+        for ($i = 0; $i -lt 10; $i++) {
+            if (Test-Path $expectedNodeExe) { $found = $true; break }
+            Start-Sleep -Milliseconds 500
+        }
+        if (-not $found) {
+            throw "nvm use reported success but node.exe was not found at: $expectedNodeExe (waited 5s)"
+        }
     } | Out-Null
 
     Write-Success "Node.js $NodeVersion is now active."
@@ -398,6 +412,10 @@ try {
     Push-Location $RepoDir
     try {
         Invoke-CollapsedStep -Title "Installing dependencies (npm install)" -ScriptBlock {
+            # Start-Job's child process does NOT inherit the caller's
+            # Push-Location - it starts in its own default directory. Set
+            # it explicitly or npm runs against the wrong (or no) project.
+            Set-Location $using:RepoDir
             & $using:npmCommandPath install
             if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
         } | Out-Null
@@ -434,11 +452,13 @@ try {
         } | Out-Null
 
         Invoke-CollapsedStep -Title "Building production bundle (npm run build:prod)" -ScriptBlock {
+            Set-Location $using:RepoDir
             & $using:npmCommandPath run build:prod
             if ($LASTEXITCODE -ne 0) { throw "npm run build:prod failed with exit code $LASTEXITCODE" }
         } | Out-Null
 
         Invoke-CollapsedStep -Title "Linking the 'dustm' command globally (npm link)" -ScriptBlock {
+            Set-Location $using:RepoDir
             & $using:npmCommandPath link
             if ($LASTEXITCODE -ne 0) { throw "npm link failed with exit code $LASTEXITCODE" }
         } | Out-Null

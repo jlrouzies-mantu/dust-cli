@@ -27,7 +27,7 @@ export const useFileSystemServer = async (
   if (apiKey?.startsWith("sk-")) {
     return new Err(
       new Error(
-        "File system access requires OAuth authentication. API keys don't support MCP server registration. Please use 'dust login' to authenticate with OAuth for file system features."
+        "File system access requires OAuth authentication. API keys don't support MCP server registration. Please use 'dustm login' to authenticate with OAuth for file system features."
       )
     );
   }

@@ -129,7 +129,7 @@ export async function sendNonInteractiveMessage(
 
   const dustClient = dustClientRes.value;
   if (!dustClient) {
-    const errorMsg = "Authentication required: Run `dust login` first";
+    const errorMsg = "Authentication required: Run `dustm login` first";
     if (setError) {
       setError(errorMsg);
       return;
@@ -396,7 +396,7 @@ export async function sendNonInteractiveMessage(
     }
 
     const conversationSuffix = conversation
-      ? `\n\nTo resume this conversation, run:\ndustw --agent "${selectedAgent.name}" --resume ${conversation.sId}`
+      ? `\n\nTo resume this conversation, run:\ndustm --agent "${selectedAgent.name}" --resume ${conversation.sId}`
       : "";
     const errorMsg = `Unexpected error: ${normalizeError(error).message}${conversationSuffix}`;
     if (setError) {
@@ -474,7 +474,7 @@ export async function fetchAgentMessageFromConversation(
 
   const dustClient = dustClientRes.value;
   if (!dustClient) {
-    const errorMsg = "Authentication required: Run `dust login` first";
+    const errorMsg = "Authentication required: Run `dustm login` first";
     if (setError) {
       setError(errorMsg);
       return;

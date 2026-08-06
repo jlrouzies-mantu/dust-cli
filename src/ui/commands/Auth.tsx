@@ -271,14 +271,14 @@ const Auth: FC<AuthProps> = ({ force = false, apiKey, wId }) => {
     const dustClient = dustClientRes.value;
     if (!dustClient) {
       setError(
-        "Failed to get Dust client. Try authenticating again using `dust login`."
+        "Failed to get Dust client. Try authenticating again using `dustm login`."
       );
       return;
     }
     const userInfoRes = await dustClient.me();
     if (!userInfoRes.isOk()) {
       setError(
-        "Failed to get user info. Try authenticating again using `dust login`."
+        "Failed to get user info. Try authenticating again using `dustm login`."
       );
       return;
     }

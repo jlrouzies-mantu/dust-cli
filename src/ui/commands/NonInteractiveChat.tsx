@@ -72,14 +72,14 @@ const NonInteractiveChat: FC<NonInteractiveChatProps> = ({
         const dustClientRes = await getDustClient();
         if (dustClientRes.isErr()) {
           setError(
-            "Authentication Error: Try re-logging in by running `dust logout` and `dust login`"
+            "Authentication Error: Try re-logging in by running `dustm logout` and `dustm login`"
           );
           return;
         }
 
         const dustClient = dustClientRes.value;
         if (!dustClient) {
-          setError("Authentication required: Run `dust login` first");
+          setError("Authentication required: Run `dustm login` first");
           return;
         }
 

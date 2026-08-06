@@ -6,7 +6,7 @@ import path from "path";
 import type { FC } from "react";
 import React, { useCallback, useState } from "react";
 
-const SKILL_NAME = "dust";
+const SKILL_NAME = "dustm";
 
 const SKILL_CONTENT = `---
 name: ${SKILL_NAME}
@@ -22,17 +22,17 @@ Dust (https://dust.tt) is an AI agent platform that connects to a company's inte
 Send a message to a Dust agent and get a JSON response:
 
 \`\`\`bash
-dust chat -a <agent-name> -m "<message>"
+dustm chat -a <agent-name> -m "<message>"
 \`\`\`
 
 If no specific agent is needed, route the question to the default \`dust\` agent. Otherwise, use the agent name given by the user.
 
 \`\`\`bash
 # Use the default "dust" agent for general questions
-dust chat -a dust -m "What are the main topics discussed in #engineering this week?"
+dustm chat -a dust -m "What are the main topics discussed in #engineering this week?"
 
 # Use a specific agent when one is specified
-dust chat -a issueBot -m "Create an issue for: login page returns 500 on Safari"
+dustm chat -a issueBot -m "Create an issue for: login page returns 500 on Safari"
 \`\`\`
 
 ### JSON output format
@@ -55,7 +55,7 @@ Parse the output with jq or your language's JSON parser to extract the answer.
 Continue an existing conversation by passing \`-c <conversationId>\` (returned in the JSON from the initial call):
 
 \`\`\`bash
-dust chat -a issueBot -c "convId123" -m "Also add a follow-up issue about the fix"
+dustm chat -a issueBot -c "convId123" -m "Also add a follow-up issue about the fix"
 \`\`\`
 
 ### Additional flags
@@ -65,7 +65,7 @@ dust chat -a issueBot -c "convId123" -m "Also add a follow-up issue about the fi
 
 ### Authentication
 
-The CLI must be authenticated before use. If you encounter a login or authentication error, explain to the user that they need to run \`dust login\` (interactive browser-based flow) or set environment variables \`DUST_API_KEY\` and \`DUST_WORKSPACE_ID\` for headless environments.
+The CLI must be authenticated before use. If you encounter a login or authentication error, explain to the user that they need to run \`dustm login\` (interactive browser-based flow) or set environment variables \`DUST_API_KEY\` and \`DUST_WORKSPACE_ID\` for headless environments.
 `;
 
 const CLI_TARGETS = [

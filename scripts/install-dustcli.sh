@@ -3,11 +3,16 @@
 # Mantu fork of Dust CLI - automated installer (macOS/Linux)
 #
 # Bootstraps nvm, installs the required Node.js version, then
-# downloads, builds, and links this fork (jlrouzies-mantu/dust-cli)
-# so the `dustm` command is available globally - deliberately not
-# named `dust`, so it can coexist with the official Dust CLI on the
-# same machine if needed. Safe to re-run - it re-downloads and
-# rebuilds fresh each time, which is also how you pick up updates.
+# fetches this fork (jlrouzies-mantu/dust-cli) and links it so the
+# `dustm` command is available globally - deliberately not named
+# `dust`, so it can coexist with the official Dust CLI on the same
+# machine if needed. Safe to re-run - it re-fetches fresh each time,
+# which is also how you pick up updates.
+#
+# On macOS, this downloads a prebuilt release (built by CI on a
+# matching macOS runner/arch - see .github/workflows/release.yml),
+# so no npm install/build happens on your machine. Linux has no
+# prebuilt release yet, so it still builds from source there.
 #
 # Usage:
 #   curl -fsSL "https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/install-dustcli.sh?nocache=$(date +%s)" | bash
@@ -22,10 +27,37 @@ set -euo pipefail
 NODE_VERSION="24.16.0"
 NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 REPO_ZIP_URL="https://github.com/jlrouzies-mantu/dust-cli/archive/refs/heads/main.zip"
+RELEASE_BASE_URL="https://github.com/jlrouzies-mantu/dust-cli/releases/latest/download"
 INSTALL_ROOT="$HOME/.dust-cli-mantu"
 REPO_ZIP_PATH="$INSTALL_ROOT/dust-cli-main.zip"
 REPO_EXTRACT_DIR="$INSTALL_ROOT/dust-cli-main"
 REPO_DIR="$INSTALL_ROOT/dust-cli"
+
+# macOS ships a prebuilt release per-arch (Apple Silicon vs Intel); Linux
+# still builds from source until a Linux release artifact exists too.
+USE_PREBUILT_RELEASE=0
+RELEASE_ASSET=""
+case "$(uname -s)" in
+  Darwin)
+    USE_PREBUILT_RELEASE=1
+    case "$(uname -m)" in
+      arm64)  RELEASE_ASSET="dustm-macos-arm64.zip" ;;
+      x86_64) RELEASE_ASSET="dustm-macos-x64.zip" ;;
+      *)
+        echo "Unsupported macOS architecture: $(uname -m)" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  Linux)
+    USE_PREBUILT_RELEASE=0
+    ;;
+  *)
+    echo "Unsupported OS: $(uname -s)" >&2
+    exit 1
+    ;;
+esac
+RELEASE_ZIP_PATH="$INSTALL_ROOT/$RELEASE_ASSET"
 
 YELLOW=$'\033[33m'
 GREEN=$'\033[32m'
@@ -237,6 +269,13 @@ extract_mantu_fork_step() {
   mv "$REPO_EXTRACT_DIR" "$REPO_DIR"
 }
 
+extract_prebuilt_release_step() {
+  rm -rf "$REPO_DIR"
+  mkdir -p "$REPO_DIR"
+  unzip -q -o "$RELEASE_ZIP_PATH" -d "$REPO_DIR"
+  rm -f "$RELEASE_ZIP_PATH"
+}
+
 npm_install_step() {
   cd "$REPO_DIR"
   npm install
@@ -252,7 +291,7 @@ verify_keytar_step() {
   cd "$REPO_DIR"
   local keytar_binary="$REPO_DIR/node_modules/keytar/build/Release/keytar.node"
   if [ ! -f "$keytar_binary" ]; then
-    echo "keytar.node missing after npm install - forcing a direct rebuild..."
+    echo "keytar.node missing - forcing a direct rebuild..."
     local prebuild_install_bin="$REPO_DIR/node_modules/prebuild-install/bin.js"
     if [ -f "$prebuild_install_bin" ]; then
       (cd "$REPO_DIR/node_modules/keytar" && node "$prebuild_install_bin" --verbose)
@@ -307,23 +346,39 @@ header "Step 3/6 - Verifying npm"
 invoke_collapsed_step "Updating npm to the latest version" npm install -g npm@latest
 success "npm is up to date ($(npm --version))."
 
-header "Step 4/6 - Downloading the Mantu fork"
-
 mkdir -p "$INSTALL_ROOT"
 
-invoke_collapsed_step "Downloading jlrouzies-mantu/dust-cli@main" \
-  curl -fsSL "$REPO_ZIP_URL" -o "$REPO_ZIP_PATH"
-invoke_collapsed_step "Extracting the Mantu fork" extract_mantu_fork_step
-success "Ready at: $REPO_DIR"
+if [ "$USE_PREBUILT_RELEASE" -eq 1 ]; then
+  header "Step 4/6 - Downloading the prebuilt Mantu fork release"
 
-header "Step 5/6 - Building the CLI"
+  invoke_collapsed_step "Downloading $RELEASE_ASSET (latest release)" \
+    curl -fsSL "$RELEASE_BASE_URL/$RELEASE_ASSET" -o "$RELEASE_ZIP_PATH"
+  invoke_collapsed_step "Extracting the release" extract_prebuilt_release_step
+  success "Ready at: $REPO_DIR"
 
-invoke_collapsed_step "Installing dependencies (npm install)" npm_install_step
-invoke_collapsed_step "Verifying keytar's native module (secure credential storage)" verify_keytar_step
-invoke_collapsed_step "Building production bundle (npm run build:prod)" npm_build_step
-invoke_collapsed_step "Linking the 'dustm' command globally (npm link)" npm_link_step
+  header "Step 5/6 - Installing the CLI"
 
-success "Build complete."
+  invoke_collapsed_step "Verifying keytar's native module (secure credential storage)" verify_keytar_step
+  invoke_collapsed_step "Linking the 'dustm' command globally (npm link)" npm_link_step
+
+  success "Install complete."
+else
+  header "Step 4/6 - Downloading the Mantu fork"
+
+  invoke_collapsed_step "Downloading jlrouzies-mantu/dust-cli@main" \
+    curl -fsSL "$REPO_ZIP_URL" -o "$REPO_ZIP_PATH"
+  invoke_collapsed_step "Extracting the Mantu fork" extract_mantu_fork_step
+  success "Ready at: $REPO_DIR"
+
+  header "Step 5/6 - Building the CLI"
+
+  invoke_collapsed_step "Installing dependencies (npm install)" npm_install_step
+  invoke_collapsed_step "Verifying keytar's native module (secure credential storage)" verify_keytar_step
+  invoke_collapsed_step "Building production bundle (npm run build:prod)" npm_build_step
+  invoke_collapsed_step "Linking the 'dustm' command globally (npm link)" npm_link_step
+
+  success "Build complete."
+fi
 
 header "Step 6/6 - Verifying the 'dustm' command"
 

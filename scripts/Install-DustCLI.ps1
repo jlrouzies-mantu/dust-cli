@@ -4,12 +4,14 @@ $ErrorActionPreference = "Stop"
 # Mantu fork of Dust CLI - automated installer
 #
 # Bootstraps NVM for Windows, installs the required Node.js
-# version, then downloads, builds, and links this fork
-# (jlrouzies-mantu/dust-cli) so the `dustm` command is available
-# globally - deliberately not named `dust`, so it can coexist with
-# the official Dust CLI on the same machine if needed. Safe to
-# re-run - it re-downloads and rebuilds fresh each time, which is
-# also how you pick up updates.
+# version, then downloads a prebuilt release of this fork
+# (jlrouzies-mantu/dust-cli, built by CI on a matching Windows
+# runner - see .github/workflows/release.yml) and links it so the
+# `dustm` command is available globally - deliberately not named
+# `dust`, so it can coexist with the official Dust CLI on the same
+# machine if needed. Safe to re-run - it re-downloads the latest
+# release fresh each time, which is also how you pick up updates.
+# No npm install/build happens on your machine.
 #
 # Usage:
 #   irm "https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/Install-DustCLI.ps1?nocache=$((Get-Date).Ticks)" | iex
@@ -24,11 +26,11 @@ $NvmRoot     = "C:\Temp\Nvm"
 $NvmZipPath  = Join-Path $NvmRoot "nvm-noinstall.zip"
 $NodeVersion = "24.16.0"
 
-$RepoZipUrl   = "https://github.com/jlrouzies-mantu/dust-cli/archive/refs/heads/main.zip"
-$InstallRoot  = Join-Path $env:USERPROFILE ".dust-cli-mantu"
-$RepoZipPath  = Join-Path $InstallRoot "dust-cli-main.zip"
-$RepoExtractDir = Join-Path $InstallRoot "dust-cli-main"
-$RepoDir      = Join-Path $InstallRoot "dust-cli"
+$ReleaseAsset   = "dustm-windows-x64.zip"
+$ReleaseZipUrl  = "https://github.com/jlrouzies-mantu/dust-cli/releases/latest/download/$ReleaseAsset"
+$InstallRoot    = Join-Path $env:USERPROFILE ".dust-cli-mantu"
+$ReleaseZipPath = Join-Path $InstallRoot $ReleaseAsset
+$RepoDir        = Join-Path $InstallRoot "dust-cli"
 
 # Force console output to UTF-8
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
@@ -383,54 +385,39 @@ try {
     } | Out-Null
     Write-Success "npm is up to date."
 
-    Write-Header "Step 5/7 - Downloading the Mantu fork"
+    Write-Header "Step 5/7 - Downloading the prebuilt Mantu fork release"
 
     if (-not (Test-Path $InstallRoot)) {
         New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
     }
 
-    Invoke-CollapsedStep -Title "Downloading jlrouzies-mantu/dust-cli@main" -ScriptBlock {
-        Invoke-WebRequest -Uri $using:RepoZipUrl -OutFile $using:RepoZipPath
+    Invoke-CollapsedStep -Title "Downloading $ReleaseAsset (latest release)" -ScriptBlock {
+        Invoke-WebRequest -Uri $using:ReleaseZipUrl -OutFile $using:ReleaseZipPath
     } | Out-Null
 
-    Invoke-CollapsedStep -Title "Extracting the Mantu fork" -ScriptBlock {
-        if (Test-Path $using:RepoExtractDir) {
-            Remove-Item -Recurse -Force $using:RepoExtractDir
-        }
-        Expand-Archive -Path $using:RepoZipPath -DestinationPath $using:InstallRoot -Force
-        Remove-Item -Force $using:RepoZipPath
-
+    Invoke-CollapsedStep -Title "Extracting the release" -ScriptBlock {
         if (Test-Path $using:RepoDir) {
             Remove-Item -Recurse -Force $using:RepoDir
         }
-        Move-Item -Path $using:RepoExtractDir -Destination $using:RepoDir
+        Expand-Archive -Path $using:ReleaseZipPath -DestinationPath $using:RepoDir -Force
+        Remove-Item -Force $using:ReleaseZipPath
     } | Out-Null
     Write-Success "Ready at: $RepoDir"
 
-    Write-Header "Step 6/7 - Building the CLI"
+    Write-Header "Step 6/7 - Installing the CLI"
 
     Push-Location $RepoDir
     try {
-        Invoke-CollapsedStep -Title "Installing dependencies (npm install)" -ScriptBlock {
-            # Start-Job's child process does NOT inherit the caller's
-            # Push-Location - it starts in its own default directory. Set
-            # it explicitly or npm runs against the wrong (or no) project.
-            Set-Location $using:RepoDir
-            & $using:npmCommandPath install
-            if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
-        } | Out-Null
-
-        # keytar (secure OS-credential storage) ships a native module that
-        # npm install doesn't always manage to build - a corporate
-        # ignore-scripts policy, a proxy blocking github.com, or antivirus
-        # interference can all silently leave it missing, with npm install
-        # still reporting success. Verify it explicitly instead of letting
-        # the user hit a cryptic MODULE_NOT_FOUND crash later at `login`.
+        # keytar (secure OS-credential storage) ships a native module.
+        # CI already built and verified it for windows-x64 as part of this
+        # release (see .github/workflows/release.yml) - this is just a
+        # sanity check, with the same direct-rebuild fallback as before, in
+        # case the zip transfer itself ever corrupts it.
         Invoke-CollapsedStep -Title "Verifying keytar's native module (secure credential storage)" -ScriptBlock {
             $keytarDir = Join-Path $using:RepoDir "node_modules\keytar"
             $keytarBinary = Join-Path $keytarDir "build\Release\keytar.node"
             if (-not (Test-Path $keytarBinary)) {
-                Write-Output "keytar.node missing after npm install - forcing a direct rebuild..."
+                Write-Output "keytar.node missing from the release - forcing a direct rebuild..."
                 $prebuildInstallBin = Join-Path $using:RepoDir "node_modules\prebuild-install\bin.js"
                 if (Test-Path $prebuildInstallBin) {
                     Push-Location $keytarDir
@@ -442,19 +429,13 @@ try {
                     }
                 }
                 if (-not (Test-Path $keytarBinary)) {
-                    throw "keytar's native module (keytar.node) could not be installed. This usually means npm scripts are disabled (check 'npm config get ignore-scripts'), a proxy/firewall is blocking https://github.com, or antivirus is interfering with node_modules. Fix that, then re-run this installer."
+                    throw "keytar's native module (keytar.node) could not be installed. This usually means a proxy/firewall is blocking https://github.com, or antivirus is interfering with node_modules. Fix that, then re-run this installer."
                 }
                 Write-Output "keytar.node installed via direct rebuild."
             }
             else {
                 Write-Output "keytar.node present."
             }
-        } | Out-Null
-
-        Invoke-CollapsedStep -Title "Building production bundle (npm run build:prod)" -ScriptBlock {
-            Set-Location $using:RepoDir
-            & $using:npmCommandPath run build:prod
-            if ($LASTEXITCODE -ne 0) { throw "npm run build:prod failed with exit code $LASTEXITCODE" }
         } | Out-Null
 
         Invoke-CollapsedStep -Title "Linking the 'dustm' command globally (npm link)" -ScriptBlock {
@@ -467,7 +448,7 @@ try {
         Pop-Location
     }
 
-    Write-Success "Build complete."
+    Write-Success "Install complete."
 
     Write-Header "Step 7/7 - Verifying the 'dustm' command"
 

@@ -114,8 +114,6 @@ One line, no prerequisites — installs NVM for Windows, Node.js, and builds and
 irm "https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/Install-DustCLI.ps1?nocache=$((Get-Date).Ticks)" | iex
 ```
 
-Re-run the same command any time to update to the latest version. The `?nocache=...` query string exists because `raw.githubusercontent.com` sits behind a CDN that caches by full URL for a few minutes — without it, re-running right after a fresh push can silently fetch a stale copy. The script lives at [`scripts/Install-DustCLI.ps1`](./scripts/Install-DustCLI.ps1) — read it before running it, as with any install script piped from the internet.
-
 ### Quick install (macOS / Linux)
 
 Same idea, via `nvm` instead of NVM for Windows — untested on a real Mac/Linux box, please report back if it doesn't work:
@@ -123,8 +121,6 @@ Same idea, via `nvm` instead of NVM for Windows — untested on a real Mac/Linux
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/install-dustcli.sh?nocache=$(date +%s)" | bash
 ```
-
-The `?nocache=...` query string works around `raw.githubusercontent.com`'s CDN, which caches by full URL for a few minutes and can otherwise serve a stale copy right after a fresh push. Script lives at [`scripts/install-dustcli.sh`](./scripts/install-dustcli.sh) — same "read before piping into a shell" caveat applies.
 
 ### Manual install
 

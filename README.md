@@ -18,7 +18,9 @@
 ## Table of Contents
 
 - [Changelog: Mantu fork vs. upstream Dust CLI](#changelog-mantu-fork-vs-upstream-dust-cli)
+- [Screenshots](#screenshots)
 - [Installation](#installation)
+  - [Quick install (Windows)](#quick-install-windows)
 - [Usage](#usage)
   - [Commands](#commands)
   - [Shortcuts](#shortcuts)
@@ -26,6 +28,7 @@
   - [In-Chat Commands](#in-chat-commands)
   - [Headless Authentication](#headless-authentication)
 - [Development](#development)
+  - [Versioning](#versioning)
 - [Relationship to Upstream](#relationship-to-upstream)
 - [License](#license)
 
@@ -39,32 +42,35 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 
 | Feature | Notes |
 |---|---|
-| Crash recovery | On a stream error, falls back to fetching the conversation from the server before surfacing a fatal error (works around a known `@dust-tt/client` SSE bug where a non-JSON `done` sentinel exhausts the reconnect budget even though the answer already landed) |
-| Auto-retry on transient API errors | Agent list, user info, MCP registration, and the answer stream retry up to 5x with backoff before giving up. Deliberately *not* applied to conversation-creation/message-posting — those aren't idempotent, so retrying one that actually succeeded server-side risks a duplicate message |
-| Actionable error messages | Any fatal error prints the exact command to resume that conversation, not just a bare ID |
-| Local crash-safe transcripts | Every turn is appended to `~/.dust-cli/transcripts/<conversationId>.jsonl` as a durability backstop |
-| Ctrl+C safety net | Cancels the current generation if one is running; otherwise requires a second press within 2s to exit, with a visible warning in between |
-| Markdown rendering | Code fences are syntax-highlighted and boxed on their own (gray border, black background); surrounding prose stays plain, not boxed |
-| Chain-of-thought as a transient status | Shown as a live "Thinking…" line instead of permanently dumped into scrollback, with a custom plain-ASCII pulse icon (`[ ]`/`[o]`/`[O]`/`[o]`) — safe on PowerShell 5, unlike braille/Unicode spinners |
-| Persistent, colorized status bar | Workspace, active agent, working directory, git branch, conversation ID, context-window usage, and consumed credits — see [Status bar](#status-bar) |
-| Ctrl+Enter / Shift+Enter | Multi-line input, in addition to the existing shortcuts |
-| Mantu-branded header | Full-width separator, "MANTU FORK" + "Initiated by: Jean-Laurent" in brand colors |
-| `todo_write` tool | A Claude-Code-style persistent task checklist tool (`--with-tools` only), rendered as a boxed checklist snapshot each time the agent updates it |
-| Dust directive handling | Custom Dust-only markdown directives (e.g. `:preview_file{...}`, rendered as an interactive widget on the web app) are replaced with a readable placeholder instead of leaking raw syntax |
+| Crash recovery | Falls back to fetching the conversation from the server instead of showing a fatal error |
+| Auto-retry on API errors | Up to 5x with backoff on transient failures; skipped for non-idempotent calls |
+| Actionable error messages | Fatal errors include the exact command to resume that conversation |
+| Local crash-safe transcripts | Every turn appended to `~/.dust-cli/transcripts/<id>.jsonl` |
+| Ctrl+C safety net | Cancels generation if running; otherwise double-press within 2s to exit |
+| Markdown rendering | Syntax-highlighted code fences, boxed on their own |
+| Transient "Thinking…" status | `◊` icon pulsing between brand colors instead of a permanent scrollback dump |
+| Persistent, colorized status bar | Workspace, agent, folder, branch, tokens, credits — see [Status bar](#status-bar) |
+| Ctrl+Enter / Shift+Enter | Multi-line input |
+| `todo_write` tool | Claude-Code-style task checklist (`--with-tools` only) |
+| Dust directive handling | Web-only directives (e.g. `:preview_file{...}`) shown as readable placeholders |
+| Clipboard image paste | Attach a screenshot straight from the clipboard via Ctrl+V or `/attach` — Windows tested, macOS untested — see [In-Chat Commands](#in-chat-commands) |
+| Paste compaction | Large multi-line pastes collapse to a `[Pasted N lines of text]` placeholder in the input instead of dumping the raw text inline |
+| Portable content search | `search_content` (`--with-tools`) no longer shells out to the system `grep` binary, and supports lines of context around each match |
 
 ### 🐛 Fixed
 
 | Issue | Root cause |
 |---|---|
-| Multi-line paste corrupted the input / submitted early | Pasted text arrives as individual keystrokes (not one batched event) on terminals without bracketed-paste support; each embedded newline was hitting the same code path as a real Enter press |
-| Ctrl+Backspace did nothing; no Ctrl+Left/Right word-jump | Ctrl+Backspace was simply never implemented upstream. Word-jump only existed via `Meta+B`/`Meta+F` (the Mac convention) — Windows/Linux users had no working shortcut at all |
-| Any transient stream error showed a fatal, unrecoverable "Agent error" | The stream consumer never checked whether the answer had actually completed server-side before giving up |
-| Agent list / MCP registration / user-info fetches failed permanently on a single transient hiccup | No retry logic anywhere — the first error (even a passing gateway blip) went straight to the user |
-| `--resume` wiped the user's entire terminal scrollback | `clearTerminal()` sent `\x1b[3J`, which erases the terminal's *scrollback buffer* — not just the visible screen |
-| Several UI glyphs rendered as garbage or misaligned boxes | `↵`, `…`, `↑`/`↓`, `→`, and every `borderStyle="round"` box border are Unicode code points this console's font doesn't cover |
-| Code blocks rendered with a border stretching across the whole terminal, and a patchy background | Ink/Yoga's default column-flex stretches boxes to the parent's full width unless `alignSelf` is set; `Text`'s `backgroundColor` only paints behind actual characters, so shorter lines need explicit padding |
-| Markdown headings (`# Title`) were never rendered — the `#` stayed literal | Confirmed upstream bug in `marked-terminal@7.3.0`'s heading renderer, reproducible with their own README example verbatim |
-| `npm run build` failed out of the box on Windows | The build scripts use bash-style `NODE_ENV=x cmd` syntax |
+| Multi-line paste corrupted input / submitted early | No bracketed-paste support — pasted newlines triggered submit |
+| No Ctrl+Backspace / Ctrl+Left/Right word-jump | Never implemented upstream |
+| Transient stream errors showed a fatal, unrecoverable error | Never checked whether the answer had actually completed server-side |
+| Agent list / MCP / user-info fetches failed on one hiccup | No retry logic anywhere |
+| `--resume` wiped the terminal scrollback | `clearTerminal()` used the wrong escape sequence |
+| UI glyphs rendered as garbage or misaligned boxes | Unicode glyphs unsupported on this console's font |
+| Code block borders/backgrounds rendered wrong | Ink/Yoga layout defaults, unpadded background fill |
+| Markdown headings/bold never rendered | Confirmed `marked-terminal@7.3.0` bug |
+| `npm run build` failed on Windows | Bash-style `NODE_ENV=x` syntax in scripts |
+| `search_content` (`--with-tools`) could silently fail | It shelled out to the system `grep` binary, not guaranteed to exist on plain Windows without Git for Windows/WSL |
 
 ### 🔧 Changed
 
@@ -73,7 +79,43 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 
 ---
 
+## Screenshots
+
+**Markdown rendering** — headings, lists, task lists, links, inline code, tables, and syntax-highlighted code blocks:
+
+<p align="center">
+  <img src="./img/markdown.PNG" alt="Markdown showcase" width="340"/>
+</p>
+
+**Status bar** — workspace, agent, folder, branch, conversation ID, context usage, and consumed credits:
+
+![Status bar](./img/credits-context-folder-branch.PNG)
+
+**Clipboard image paste** — Ctrl+V or `/attach`'s "Paste image from clipboard" option, which the agent can then read like any other attachment. Verified on Windows; the macOS path uses the same approach via AppleScript but hasn't been tested on a real Mac yet:
+
+<p align="center">
+  <img src="./img/command-attach-picture-from-clipboard.PNG" alt="Paste image from clipboard" width="336"/>
+</p>
+
+<p align="center">
+  <img src="./img/image-path-attachment.PNG" alt="Attached clipboard image analyzed by the agent" width="382"/>
+</p>
+
+---
+
 ## Installation
+
+### Quick install (Windows)
+
+One line, no prerequisites — installs NVM for Windows, Node.js, and builds and links this fork:
+
+```powershell
+irm https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/Install-DustCLI.ps1 | iex
+```
+
+Re-run the same command any time to update to the latest version. The script lives at [`scripts/Install-DustCLI.ps1`](./scripts/Install-DustCLI.ps1) — read it before running it, as with any install script piped from the internet.
+
+### Manual install
 
 ```bash
 git clone <this-repo-url>
@@ -103,17 +145,19 @@ When no command is given, `chat` is used by default.
 
 ### Commands
 
-- **`login`** — authenticate with your Dust account (`--force` to re-authenticate)
-- **`status`** — check your current authentication status
-- **`logout`** — log out
-- **`skill:init`** — install the dust skill for coding CLIs (Claude Code, Codex)
-- **`chat`** — chat with a Dust agent (default)
-  - `--agent "<name>"` / `-a` — search for and use an agent by name
-  - `--sId <sId>` / `-s` — specify an agent's sId directly
-  - `--resume <conversationId>` / `-r` — resume a past conversation
-  - `--auto` — automatically accept all file-edit operations without prompting
-  - `--message "<text>"` / `-m` — send one message non-interactively and exit
-- **`help`** — display help information
+| Command | Description |
+|---|---|
+| `login` | Authenticate with your Dust account (`--force` to re-authenticate) |
+| `status` | Check your current authentication status |
+| `logout` | Log out |
+| `skill:init` | Install the dust skill for coding CLIs (Claude Code, Codex) |
+| `chat` | Chat with a Dust agent (default command) |
+| &nbsp;&nbsp;`--agent "<name>"` / `-a` | Search for and use an agent by name |
+| &nbsp;&nbsp;`--sId <sId>` / `-s` | Specify an agent's sId directly |
+| &nbsp;&nbsp;`--resume <conversationId>` / `-r` | Resume a past conversation |
+| &nbsp;&nbsp;`--auto` | Automatically accept all file-edit operations without prompting |
+| &nbsp;&nbsp;`--message "<text>"` / `-m` | Send one message non-interactively and exit |
+| `help` | Display help information |
 
 ### Shortcuts
 
@@ -133,7 +177,7 @@ When no command is given, `chat` is used by default.
 A persistent, colorized line at the bottom of the chat shows:
 
 ```
-workspace · @agent · ~/current/folder · git-branch · a1b2c3d4 · 14.5k/272k tokens · 1595 credits used
+workspace · @agent · ~/current/folder · git-branch · a1b2c3d4 · 14.5k/272k (5%) context · 1595/52000 (3%) credits used
 ```
 
 Context-window usage and consumed credits come from endpoints the Dust web dashboard itself calls internally (`/api/w/{workspaceId}/credits/my-usage` and `.../assistant/conversations/{id}/context-usage`) — not the public, documented `/api/v1` API. They work with the same Bearer token this CLI already has, but Dust hasn't committed to supporting them for external clients, so they could change or disappear without notice. If either call fails, that piece of the status bar just silently omits itself rather than erroring.
@@ -142,7 +186,7 @@ Context-window usage and consumed credits come from endpoints the Dust web dashb
 
 - **`/exit`** — exit the chat session
 - **`/switch`** — switch to a different agent
-- **`/attach`** — open a file selector to attach a file
+- **`/attach`** — open a file selector to attach a file (includes a "Paste image from clipboard" option — also bound to Ctrl+V directly; Windows tested, macOS untested)
 - **`/clear-files`** — clear any attached files
 - **`/auto`** — toggle auto-approval of file edits
 
@@ -170,6 +214,10 @@ node dist/index.js <command>
 ```
 
 `npm run dev` watches and rebuilds on change.
+
+### Versioning
+
+`0.4.5-mantu.X.Y.Z` — `0.4.5` is the upstream Dust CLI base version (only changes on a resync, see below); `X.Y.Z` is this fork's own version, bumped on every change so the version shown in the header (`Dust CLI v...`) always tells you whether you're actually running the latest build. Bump `Z` for a routine fix, `Y` for a batch of related changes, `X` for a major rework or an upstream resync.
 
 ## Relationship to Upstream
 

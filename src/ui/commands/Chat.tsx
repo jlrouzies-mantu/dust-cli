@@ -17,8 +17,10 @@ import { useFileSystemServer } from "../../mcp/servers/fsServer.js";
 import type { TodoItem } from "../../mcp/tools/todoWrite.js";
 import { todoListEmitter } from "../../mcp/tools/todoWrite.js";
 import AuthService from "../../utils/authService.js";
+import { getClipboardImagePath } from "../../utils/clipboardImage.js";
 import type { ContextUsage } from "../../utils/contextUsage.js";
 import { getContextUsage } from "../../utils/contextUsage.js";
+import type { CreditsUsage } from "../../utils/creditsInfo.js";
 import { getConsumedCredits } from "../../utils/creditsInfo.js";
 import { getDustClient } from "../../utils/dustClient.js";
 import { normalizeError } from "../../utils/errors.js";
@@ -58,6 +60,14 @@ interface CliChatProps {
   projectName?: string;
   projectId?: string;
 }
+
+// Pastes with more lines than this get collapsed to a placeholder in the
+// input box instead of dumping the raw text inline.
+const PASTE_COMPACT_LINE_THRESHOLD = 4;
+
+// See clipboardImage.ts - Windows is tested, macOS is best-effort/unverified.
+const SUPPORTS_CLIPBOARD_IMAGE =
+  process.platform === "win32" || process.platform === "darwin";
 
 function getLastConversationItem<T extends ConversationItem>(
   items: ConversationItem[],
@@ -209,8 +219,27 @@ const CliChat: FC<CliChatProps> = ({
   >([]);
   const [showExitHint, setShowExitHint] = useState(false);
   const [workspaceName, setWorkspaceName] = useState<string | null>(null);
-  const [consumedCredits, setConsumedCredits] = useState<number | null>(null);
+  const [consumedCredits, setConsumedCredits] = useState<CreditsUsage | null>(
+    null
+  );
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
+  // These undocumented endpoints occasionally return null on a transient
+  // hiccup (see creditsInfo.ts/contextUsage.ts) - once we've displayed a
+  // real value in the status bar, a later failed refresh shouldn't blank
+  // it back out, so only apply updates that actually carry a value.
+  const setContextUsageIfPresent = useCallback((usage: ContextUsage | null) => {
+    if (usage !== null) {
+      setContextUsage(usage);
+    }
+  }, []);
+  const setConsumedCreditsIfPresent = useCallback(
+    (usage: CreditsUsage | null) => {
+      if (usage !== null) {
+        setConsumedCredits(usage);
+      }
+    },
+    []
+  );
   const updateIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const contentRef = useRef<string>("");
   const chainOfThoughtRef = useRef<string>("");
@@ -220,6 +249,13 @@ const CliChat: FC<CliChatProps> = ({
   // arriving as a rapid sequence of individual keystrokes (see the
   // key.return handling below).
   const lastKeystrokeTimeRef = useRef(0);
+  // Large pastes are shown in the input as a compact "[Pasted N lines of
+  // text]" placeholder instead of the raw content (matching Claude Code),
+  // with the real content kept here and swapped back in at submit time -
+  // see the input.length > 1 paste-handling branch below.
+  const pastedBlocksRef = useRef<{ placeholder: string; content: string }[]>(
+    []
+  );
   const lastCtrlCTimeRef = useRef(0);
   const exitHintTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     null
@@ -242,8 +278,17 @@ const CliChat: FC<CliChatProps> = ({
         setWorkspaceName(workspace.name);
       }
     })();
-    void getConsumedCredits().then(setConsumedCredits);
   }, [me, workspaceName]);
+
+  // Kicked off on mount rather than gated behind `me` loading - unlike the
+  // workspace name above, this fetches its own access token/workspace ID
+  // directly via AuthService, so it doesn't need to wait on the separate
+  // useMe() round-trip. Every bit of head start here matters: if a user
+  // sends their first message before this resolves, the status bar just
+  // won't have a value to show yet for that first reply.
+  useEffect(() => {
+    void getConsumedCredits().then(setConsumedCreditsIfPresent);
+  }, [setConsumedCreditsIfPresent]);
 
   // The todo_write tool call runs inside the MCP transport layer, not this
   // React tree - subscribe to its emitter to render each snapshot as a new
@@ -326,6 +371,23 @@ const CliChat: FC<CliChatProps> = ({
     void resolveSpace();
   }, [projectName, projectId, conversationId]);
 
+  // Lightweight, non-fatal inline notice appended to the transcript - unlike
+  // setError, which renders a full-screen "Press Ctrl+C to exit" box that
+  // replaces the whole chat UI. Reserve setError for genuinely unrecoverable
+  // failures; use this for routine, retryable notices (e.g. "no image on
+  // the clipboard").
+  const pushNotice = useCallback((text: string) => {
+    setConversationItems((prev) => [
+      ...prev,
+      {
+        key: `notice_${Date.now()}`,
+        type: "agent_message_content_line",
+        text,
+        index: 0,
+      },
+    ]);
+  }, []);
+
   const triggerAgentSwitch = useCallback(() => {
     // Clear all input states before switching.
     setUserInput("");
@@ -353,6 +415,16 @@ const CliChat: FC<CliChatProps> = ({
     async (dirPath: string): Promise<InlineSelectorItem[]> => {
       const entries = await readdir(dirPath, { withFileTypes: true });
       const items: InlineSelectorItem[] = [];
+
+      // Clipboard image paste has no terminal-level "paste" event to hook
+      // into (a real OS paste only ever delivers text over stdin), so it's
+      // offered here as a selectable entry instead. See clipboardImage.ts.
+      if (SUPPORTS_CLIPBOARD_IMAGE) {
+        items.push({
+          id: "__clipboard__",
+          label: "📋 Paste image from clipboard",
+        });
+      }
 
       // Add parent directory navigation unless at root
       if (dirPath !== "/") {
@@ -799,9 +871,10 @@ const CliChat: FC<CliChatProps> = ({
 
       await clearTerminal();
       setConversationItems(items);
-      void getContextUsage(convId).then(setContextUsage);
+      void getContextUsage(convId).then(setContextUsageIfPresent);
+      void getConsumedCredits().then(setConsumedCreditsIfPresent);
     },
-    [selectedAgent]
+    [selectedAgent, setContextUsageIfPresent, setConsumedCreditsIfPresent]
   );
 
   const resumeConversation = useCallback(async () => {
@@ -1026,9 +1099,15 @@ const CliChat: FC<CliChatProps> = ({
 
       await clearTerminal();
       setConversationItems(items);
-      void getContextUsage(conversationId).then(setContextUsage);
+      void getContextUsage(conversationId).then(setContextUsageIfPresent);
+      void getConsumedCredits().then(setConsumedCreditsIfPresent);
     })();
-  }, [conversationId, selectedAgent]);
+  }, [
+    conversationId,
+    selectedAgent,
+    setContextUsageIfPresent,
+    setConsumedCreditsIfPresent,
+  ]);
 
   useEffect(() => {
     autoAcceptEditsRef.current = autoAcceptEdits;
@@ -1047,6 +1126,17 @@ const CliChat: FC<CliChatProps> = ({
       if (!selectedAgent || !me || meError || isMeLoading) {
         return;
       }
+
+      // questionText is what's shown in the transcript - it may still
+      // contain "[Pasted N lines of text]" placeholders. fullQuestionText
+      // swaps those back in for what actually gets sent to the agent.
+      let fullQuestionText = questionText;
+      for (const { placeholder, content } of pastedBlocksRef.current) {
+        if (fullQuestionText.includes(placeholder)) {
+          fullQuestionText = fullQuestionText.replace(placeholder, content);
+        }
+      }
+      pastedBlocksRef.current = [];
 
       setConversationItems((prev) => {
         const lastUserMessage = getLastConversationItem<
@@ -1244,9 +1334,10 @@ const CliChat: FC<CliChatProps> = ({
       };
 
       // Same closure-scoping reason as above.
-      const refreshContextUsage = (): void => {
+      const refreshUsageStats = (): void => {
         if (conversation) {
-          void getContextUsage(conversation.sId).then(setContextUsage);
+          void getContextUsage(conversation.sId).then(setContextUsageIfPresent);
+          void getConsumedCredits().then(setConsumedCreditsIfPresent);
         }
       };
 
@@ -1286,12 +1377,12 @@ const CliChat: FC<CliChatProps> = ({
           }));
 
           const convRes = await dustClient.createConversation({
-            title: `CLI Question: ${questionText.substring(0, 30)}${
-              questionText.length > 30 ? "..." : ""
+            title: `CLI Question: ${fullQuestionText.substring(0, 30)}${
+              fullQuestionText.length > 30 ? "..." : ""
             }`,
             visibility: "unlisted",
             message: {
-              content: questionText,
+              content: fullQuestionText,
               mentions: [{ configurationId: selectedAgent.sId }],
               context: {
                 timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -1330,7 +1421,7 @@ const CliChat: FC<CliChatProps> = ({
           const messageRes = await dustClient.postUserMessage({
             conversationId: currentConversationId,
             message: {
-              content: questionText,
+              content: fullQuestionText,
               mentions: [{ configurationId: selectedAgent.sId }],
               context: {
                 clientSideMCPServerIds: fileSystemServerId
@@ -1370,7 +1461,7 @@ const CliChat: FC<CliChatProps> = ({
         // failing) stream below.
         void appendTranscriptEntry(conversation.sId, {
           role: "user",
-          text: questionText,
+          text: fullQuestionText,
           messageId: userMessageId,
         });
 
@@ -1432,7 +1523,10 @@ const CliChat: FC<CliChatProps> = ({
             setError(null);
             setStreamingContentPreview([]);
             pushFinalContentToConversationItems();
-            void getContextUsage(conversation.sId).then(setContextUsage);
+            void getContextUsage(conversation.sId).then(
+              setContextUsageIfPresent
+            );
+            void getConsumedCredits().then(setConsumedCreditsIfPresent);
             void appendTranscriptEntry(conversation.sId, {
               role: "agent",
               text: contentRef.current,
@@ -1506,7 +1600,7 @@ const CliChat: FC<CliChatProps> = ({
           setStreamingContentPreview([]);
           contentRef.current = recoveredText;
           pushFinalContentToConversationItems();
-          refreshContextUsage();
+          refreshUsageStats();
           appendRecoveredAgentTranscriptEntry(recoveredText);
           contentRef.current = "";
           setIsProcessingQuestion(false);
@@ -1688,6 +1782,24 @@ const CliChat: FC<CliChatProps> = ({
             if (selected.id === "__more__") {
               return;
             }
+            if (selected.id === "__clipboard__") {
+              setInlineSelector(null);
+              void (async () => {
+                const clipRes = await getClipboardImagePath();
+                if (clipRes.isErr()) {
+                  pushNotice(
+                    `Failed to read clipboard image: ${clipRes.error.message}`
+                  );
+                  return;
+                }
+                if (clipRes.value === null) {
+                  pushNotice("No image found on the clipboard.");
+                  return;
+                }
+                await handleFileSelected(clipRes.value);
+              })();
+              return;
+            }
             void (async () => {
               try {
                 const targetStat = await stat(selected.id);
@@ -1805,6 +1917,23 @@ const CliChat: FC<CliChatProps> = ({
         }
         return;
       }
+
+      // Tab completes the currently-highlighted command's name into the
+      // input (shell-style), without running it - Enter still does that.
+      if (key.tab && !key.shift) {
+        const filteredCommands = commands.filter((cmd) =>
+          cmd.name.toLowerCase().startsWith(commandQuery.toLowerCase())
+        );
+        if (
+          filteredCommands.length > 0 &&
+          selectedCommandIndex < filteredCommands.length
+        ) {
+          const selectedCommand = filteredCommands[selectedCommandIndex];
+          setCommandQuery(selectedCommand.name);
+          setCommandCursorPosition(selectedCommand.name.length);
+        }
+        return;
+      }
     }
 
     if (key.ctrl && input === "g") {
@@ -1828,12 +1957,41 @@ const CliChat: FC<CliChatProps> = ({
       return;
     }
 
+    // Ctrl+V for an image: when the clipboard holds only an image (no
+    // text), most terminals - including Windows Terminal - have nothing to
+    // paste as text, so they pass the raw Ctrl+V keystroke through instead
+    // of intercepting it. That's what this relies on. When the clipboard
+    // *does* have text, the terminal consumes Ctrl+V for the normal text
+    // paste instead and this branch never fires - no conflict either way.
+    if (
+      key.ctrl &&
+      input === "v" &&
+      !isInCommandMode &&
+      SUPPORTS_CLIPBOARD_IMAGE
+    ) {
+      void (async () => {
+        const clipRes = await getClipboardImagePath();
+        if (clipRes.isErr()) {
+          pushNotice(
+            `Failed to read clipboard image: ${clipRes.error.message}`
+          );
+          return;
+        }
+        if (clipRes.value === null) {
+          return;
+        }
+        await handleFileSelected(clipRes.value);
+      })();
+      return;
+    }
+
     if (key.escape) {
       if (isProcessingQuestion && abortController) {
         abortController.abort();
       } else if (userInput) {
         setUserInput("");
         setCursorPosition(0);
+        pastedBlocksRef.current = [];
       }
       return;
     }
@@ -2151,12 +2309,26 @@ const CliChat: FC<CliChatProps> = ({
       // Some terminals translate newlines to \r, so we normalize that to \n
       const normalizedInput = input.replace(/\r/g, "\n");
 
+      // Large pastes get collapsed to a placeholder rather than dumping
+      // hundreds of lines into the input box - the real content is kept in
+      // pastedBlocksRef and swapped back in at submit time.
+      const lineCount = normalizedInput.split("\n").length;
+      let textToInsert = normalizedInput;
+      if (lineCount > PASTE_COMPACT_LINE_THRESHOLD) {
+        const placeholder = `[Pasted ${lineCount} lines of text]`;
+        pastedBlocksRef.current.push({
+          placeholder,
+          content: normalizedInput,
+        });
+        textToInsert = placeholder;
+      }
+
       const newInput =
         currentInput.slice(0, currentCursorPos) +
-        normalizedInput +
+        textToInsert +
         currentInput.slice(currentCursorPos);
       setCurrentInput(newInput);
-      setCurrentCursorPos(currentCursorPos + normalizedInput.length);
+      setCurrentCursorPos(currentCursorPos + textToInsert.length);
       if (isInCommandMode) {
         setSelectedCommandIndex(0);
       }

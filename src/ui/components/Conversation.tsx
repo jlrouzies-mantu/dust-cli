@@ -13,8 +13,16 @@ import React, {
 } from "react";
 
 import type { TodoItem } from "../../mcp/tools/todoWrite.js";
-import { CODE_BLOCK_BG, MANTU_GOLD, MANTU_PURPLE } from "../../utils/brand.js";
+import {
+  CODE_BLOCK_BG,
+  MANTU_AGENT_ACCENT,
+  MANTU_GOLD,
+  MANTU_PURPLE,
+  MANTU_THINKING_PINK,
+  MANTU_USER_ACCENT,
+} from "../../utils/brand.js";
 import type { ContextUsage } from "../../utils/contextUsage.js";
+import type { CreditsUsage } from "../../utils/creditsInfo.js";
 import type { MarkdownSegment } from "../../utils/markdown.js";
 import { formatFileSize, isImageFile } from "../../utils/fileHandling.js";
 import { getGitBranch } from "../../utils/gitInfo.js";
@@ -31,6 +39,13 @@ import { ThinkingIcon } from "./ThinkingIcon.js";
 
 function formatTokenCount(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
+function formatPercent(used: number, total: number): string {
+  if (total <= 0) {
+    return "0";
+  }
+  return ((used / total) * 100).toFixed(0);
 }
 
 export type ConversationItem = { key: string } & (
@@ -99,7 +114,7 @@ interface ConversationProps {
   showExitHint: boolean;
   agentName: string | null;
   workspaceName: string | null;
-  consumedCredits: number | null;
+  consumedCredits: CreditsUsage | null;
   contextUsage: ContextUsage | null;
   userInput: string;
   cursorPosition: number;
@@ -159,7 +174,7 @@ const _Conversation: FC<ConversationProps> = ({
   }, []);
 
   return (
-    <Box flexDirection="column" height="100%">
+    <Box flexDirection="column">
       <Static items={conversationItems}>
         {(item) => {
           return (
@@ -202,7 +217,8 @@ const _Conversation: FC<ConversationProps> = ({
               <Spinner type="simpleDots" />
             </Text>
           ) : (
-            <Text color="green">
+            <Text color={MANTU_THINKING_PINK}>
+              {" "}
               <ThinkingIcon /> Thinking
               <Spinner type="simpleDots" />
               {thinkingPreview && (
@@ -305,7 +321,12 @@ const _Conversation: FC<ConversationProps> = ({
               </Text>
               <Text color={MANTU_PURPLE}>
                 {formatTokenCount(contextUsage.contextUsage)}/
-                {formatTokenCount(contextUsage.contextSize)} tokens
+                {formatTokenCount(contextUsage.contextSize)} (
+                {formatPercent(
+                  contextUsage.contextUsage,
+                  contextUsage.contextSize
+                )}
+                %) context
               </Text>
             </>
           )}
@@ -315,7 +336,17 @@ const _Conversation: FC<ConversationProps> = ({
                 {" "}
                 ·{" "}
               </Text>
-              <Text color={MANTU_GOLD}>{consumedCredits} credits used</Text>
+              <Text color={MANTU_GOLD}>
+                {consumedCredits.consumed}
+                {consumedCredits.limit !== null &&
+                  `/${consumedCredits.limit}`}
+                {consumedCredits.limit !== null &&
+                  ` (${formatPercent(
+                    consumedCredits.consumed,
+                    consumedCredits.limit
+                  )}%)`}{" "}
+                credits used
+              </Text>
             </>
           )}
         </Text>
@@ -352,32 +383,32 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
           <Box>
             <Box flexDirection="column" marginRight={2}>
               <Box>
-                <Text color="green" dimColor>
+                <Text color={MANTU_PURPLE} dimColor>
                   {"█"}
                 </Text>
-                <Text color="green">{"▀▄ "}</Text>
-                <Text color="red" dimColor>
+                <Text color={MANTU_PURPLE}>{"▀▄ "}</Text>
+                <Text color={MANTU_PURPLE} dimColor>
                   {"█ █"}
                 </Text>
               </Box>
               <Box>
-                <Text color="green" dimColor>
+                <Text color={MANTU_PURPLE} dimColor>
                   {"█"}
                 </Text>
-                <Text color="green">{"▄▀ "}</Text>
-                <Text color="red">{"█▄█"}</Text>
+                <Text color={MANTU_PURPLE}>{"▄▀ "}</Text>
+                <Text color={MANTU_PURPLE}>{"█▄█"}</Text>
               </Box>
               <Box>
-                <Text color="blue" dimColor>
+                <Text color={MANTU_GOLD} dimColor>
                   {"█▀▀ "}
                 </Text>
-                <Text color="blue" dimColor>
+                <Text color={MANTU_GOLD} dimColor>
                   {"▀█▀"}
                 </Text>
               </Box>
               <Box>
-                <Text color="blue">{"▄██ "}</Text>
-                <Text color="yellow" dimColor>
+                <Text color={MANTU_GOLD}>{"▄██ "}</Text>
+                <Text color={MANTU_GOLD} dimColor>
                   {" █ "}
                 </Text>
               </Box>
@@ -386,7 +417,9 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
               <Text bold color={MANTU_PURPLE}>
                 MANTU FORK
               </Text>
-              <Text color={MANTU_GOLD}>Initiated by: Jean-Laurent</Text>
+              <Text color={MANTU_GOLD}>
+                Report bug here: https://github.com/jlrouzies-mantu/dust-cli
+              </Text>
               <Text dimColor>
                 Dust CLI v{CLI_VERSION} · {displayPath}
                 {gitBranch && ` · branch: ${gitBranch}`}
@@ -417,7 +450,7 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
       return (
         <Box flexDirection="column" marginBottom={1}>
           <Box>
-            <Text bold color="green">
+            <Text bold color={MANTU_USER_ACCENT}>
               {item.firstName ?? "You"}
             </Text>
           </Box>
@@ -460,7 +493,7 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
     case "agent_message_header":
       return (
         <Box>
-          <Text bold color="blue">
+          <Text bold color={MANTU_AGENT_ACCENT}>
             {item.agentName}
           </Text>
         </Box>

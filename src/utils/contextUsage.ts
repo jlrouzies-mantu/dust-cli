@@ -8,15 +8,33 @@ export interface ContextUsage {
   modelId: string | null;
 }
 
+// Cached at module scope (outside any component's state), keyed by
+// conversation ID since usage genuinely differs per conversation - same
+// reasoning as creditsInfo.ts's cache. A transient failure on a refetch
+// should never regress an already-shown value back to nothing.
+const lastKnownUsageByConversation = new Map<string, ContextUsage>();
+
 /**
  * Fetches per-conversation context-window usage via the same undocumented
  * endpoint the Dust web dashboard calls
  * (/api/w/{workspaceId}/assistant/conversations/{conversationId}/context-usage
  * — not the public /api/v1 API, no SDK support). Same caveat as
  * creditsInfo.ts: works with the CLI's existing Bearer token, but could
- * change or disappear without notice. Always returns null on any failure.
+ * change or disappear without notice. Falls back to the last known-good
+ * value for this conversation on any failure.
  */
 export async function getContextUsage(
+  conversationId: string
+): Promise<ContextUsage | null> {
+  const usage = await fetchContextUsage(conversationId);
+  if (usage !== null) {
+    lastKnownUsageByConversation.set(conversationId, usage);
+    return usage;
+  }
+  return lastKnownUsageByConversation.get(conversationId) ?? null;
+}
+
+async function fetchContextUsage(
   conversationId: string
 ): Promise<ContextUsage | null> {
   try {

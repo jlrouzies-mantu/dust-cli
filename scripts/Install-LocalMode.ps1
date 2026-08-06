@@ -8,18 +8,18 @@ $ErrorActionPreference = "Stop"
 # Mantu fork of Dust CLI - LOCAL/DEV installer
 #
 # Same as Install-DustCLI.ps1, except it fetches the fork via
-# `git clone`/`git pull` instead of downloading a zip of `main` - for
-# testing changes pushed to a branch without merging to main first.
-# Installs to a separate directory from Install-DustCLI.ps1's, so a
-# "stable main" install and a "local dev" checkout can coexist.
+# `git clone` instead of downloading a zip of `main` - for testing
+# changes pushed to a branch without merging to main first. Installs
+# to a separate directory from Install-DustCLI.ps1's, so a "stable
+# main" install and a "local dev" checkout can coexist.
 #
 # Simple by design: the first run clones (optionally a specific
 # branch via -Branch; otherwise whatever GitHub considers the default
-# branch). Every run after that just `git pull`s whatever branch is
-# currently checked out in that clone - re-run any time you push more
-# commits. To switch branches, `git checkout <branch>` inside
-# %USERPROFILE%\.dust-cli-mantu\dust-cli-local yourself once; this
-# script will keep pulling that branch from then on.
+# branch). This script never pulls or touches git on later runs - the
+# clone at %USERPROFILE%\.dust-cli-mantu\dust-cli-local is yours to
+# manage (git pull, git checkout, etc.) by hand; re-run this script
+# afterwards whenever you want to rebuild/relink from whatever is
+# currently checked out there.
 #
 # Usage:
 #   .\scripts\Install-LocalMode.ps1
@@ -339,11 +339,7 @@ try {
     }
 
     if (Test-Path (Join-Path $RepoDir ".git")) {
-        Invoke-CollapsedStep -Title "Pulling the latest changes" -ScriptBlock {
-            Set-Location $using:RepoDir
-            & git pull
-            if ($LASTEXITCODE -ne 0) { throw "git pull failed with exit code $LASTEXITCODE" }
-        } | Out-Null
+        Write-Info "Repository already cloned at $RepoDir - using it as-is (pull/checkout manually if needed)."
     }
     else {
         if (Test-Path $RepoDir) {
@@ -438,7 +434,7 @@ try {
 
     Write-Header "All done"
     Write-Success "Local-mode build from branch '$currentBranch' is ready at $RepoDir."
-    Write-Success "Push more commits to '$currentBranch' and re-run this script any time to update."
+    Write-Success "To update: git pull (or checkout) inside $RepoDir yourself, then re-run this script."
 }
 catch {
     Write-ErrorMsg $_.Exception.Message

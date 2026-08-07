@@ -43,6 +43,15 @@ export const createCommands = (context: CommandContext): Command[] => [
     },
   },
   {
+    name: "clear",
+    description: "Clear the screen and start a new conversation",
+    execute: () => {
+      if (context.startNewConversation) {
+        context.startNewConversation();
+      }
+    },
+  },
+  {
     name: "resume",
     description: "Resume a recent conversation",
     execute: () => {

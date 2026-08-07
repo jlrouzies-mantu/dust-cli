@@ -26,3 +26,23 @@ export const MANTU_THINKING_PINK = "#C97B94";
 // from a terminal's own black background (e.g. default PowerShell 7), so
 // code blocks need a shade that actually reads as "a different surface".
 export const CODE_BLOCK_BG = "#121212";
+
+// Filled-block styling for the queued / steered message boxes under the
+// input. Each block is a brand-colored title bar fading into a dark tint of
+// the same hue for the message rows.
+//
+// The title bars deliberately use *dark* text on the brand color rather
+// than white: MANTU_GOLD and MANTU_PURPLE are both light enough that white
+// on them lands around 2:1 contrast, which is unreadable at terminal font
+// sizes. #1A0B2E (the same near-black the README badges use as their label
+// color) gives roughly 8-9:1 instead. The body rows invert that - dark
+// background, light tinted text - which is what produces the fade.
+export const QUEUED_TITLE_BG = MANTU_GOLD;
+export const QUEUED_TITLE_FG = "#1A0B2E";
+export const QUEUED_BODY_BG = "#3A2E0A";
+export const QUEUED_BODY_FG = "#F3E3B3";
+
+export const STEERED_TITLE_BG = MANTU_PURPLE;
+export const STEERED_TITLE_FG = "#1A0B2E";
+export const STEERED_BODY_BG = "#2B1247";
+export const STEERED_BODY_FG = "#E7D5FF";

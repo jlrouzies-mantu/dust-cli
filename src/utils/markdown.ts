@@ -67,24 +67,37 @@ export interface MarkdownSegment {
 // the raw `:name{...}` syntax in the CLI. Replace known/unknown
 // directives with a readable placeholder instead.
 function humanizeDustDirectives(text: string): string {
-  return text.replace(
-    /:(\w+)\{([^}]*)\}/g,
-    (_match, name: string, attrs: string) => {
-      const attrMap: Record<string, string> = {};
-      for (const m of attrs.matchAll(/(\w+)="([^"]*)"/g)) {
-        attrMap[m[1]] = m[2];
-      }
+  return (
+    text
+      .replace(/:(\w+)\{([^}]*)\}/g, (_match, name: string, attrs: string) => {
+        const attrMap: Record<string, string> = {};
+        for (const m of attrs.matchAll(/(\w+)="([^"]*)"/g)) {
+          attrMap[m[1]] = m[2];
+        }
 
-      if (name === "preview_file") {
-        const label = attrMap.title || attrMap.path || "file";
-        return `[Generated file: ${label} — not viewable in the CLI, only on the Dust web app]`;
-      }
+        if (name === "preview_file") {
+          const label = attrMap.title || attrMap.path || "file";
+          return `[Generated file: ${label} — not viewable in the CLI, only on the Dust web app]`;
+        }
 
-      // Generic fallback for any other Dust-specific directive: show
-      // something readable instead of leaking raw `:name{...}` syntax.
-      const label = attrMap.title || attrMap.name || attrMap.path || name;
-      return `[${label}]`;
-    }
+        // Generic fallback for any other Dust-specific directive: show
+        // something readable instead of leaking raw `:name{...}` syntax.
+        const label = attrMap.title || attrMap.name || attrMap.path || name;
+        return `[${label}]`;
+      })
+      // Citation references (`:cite[abc,def]`) use the bracket form of the
+      // same directive syntax. The web app turns these into numbered,
+      // clickable footnotes, but the reference ids alone carry no
+      // information without that link data - so drop them entirely rather
+      // than leaving `:cite[duj,aqj]` noise mid-sentence. The leading
+      // space is folded in so removal doesn't leave a double space before
+      // the sentence's period.
+      .replace(/ ?:cite\[[^\]]*\]/g, "")
+      // Any other bracket-form directive: keep something readable rather
+      // than leaking the raw syntax.
+      .replace(/:(\w+)\[([^\]]*)\]/g, (_match, _name: string, inner: string) =>
+        inner ? `[${inner}]` : ""
+      )
   );
 }
 

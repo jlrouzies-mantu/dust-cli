@@ -21,6 +21,14 @@ import {
   MANTU_PURPLE,
   MANTU_THINKING_PINK,
   MANTU_USER_ACCENT,
+  QUEUED_BODY_BG,
+  QUEUED_BODY_FG,
+  QUEUED_TITLE_BG,
+  QUEUED_TITLE_FG,
+  STEERED_BODY_BG,
+  STEERED_BODY_FG,
+  STEERED_TITLE_BG,
+  STEERED_TITLE_FG,
 } from "../../utils/brand.js";
 import type { ContextUsage } from "../../utils/contextUsage.js";
 import type { CreditsUsage } from "../../utils/creditsInfo.js";
@@ -93,7 +101,11 @@ export type ConversationItem = { key: string } & (
       index: number;
     }
   | {
+      // A turn that stopped early: either steered (redirected, with the
+      // follow-up message continuing right below) or plainly cancelled by
+      // the user.
       type: "agent_message_cancelled";
+      steered?: boolean;
     }
   | {
       // A snapshot of the todo list at the point todo_write was called.
@@ -119,10 +131,11 @@ interface ConversationProps {
   conversationItems: ConversationItem[];
   isProcessingQuestion: boolean;
   actionStatus: string | null;
-  queuedMessages: { id: string; text: string }[];
+  queuedMessages: { id: string; text: string; steered: boolean }[];
   thinkingPreview: string;
   streamingContentPreview: MarkdownSegment[];
   showExitHint: boolean;
+  transientHint: string | null;
   retryStatus: string | null;
   agentName: string | null;
   workspaceName: string | null;
@@ -156,6 +169,7 @@ const _Conversation: FC<ConversationProps> = ({
   thinkingPreview,
   streamingContentPreview,
   showExitHint,
+  transientHint,
   retryStatus,
   agentName,
   workspaceName,
@@ -257,32 +271,87 @@ const _Conversation: FC<ConversationProps> = ({
 
       {queuedMessages.length > 0 &&
         (() => {
-          const lines = queuedMessages.map((queued, index) => {
-            const label = `${index + 1}. ${queued.text.split("\n")[0]}${
-              queued.text.includes("\n") ? " …" : ""
-            }`;
-            return { id: queued.id, label };
-          });
-          const maxWidth = Math.max(0, ...lines.map((l) => l.label.length));
+          const terminalWidth = stdout?.columns || 80;
 
-          return (
-            <Box
-              flexDirection="column"
-              marginTop={1}
-              paddingX={1}
-              borderStyle="classic"
-              borderColor="gray"
-            >
-              <Text color={MANTU_GOLD} bold>
-                Queued ({queuedMessages.length}) — Up-arrow or Backspace
-                (empty input) to edit, Esc to cancel
-              </Text>
-              {lines.map((line) => (
-                <Text key={line.id} color={MANTU_GOLD}>
-                  {line.label.padEnd(maxWidth, " ")}
+          const renderQueueBlock = (
+            items: typeof queuedMessages,
+            title: string,
+            hint: string,
+            titleBg: string,
+            titleFg: string,
+            bodyBg: string,
+            bodyFg: string
+          ) => {
+            if (items.length === 0) {
+              return null;
+            }
+            const titleText = `${title} (${items.length}) — ${hint}`;
+            const itemTexts = items.map(
+              (item, index) =>
+                `${index + 1}. ${item.text.split("\n")[0]}${
+                  item.text.includes("\n") ? " …" : ""
+                }`
+            );
+
+            // Every row is padded to one shared width so the background
+            // paints as a solid block: Ink's backgroundColor only fills
+            // behind actual characters, so a short row would otherwise
+            // leave a ragged edge (same reason code blocks need
+            // padCodeBlockToBlockWidth). Capped to the terminal width so a
+            // narrow window can't wrap a row and break the block.
+            const blockWidth = Math.min(
+              Math.max(titleText.length, ...itemTexts.map((t) => t.length)) + 2,
+              terminalWidth - 2
+            );
+            const padRow = (text: string) =>
+              ` ${text} `.padEnd(blockWidth).slice(0, blockWidth);
+
+            return (
+              <Box
+                key={title}
+                flexDirection="column"
+                marginTop={1}
+                marginLeft={1}
+              >
+                <Text backgroundColor={titleBg} color={titleFg} bold>
+                  {padRow(titleText)}
                 </Text>
-              ))}
-            </Box>
+                {itemTexts.map((text, index) => (
+                  <Text
+                    key={items[index].id}
+                    backgroundColor={bodyBg}
+                    color={bodyFg}
+                  >
+                    {padRow(text)}
+                  </Text>
+                ))}
+              </Box>
+            );
+          };
+
+          // Steered messages interrupt the current turn and run first, so
+          // show that block above the plain queue.
+          return (
+            <>
+              {renderQueueBlock(
+                queuedMessages.filter((m) => m.steered),
+                "Steered",
+                "interrupting the current turn, sent next",
+                STEERED_TITLE_BG,
+                STEERED_TITLE_FG,
+                STEERED_BODY_BG,
+                STEERED_BODY_FG
+              )}
+              {renderQueueBlock(
+                queuedMessages.filter((m) => !m.steered),
+                "Queued",
+                "Up/Backspace to edit · Esc to cancel · Ctrl+S to steer",
+                QUEUED_TITLE_BG,
+                QUEUED_TITLE_FG,
+                QUEUED_BODY_BG,
+                QUEUED_BODY_FG
+              )}
+            </>
           );
         })()}
 
@@ -317,12 +386,18 @@ const _Conversation: FC<ConversationProps> = ({
           <Text color="yellow">Press Ctrl+C again to exit</Text>
         </Box>
       )}
+      {transientHint && (
+        <Box paddingLeft={1}>
+          <Text color="yellow">{transientHint}</Text>
+        </Box>
+      )}
       {!showCommandSelector && !inlineSelector && (
         <Box marginTop={0} paddingLeft={1}>
           <Text dimColor>
             {isProcessingQuestion ? "Enter to queue" : "Enter to send"} ·
             Ctrl/Shift+Enter for new line · ESC to{" "}
             {isProcessingQuestion ? "interrupt" : "clear"}
+            {isProcessingQuestion && " · Ctrl+S to steer"}
             {conversationId && " · Ctrl+G to open in browser"}
           </Text>
         </Box>
@@ -583,7 +658,11 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
     case "agent_message_cancelled":
       return (
         <Box marginBottom={1} marginTop={1}>
-          <Text color="red">[Cancelled]</Text>
+          {item.steered ? (
+            <Text color="gray">┌ Steered</Text>
+          ) : (
+            <Text color="red">✗ Cancelled</Text>
+          )}
         </Box>
       );
     case "file_change":

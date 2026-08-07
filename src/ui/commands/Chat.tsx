@@ -2,6 +2,7 @@ import type {
   AgentActionSpecificEvent,
   ConversationPublicType,
   CreateConversationResponseType,
+  DustAPI,
   GetAgentConfigurationsResponseType,
 } from "@dust-tt/client";
 import { readdir, stat } from "fs/promises";
@@ -37,7 +38,10 @@ import { useMe } from "../../utils/hooks/use_me.js";
 import type { MarkdownSegment } from "../../utils/markdown.js";
 import { renderMarkdownSegments } from "../../utils/markdown.js";
 import { retryResult } from "../../utils/retry.js";
-import { clearTerminal } from "../../utils/terminal.js";
+import {
+  clearTerminal,
+  clearTerminalAndScrollback,
+} from "../../utils/terminal.js";
 import { toolsCache } from "../../utils/toolsCache.js";
 import { appendTranscriptEntry } from "../../utils/transcriptStore.js";
 import AgentSelector from "../components/AgentSelector.js";
@@ -59,6 +63,10 @@ interface QueuedMessage {
   id: string;
   text: string;
   files: UploadedFile[];
+  // Steered messages (Ctrl+S) genuinely interrupt the current turn and are
+  // sent next; this just tracks that for display, so the UI can show them
+  // in their own "Steered" block, separate from plain queued ones.
+  steered: boolean;
 }
 
 interface CliChatProps {
@@ -110,6 +118,40 @@ function truncateForStreamingPreview(text: string): string {
     return text;
   }
   return `…\n${lines.slice(-maxLines).join("\n")}`;
+}
+
+// Matches the "[Pasted N lines of text]" placeholder a large paste gets
+// collapsed to in the input (see pastedBlocksRef usage below). The real
+// content behind it only ever lives transiently in pastedBlocksRef,
+// consumed the moment it's actually sent - conversationItems' stored
+// `content` keeps the placeholder text forever, so a message containing
+// one can't be meaningfully resent from history navigation (it would just
+// submit the literal placeholder string, not the original paste).
+const PASTE_PLACEHOLDER_RE = /\[Pasted \d+ lines? of text\]/;
+
+// Steering cancels the in-flight turn server-side, which wipes any
+// in-progress text reply (confirmed by direct testing - completed tool
+// results survive on their own, but free text doesn't). This re-supplies
+// that lost text as context in the follow-up message, so the agent can
+// pick up where it left off if the steer message doesn't say otherwise.
+function buildSteerRedirectPrompt(
+  originalTask: string,
+  partialContent: string,
+  steerMessage: string
+): string {
+  const trimmedPartial = partialContent.trim();
+  const partialSection = trimmedPartial
+    ? `\nYou had already written this much of your reply before being cut off (not saved - shown only for context):\n\n"""\n${trimmedPartial}\n"""\n`
+    : "";
+  return (
+    `[Automated note, not from the user: your previous response was interrupted before it finished - including any tool calls in progress, which did not complete.]\n\n` +
+    `The user interrupted you to say:\n\n"""\n${steerMessage}\n"""\n\n` +
+    `The task you were working on when interrupted was:\n\n"""\n${originalTask}\n"""\n` +
+    partialSection +
+    `\nHow to proceed, in this order:\n` +
+    `1. Respond to the user's interrupting message above. Always address it explicitly - never skip it or reply with an empty/placeholder line, even if it seems trivial or unrelated to the task.\n` +
+    `2. Then resume and complete the original task, unless the interruption told you to stop, cancel, or abandon it. Being interrupted does not by itself mean the task was cancelled. If the interruption was a correction, clarification, or change of direction for that task, fold it in and continue accordingly.`
+  );
 }
 
 function buildConversationItemsFromHistory(
@@ -205,6 +247,23 @@ const CliChat: FC<CliChatProps> = ({
     useState<AbortController | null>(null);
   const [userInput, setUserInput] = useState("");
   const [cursorPosition, setCursorPosition] = useState(0);
+  // Position within this conversation's own sent messages while navigating
+  // history with Up/Down (null = not currently navigating; otherwise an
+  // index into the oldest-first user_message list, counting backward from
+  // the end). Reset whenever the input is cleared by an actual send/cancel
+  // rather than by history navigation itself.
+  const [historyIndex, setHistoryIndex] = useState<number | null>(null);
+  // Bumped after every manual clearTerminal() call (new/resumed
+  // conversation) and used as the <Conversation> element's React `key` -
+  // clearTerminal() writes raw ANSI codes directly to stdout, bypassing
+  // Ink's own render bookkeeping entirely. Without a full remount
+  // afterward, Ink's next render thinks the cursor/previous-frame-height
+  // are wherever they were before the clear, not the top of a blank
+  // screen, and ends up leaving the old input box/status bar behind
+  // instead of cleanly replacing them - the exact same class of artifact
+  // Conversation.tsx already works around for terminal *resizes*, just not
+  // wired up for this case.
+  const [conversationRenderKey, setConversationRenderKey] = useState(0);
   const [showCommandSelector, setShowCommandSelector] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
@@ -253,6 +312,14 @@ const CliChat: FC<CliChatProps> = ({
   // otherwise they only show up in the debug log, indistinguishable from
   // "it didn't retry at all" from the user's perspective.
   const [retryStatus, setRetryStatus] = useState<string | null>(null);
+  // A brief, self-clearing status line (unlike pushNotice, which appends
+  // permanently to scrollback) - for feedback on a key press that's routine
+  // to repeat (e.g. Ctrl+S pressed before typing anything), so mashing it
+  // doesn't flood the transcript with duplicate lines forever.
+  const [transientHint, setTransientHint] = useState<string | null>(null);
+  const transientHintTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
   const [workspaceName, setWorkspaceName] = useState<string | null>(null);
   const [consumedCredits, setConsumedCredits] = useState<CreditsUsage | null>(
     null
@@ -278,6 +345,29 @@ const CliChat: FC<CliChatProps> = ({
   const updateIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const contentRef = useRef<string>("");
   const chainOfThoughtRef = useRef<string>("");
+  // Real server-side cancellation (cancelMessageGeneration) support: enough
+  // state to call it against the right conversation/message, and to know
+  // whether a tool call is currently in flight so a steer request can wait
+  // for it to finish rather than interrupting it mid-flight (completed tool
+  // results survive cancellation; a mid-flight one is untested and assumed
+  // risky - see README's steering note).
+  const activeDustClientRef = useRef<DustAPI | null>(null);
+  const activeConversationIdRef = useRef<string | null>(null);
+  const agentMessageIdRef = useRef<string | null>(null);
+  const toolCallInFlightRef = useRef(false);
+  // Set when a steer was requested mid-tool-call: the message is already
+  // queued (so it shows immediately), but the interrupt itself waits for
+  // the running call to finish.
+  const steerCancelPendingRef = useRef(false);
+  const pendingSteerContextRef = useRef<{ partialContent: string } | null>(
+    null
+  );
+  // The current turn's original task text, so a steer redirect can remind
+  // the agent what it was working on - without this, a steer whose text
+  // reads as a standalone question (e.g. "what is 1+1") gets answered and
+  // the original task is simply dropped, since nothing else in the
+  // redirect message says what that task even was.
+  const currentTurnPromptRef = useRef<string>("");
   const resumeLoadedRef = useRef(false);
   const todoListIndexRef = useRef(0);
   // Timestamp of the previous useInput event, used to detect pasted text
@@ -422,6 +512,78 @@ const CliChat: FC<CliChatProps> = ({
       },
     ]);
   }, []);
+
+  // Marks where a turn stopped early in the transcript - distinguishing a
+  // steer (the agent was redirected, and the follow-up message right below
+  // continues the thread) from a plain Esc/Ctrl+C cancel (the user just
+  // wanted it to stop), since those read very differently in scrollback.
+  const appendCancellationMarker = useCallback((steered: boolean) => {
+    setConversationItems((prev) => {
+      const lastAgentMessageHeader = getLastConversationItem<
+        ConversationItem & { type: "agent_message_header" }
+      >(prev, "agent_message_header");
+      const index = lastAgentMessageHeader?.index ?? 0;
+      return [
+        ...prev,
+        {
+          key: `agent_message_cancelled_${index}_${Date.now()}`,
+          type: "agent_message_cancelled",
+          steered,
+        },
+      ];
+    });
+  }, []);
+
+  const showTransientHint = useCallback((text: string) => {
+    setTransientHint(text);
+    if (transientHintTimeoutRef.current) {
+      clearTimeout(transientHintTimeoutRef.current);
+    }
+    transientHintTimeoutRef.current = setTimeout(() => {
+      setTransientHint(null);
+    }, 2500);
+  }, []);
+
+  // Actually stops the current turn server-side via cancelMessageGeneration
+  // - unlike a bare AbortController.abort(), which only disconnects this
+  // client's stream reader and leaves the agent running (and burning
+  // credits/tool calls) in the background, as confirmed by direct testing
+  // against the API (see README's steering note). Falls back to a local
+  // abort only if we don't have an agent message id yet (interrupted before
+  // any stream event arrived) or the cancel call itself fails - that alone
+  // can't stop server-side work, but it at least stops the UI from hanging.
+  const cancelCurrentGeneration = useCallback(async () => {
+    const dustClient = activeDustClientRef.current;
+    const conversationId = activeConversationIdRef.current;
+    const agentMessageId = agentMessageIdRef.current;
+    if (dustClient && conversationId && agentMessageId) {
+      const res = await dustClient.cancelMessageGeneration({
+        conversationId,
+        messageIds: [agentMessageId],
+      });
+      if (!res.isErr()) {
+        // The server emits `agent_generation_cancelled` on the existing
+        // stream shortly after this succeeds - the already-handled event
+        // finishes the turn naturally; disconnecting the client too would
+        // just race it.
+        return;
+      }
+    }
+    abortController?.abort();
+  }, [abortController]);
+
+  // Fires the interrupt for a steer request that was held while a tool
+  // call was in flight, now that the call has safely completed - the
+  // message itself was already queued when the key was pressed, so only
+  // the cancellation is left to do here.
+  const flushPendingSteer = useCallback(() => {
+    if (!steerCancelPendingRef.current) {
+      return;
+    }
+    steerCancelPendingRef.current = false;
+    pendingSteerContextRef.current = { partialContent: contentRef.current };
+    void cancelCurrentGeneration();
+  }, [cancelCurrentGeneration]);
 
   const triggerAgentSwitch = useCallback(() => {
     // Clear all input states before switching.
@@ -779,7 +941,11 @@ const CliChat: FC<CliChatProps> = ({
   );
 
   const startNewConversation = useCallback(async () => {
-    await clearTerminal();
+    // Full wipe (screen + scrollback) - /new and /clear mean "give me a
+    // genuine blank slate", so there shouldn't be anything left to scroll
+    // back to.
+    await clearTerminalAndScrollback();
+    setConversationRenderKey((k) => k + 1);
     setCurrentConversationId(null);
     setConversationItems(
       selectedAgent
@@ -800,7 +966,7 @@ const CliChat: FC<CliChatProps> = ({
 
   const showHelp = useCallback(() => {
     const helpText =
-      "Commands: /help /switch /new /resume /attach /clear-files /auto /exit\n" +
+      "Commands: /help /switch /new /clear /resume /attach /clear-files /auto /exit\n" +
       "Shortcuts: Enter=send · Ctrl+Enter/Shift+Enter=newline · Ctrl+W=delete word · Esc=clear/cancel · Ctrl+G=browser";
     const lines = helpText.split("\n");
     setConversationItems((prev) => [
@@ -853,6 +1019,7 @@ const CliChat: FC<CliChatProps> = ({
       });
 
       await clearTerminal();
+      setConversationRenderKey((k) => k + 1);
       setConversationItems(items);
       void getContextUsage(convId).then(setContextUsageIfPresent);
       void getConsumedCredits().then(setConsumedCreditsIfPresent);
@@ -935,6 +1102,22 @@ const CliChat: FC<CliChatProps> = ({
     showHelp,
     resumeConversation,
   });
+
+  // Clear the terminal (screen + scrollback) once, when the interactive
+  // chat first mounts - launching a chat session gets the same blank slate
+  // /new and /clear give. Deliberately here rather than in index.tsx: this
+  // component *is* the interactive chat, so one-shot commands (--version,
+  // status, login, -m/--message, ...) don't get their output wiped, which
+  // gating on argv in index.tsx would have to duplicate App.tsx's routing
+  // to avoid. Runs after the first paint, so index.tsx's immediate
+  // "Starting dustm..." feedback still shows during the (slow) module load
+  // before this point.
+  useEffect(() => {
+    void (async () => {
+      await clearTerminalAndScrollback();
+      setConversationRenderKey((k) => k + 1);
+    })();
+  }, []);
 
   // Cache Edit tool when agent is selected, since approval is asked anyways
   // TODO: add check for the fact that we are using fs server when implemented
@@ -1089,6 +1272,7 @@ const CliChat: FC<CliChatProps> = ({
       });
 
       await clearTerminal();
+      setConversationRenderKey((k) => k + 1);
       setConversationItems(items);
       void getContextUsage(conversationId).then(setContextUsageIfPresent);
       void getConsumedCredits().then(setConsumedCreditsIfPresent);
@@ -1116,16 +1300,45 @@ const CliChat: FC<CliChatProps> = ({
         return;
       }
 
-      // questionText is what's shown in the transcript - it may still
-      // contain "[Pasted N lines of text]" placeholders. fullQuestionText
-      // swaps those back in for what actually gets sent to the agent.
-      let fullQuestionText = questionText;
+      // questionText is what was typed - it may still contain
+      // "[Pasted N lines of text]" placeholders (kept compact while
+      // composing so a huge paste doesn't flood the input box).
+      // expandedQuestionText swaps those back in for good, and is what
+      // gets shown in the transcript once sent - unlike the input box, the
+      // permanent scrollback should show what was actually said, not a
+      // placeholder that can never be expanded again after this point.
+      let expandedQuestionText = questionText;
       for (const { placeholder, content } of pastedBlocksRef.current) {
-        if (fullQuestionText.includes(placeholder)) {
-          fullQuestionText = fullQuestionText.replace(placeholder, content);
+        if (expandedQuestionText.includes(placeholder)) {
+          expandedQuestionText = expandedQuestionText.replace(
+            placeholder,
+            content
+          );
         }
       }
       pastedBlocksRef.current = [];
+
+      // Only a genuinely new task (not a steer redirect) updates what
+      // "the original task" means - a redirect keeps pointing back at
+      // whatever it actually was, so a chain of interruptions doesn't lose
+      // track of it in favor of the most recent interruption's text.
+      if (!pendingSteerContextRef.current) {
+        currentTurnPromptRef.current = expandedQuestionText;
+      }
+
+      // fullQuestionText starts the same, but may get further wrapped
+      // (e.g. with steer redirect context) before being sent - that
+      // wrapping is for the agent only, never shown in the transcript.
+      let fullQuestionText = expandedQuestionText;
+      if (pendingSteerContextRef.current) {
+        const { partialContent } = pendingSteerContextRef.current;
+        pendingSteerContextRef.current = null;
+        fullQuestionText = buildSteerRedirectPrompt(
+          currentTurnPromptRef.current,
+          partialContent,
+          fullQuestionText
+        );
+      }
 
       setConversationItems((prev) => {
         const lastUserMessage = getLastConversationItem<
@@ -1152,7 +1365,7 @@ const CliChat: FC<CliChatProps> = ({
             key: newUserMessageKey,
             type: "user_message",
             firstName: me.firstName ?? "You",
-            content: questionText,
+            content: expandedQuestionText,
             index: newUserMessageIndex,
           },
         ];
@@ -1182,6 +1395,9 @@ const CliChat: FC<CliChatProps> = ({
       setStreamingContentPreview([]);
       const controller = new AbortController();
       setAbortController(controller);
+      agentMessageIdRef.current = null;
+      toolCallInFlightRef.current = false;
+      steerCancelPendingRef.current = false;
 
       const dustClientRes = await getDustClient();
       if (dustClientRes.isErr()) {
@@ -1445,6 +1661,12 @@ const CliChat: FC<CliChatProps> = ({
           conversation = convRes.value;
         }
 
+        // For cancelCurrentGeneration - see its definition for why this
+        // needs to be a real cancelMessageGeneration call, not just a
+        // client-side abort.
+        activeDustClientRef.current = dustClient;
+        activeConversationIdRef.current = conversation.sId;
+
         // Crash-safety net: record the user's side of the exchange before
         // waiting on the agent's (potentially long-running, potentially
         // failing) stream below.
@@ -1493,6 +1715,14 @@ const CliChat: FC<CliChatProps> = ({
         }, 1000);
 
         for await (const event of streamRes.value.eventStream) {
+          if (
+            !agentMessageIdRef.current &&
+            "messageId" in event &&
+            event.messageId
+          ) {
+            agentMessageIdRef.current = event.messageId;
+          }
+
           if (event.type === "generation_tokens") {
             if (event.classification === "tokens") {
               contentRef.current += event.text;
@@ -1513,8 +1743,19 @@ const CliChat: FC<CliChatProps> = ({
             chainOfThoughtRef.current = "";
             setThinkingPreview("");
             setStreamingContentPreview([]);
-            contentRef.current = contentRef.current || "[Cancelled]";
-            pushFinalContentToConversationItems();
+            // A steer sets pendingSteerContextRef just before cancelling
+            // (and it isn't consumed until the redirect message is
+            // actually submitted, which happens after this turn ends), so
+            // it's a reliable "this cancel was a steer, not a plain
+            // Esc/Ctrl+C" signal here.
+            const cancelWasSteer = pendingSteerContextRef.current !== null;
+            // Keep whatever had been written before the cut-off; the
+            // marker below covers the "nothing was written yet" case
+            // instead of standing in as fake message content.
+            if (contentRef.current.trim()) {
+              pushFinalContentToConversationItems();
+            }
+            appendCancellationMarker(cancelWasSteer);
             contentRef.current = "";
             break;
           } else if (event.type === "agent_message_success") {
@@ -1542,8 +1783,17 @@ const CliChat: FC<CliChatProps> = ({
             setActionStatus(
               event.action.displayLabels?.running ?? "Running a tool"
             );
+            toolCallInFlightRef.current = true;
           } else if (event.type === "agent_action_success") {
             setActionStatus(null);
+            toolCallInFlightRef.current = false;
+
+            // A steer requested while this tool call was running was held
+            // rather than interrupting it mid-flight - fire it now that
+            // the call has safely completed (its result survives the
+            // cancellation about to happen; only the text below would be
+            // lost, which is why it's captured here to re-supply).
+            flushPendingSteer();
           } else if (event.type === "tool_approve_execution") {
             const approved = await handleApprovalRequest(event);
             await dustClient.validateAction({
@@ -1562,23 +1812,7 @@ const CliChat: FC<CliChatProps> = ({
             clearInterval(updateIntervalRef.current);
           }
 
-          setConversationItems((prev) => {
-            const lastAgentMessageHeader = getLastConversationItem<
-              ConversationItem & { type: "agent_message_header" }
-            >(prev, "agent_message_header");
-
-            if (!lastAgentMessageHeader) {
-              throw new Error("Unreachable: No agent message header found");
-            }
-
-            return [
-              ...prev,
-              {
-                key: `agent_message_cancelled_${lastAgentMessageHeader.index}`,
-                type: "agent_message_cancelled",
-              },
-            ];
-          });
+          appendCancellationMarker(pendingSteerContextRef.current !== null);
 
           chainOfThoughtRef.current = "";
           setThinkingPreview("");
@@ -1628,13 +1862,13 @@ const CliChat: FC<CliChatProps> = ({
       uploadedFiles,
       fileSystemServerId,
       resolvedSpaceId,
+      flushPendingSteer,
     ]
   );
 
   // Auto-send the next queued message once the current turn has finished -
-  // whether it completed normally or was interrupted with Esc, which is
-  // what gives queuing its "steering" effect: interrupt, then the queued
-  // follow-up takes over.
+  // whether it completed normally, was cancelled via Esc/Ctrl+C, or was
+  // interrupted by a genuine Ctrl+S steer (see cancelCurrentGeneration).
   useEffect(() => {
     if (isProcessingQuestion || messageQueue.length === 0) {
       return;
@@ -1689,6 +1923,7 @@ const CliChat: FC<CliChatProps> = ({
               id: `queued_${Date.now()}_${prev.length}`,
               text: userInput,
               files,
+              steered: false,
             },
           ]);
         } else {
@@ -1696,6 +1931,7 @@ const CliChat: FC<CliChatProps> = ({
         }
         setUserInput("");
         setCursorPosition(0);
+        setHistoryIndex(null);
       }
     },
     [userInput, isProcessingQuestion, handleSubmitQuestion]
@@ -1739,7 +1975,7 @@ const CliChat: FC<CliChatProps> = ({
     // (Ink's default exitOnCtrlC is disabled in index.tsx for this reason.)
     if (key.ctrl && input === "c") {
       if (isProcessingQuestion && abortController) {
-        abortController.abort();
+        void cancelCurrentGeneration();
         return;
       }
       const now = Date.now();
@@ -1758,43 +1994,71 @@ const CliChat: FC<CliChatProps> = ({
       return;
     }
 
-    // Ctrl+S "steer" is disabled - see README's Development section for
-    // why. Short version: Dust's agent loop runs server-side, and the
-    // streaming API has no way to inject a message (or reorder anything)
-    // into an already-running turn - the only mid-stream client actions
-    // are approve/reject-a-tool-call or a full abort. What this used to do
-    // was jump a message to the front of the *queue* (applied only once
-    // the current turn ends naturally), which isn't real steering and was
-    // confusing under that name. Left commented out rather than deleted in
-    // case Dust's platform ever adds a real interrupt/redirect capability
-    // to the stream protocol - if so, this can be revived (needs
-    // `showTransientHint` below un-commented too, and `steered: boolean`
-    // added back to `QueuedMessage`).
-    //
-    // if (key.ctrl && input === "s") {
-    //   const keyLabel = "Ctrl+S";
-    //   if (!isProcessingQuestion) {
-    //     showTransientHint(`${keyLabel} only steers while the agent is working.`);
-    //   } else if (userInput.trim()) {
-    //     setMessageQueue((prev) => [
-    //       { id: `steer_${Date.now()}`, text: userInput, files: uploadedFiles, steered: true },
-    //       ...prev,
-    //     ]);
-    //     setUserInput("");
-    //     setCursorPosition(0);
-    //     setUploadedFiles([]);
-    //   } else if (messageQueue.length > 0) {
-    //     setMessageQueue((prev) => [
-    //       { ...prev[prev.length - 1], steered: true },
-    //       ...prev.slice(0, -1),
-    //     ]);
-    //   } else {
-    //     showTransientHint(
-    //       `${keyLabel}: type a message, or queue one, then press ${keyLabel} to steer it.`
-    //     );
-    //   }
-    //   return;
-    // }
+    // Ctrl+S: steer - genuinely interrupts the current turn server-side
+    // (via cancelCurrentGeneration/cancelMessageGeneration, confirmed by
+    // direct testing to actually stop the agent, unlike a bare abort) and
+    // sends this message as a redirect. If a tool call is currently
+    // running, the interrupt is held until it finishes rather than firing
+    // mid-flight (untested/assumed risky) - see cancelCurrentGeneration and
+    // the agent_action_success handler above for where that's applied.
+    if (key.ctrl && input === "s") {
+      const keyLabel = "Ctrl+S";
+      if (!isProcessingQuestion) {
+        showTransientHint(`${keyLabel} only steers while the agent is working.`);
+      } else if (!userInput.trim() && messageQueue.length === 0) {
+        showTransientHint(
+          `${keyLabel}: type a message, or queue one, then press ${keyLabel} to steer it.`
+        );
+      } else {
+        // Prefer what's currently typed; if the input is empty, steer the
+        // most recently queued message instead of requiring it to be
+        // retyped.
+        const sourcedFromQueue = !userInput.trim();
+        const steerMessage = sourcedFromQueue
+          ? messageQueue[messageQueue.length - 1].text
+          : userInput;
+        const steerFiles = sourcedFromQueue
+          ? messageQueue[messageQueue.length - 1].files
+          : uploadedFiles;
+
+        if (sourcedFromQueue) {
+          setMessageQueue((prev) => prev.slice(0, -1));
+        } else {
+          setUserInput("");
+          setCursorPosition(0);
+          setUploadedFiles([]);
+        }
+
+        // Queue it immediately either way, so the "Steered" block appears
+        // the moment the key is pressed rather than only once the next
+        // stream event arrives - the queue's auto-send effect won't fire
+        // while the turn is still in flight, so this is safe even when the
+        // cancellation below is deferred. (It also can't be tracked in a
+        // ref for this: refs don't re-render.)
+        setMessageQueue((prev) => [
+          {
+            id: `steer_${Date.now()}`,
+            text: steerMessage,
+            files: steerFiles,
+            steered: true,
+          },
+          ...prev,
+        ]);
+
+        if (toolCallInFlightRef.current) {
+          // Hold the actual interrupt until the running tool call finishes
+          // - see the agent_action_success handler.
+          steerCancelPendingRef.current = true;
+          showTransientHint(
+            `${keyLabel}: steering as soon as the current tool call finishes...`
+          );
+        } else {
+          pendingSteerContextRef.current = { partialContent: contentRef.current };
+          void cancelCurrentGeneration();
+        }
+      }
+      return;
+    }
 
     if (!selectedAgent) {
       return;
@@ -2112,8 +2376,9 @@ const CliChat: FC<CliChatProps> = ({
         setUserInput("");
         setCursorPosition(0);
         pastedBlocksRef.current = [];
+        setHistoryIndex(null);
       } else if (isProcessingQuestion && abortController) {
-        abortController.abort();
+        void cancelCurrentGeneration();
       }
       return;
     }
@@ -2166,11 +2431,13 @@ const CliChat: FC<CliChatProps> = ({
             id: `queued_${Date.now()}_${prev.length}`,
             text: userInput,
             files: uploadedFiles,
+            steered: false,
           },
         ]);
         setUserInput("");
         setCursorPosition(0);
         setUploadedFiles([]);
+        setHistoryIndex(null);
         return;
       }
 
@@ -2179,6 +2446,7 @@ const CliChat: FC<CliChatProps> = ({
       setUserInput("");
       setCursorPosition(0);
       setUploadedFiles([]); // Clear uploaded files after sending
+      setHistoryIndex(null);
 
       return;
     }
@@ -2403,6 +2671,66 @@ const CliChat: FC<CliChatProps> = ({
       messageQueue.length > 0
     ) {
       recallLastQueuedMessage();
+      return;
+    }
+
+    // Shell-history-style recall: when there's nothing queued to pull from
+    // instead, Up-arrow steps backward through this conversation's own
+    // previously sent messages (most recent first), Down-arrow steps back
+    // forward. Gated to single-line input (no embedded "\n") past the
+    // first press so it never fights with the line-navigation Up/Down
+    // handles below for a genuinely multi-line draft/recalled message.
+    if (
+      key.upArrow &&
+      !isInCommandMode &&
+      messageQueue.length === 0 &&
+      (userInput === "" ||
+        (historyIndex !== null && !userInput.includes("\n")))
+    ) {
+      const userMessageHistory = conversationItems
+        .filter(
+          (item): item is ConversationItem & { type: "user_message" } =>
+            item.type === "user_message"
+        )
+        .map((item) => item.content)
+        .filter((content) => !PASTE_PLACEHOLDER_RE.test(content));
+      if (userMessageHistory.length > 0) {
+        const nextIndex =
+          historyIndex === null
+            ? userMessageHistory.length - 1
+            : Math.max(0, historyIndex - 1);
+        setHistoryIndex(nextIndex);
+        const text = userMessageHistory[nextIndex];
+        setUserInput(text);
+        setCursorPosition(text.length);
+      }
+      return;
+    }
+
+    if (
+      key.downArrow &&
+      !isInCommandMode &&
+      historyIndex !== null &&
+      !userInput.includes("\n")
+    ) {
+      const userMessageHistory = conversationItems
+        .filter(
+          (item): item is ConversationItem & { type: "user_message" } =>
+            item.type === "user_message"
+        )
+        .map((item) => item.content)
+        .filter((content) => !PASTE_PLACEHOLDER_RE.test(content));
+      if (historyIndex >= userMessageHistory.length - 1) {
+        setHistoryIndex(null);
+        setUserInput("");
+        setCursorPosition(0);
+      } else {
+        const nextIndex = historyIndex + 1;
+        setHistoryIndex(nextIndex);
+        const text = userMessageHistory[nextIndex];
+        setUserInput(text);
+        setCursorPosition(text.length);
+      }
       return;
     }
 
@@ -2667,6 +2995,7 @@ const CliChat: FC<CliChatProps> = ({
       )}
 
       <Conversation
+        key={conversationRenderKey}
         conversationItems={conversationItems}
         isProcessingQuestion={isProcessingQuestion}
         actionStatus={actionStatus}
@@ -2675,6 +3004,7 @@ const CliChat: FC<CliChatProps> = ({
         streamingContentPreview={streamingContentPreview}
         showExitHint={showExitHint}
         retryStatus={retryStatus}
+        transientHint={transientHint}
         agentName={selectedAgent?.name ?? null}
         workspaceName={workspaceName}
         consumedCredits={consumedCredits}

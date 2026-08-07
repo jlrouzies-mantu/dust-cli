@@ -1,16 +1,37 @@
 #!/usr/bin/env node
 
+import { MANTU_PURPLE } from "./utils/brand.js";
+
+// Print immediate feedback before pulling in the ink/react/App dependency
+// graph below - resolving and loading that many transitive node_modules can
+// itself take a few seconds on a cold Windows start (AV file-scan overhead
+// in particular), and static imports are hoisted ahead of everything else
+// in this file, so without this the terminal would show nothing at all
+// during that window, making the CLI look stuck before it even gets a
+// chance to render its own "Loading" spinner. Dynamic `import()` is what
+// lets this line run first. Styled by hand with a raw ANSI escape (rather
+// than chalk/ink) so this print doesn't itself wait on anything heavier
+// than ./utils/brand.js, which has zero dependencies.
+function hexToRgb(hex: string): [number, number, number] {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+const [r, g, b] = hexToRgb(MANTU_PURPLE);
+process.stdout.write(`\x1b[38;2;${r};${g};${b}m♦\x1b[0m Starting dustm...\n`);
+
 import { initLogger, registerInkCleanup } from "./utils/logger.js";
 
 if (!process.argv.includes("-m") && !process.argv.includes("--message")) {
   initLogger();
 }
 
-import { render } from "ink";
-import meow from "meow";
-import React from "react";
-
-import App from "./ui/App.js";
+const [{ render }, { default: meow }, { createElement }, { default: App }] =
+  await Promise.all([
+    import("ink"),
+    import("meow"),
+    import("react"),
+    import("./ui/App.js"),
+  ]);
 
 const cli = meow({
   importMeta: import.meta,
@@ -110,5 +131,7 @@ const cli = meow({
 // with no chance for the app to react — losing an in-progress chat with
 // no warning. Disabled here; App.tsx and Chat.tsx implement their own
 // (safer) Ctrl+C handling instead.
-const instance = render(<App cli={cli} />, { exitOnCtrlC: false });
+const instance = render(createElement(App, { cli }), {
+  exitOnCtrlC: false,
+});
 registerInkCleanup(() => instance.unmount());

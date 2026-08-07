@@ -1,6 +1,6 @@
 <div align="center">
 
-# ⟡ dust-cli
+# ⟡ dust-cli (dustm)
 
 ### The Mantu fork of the Dust CLI
 
@@ -9,7 +9,7 @@
 ![License](https://img.shields.io/badge/License-MIT-FFFFFF?style=for-the-badge&labelColor=7C2AE8)
 ![Node](https://img.shields.io/badge/Node-%3E%3D24.16-D4A72C?style=for-the-badge&labelColor=1A0B2E)
 
-*A hardened, restyled build of [`@dust-tt/dust-cli`](https://github.com/dust-tt/dust/tree/main/cli/dust-cli) — same agents, same account, a console experience that actually survives legacy Windows terminals.*
+*A hardened, restyled build of [`@dust-tt/dust-cli`](https://github.com/dust-tt/dust/tree/main/cli/dust-cli) — same agents, same account, but a more consistent console experience.*
 
 </div>
 
@@ -25,6 +25,7 @@
 - [Usage](#usage)
   - [Commands](#commands)
   - [Shortcuts](#shortcuts)
+  - [Steering](#steering)
   - [Status bar](#status-bar)
   - [In-Chat Commands](#in-chat-commands)
   - [Headless Authentication](#headless-authentication)
@@ -37,8 +38,6 @@
 
 ## Changelog: Mantu fork vs. upstream Dust CLI
 
-This fork exists to fix a specific, reproducible set of problems the official CLI has on Windows consoles without full VT/Unicode support (legacy `conhost`, PowerShell 5) — bad paste handling, unrecoverable crashes, no persistence — plus a set of UX upgrades. Auth, agent listing, and non-interactive mode are otherwise untouched.
-
 ### ✨ Added
 
 | Feature | Notes |
@@ -47,16 +46,25 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 | Auto-retry on API errors | Up to 5x with backoff on transient failures; skipped for non-idempotent calls |
 | Actionable error messages | Fatal errors include the exact command to resume that conversation |
 | Local crash-safe transcripts | Every turn appended to `~/.dust-cli/transcripts/<id>.jsonl` |
-| Ctrl+C safety net | Cancels generation if running; otherwise double-press within 2s to exit |
+| Ctrl+C safety net | Genuinely cancels generation server-side (via `cancelMessageGeneration`) if running, not just a client-side disconnect; otherwise double-press within 2s to exit |
+| `/clear` command | Alias for `/new` — the more familiar name from other chat UIs |
+| LaTeX math rendering | `$...$` / `$$...$$` spans (Greek letters, `\frac`, `\sqrt`, accents, sub/superscripts) converted to readable Unicode before markdown ever sees them, since a terminal can't typeset real math |
 | Markdown rendering | Syntax-highlighted code fences, boxed on their own |
 | Transient "Thinking…" status | `◊` icon pulsing between brand colors instead of a permanent scrollback dump |
 | Persistent, colorized status bar | Workspace, agent, folder, branch, tokens, credits — see [Status bar](#status-bar) |
 | Ctrl+Enter / Shift+Enter | Multi-line input |
 | `todo_write` tool | Claude-Code-style task checklist (`--with-tools` only) |
-| Dust directive handling | Web-only directives (e.g. `:preview_file{...}`) shown as readable placeholders |
+| Dust directive handling | Web-only directives (e.g. `:preview_file{...}`) shown as readable placeholders; citation refs (`:cite[...]`), which the web app turns into clickable footnotes but carry no information without that link data, are stripped instead of leaking mid-sentence |
 | Clipboard image paste | Attach a screenshot straight from the clipboard via Ctrl+V or `/attach` — Windows tested, macOS untested — see [In-Chat Commands](#in-chat-commands) |
-| Paste compaction | Large multi-line pastes collapse to a `[Pasted N lines of text]` placeholder in the input instead of dumping the raw text inline |
+| Paste compaction | Large multi-line pastes collapse to a `[Pasted N lines of text]` placeholder while composing, instead of dumping the raw text inline; the full content is what's shown in the transcript and sent once you hit Enter - the placeholder never lands in permanent scrollback |
 | Portable content search | `search_content` (`--with-tools`) no longer shells out to the system `grep` binary, and supports lines of context around each match |
+| `write_file` tool | Local file creation/overwrite (`--with-tools`), so "create a file" lands on disk in the current folder instead of Dust's hosted, web-only file preview |
+| Message queuing | Type and send while the agent is still working — queued messages show in a bordered box below the input and auto-send in order once the current turn ends; recall the last one with Up-arrow/Backspace to edit or cancel it |
+| Real steering (`Ctrl+S`) | Genuinely interrupts the current turn server-side (via `cancelMessageGeneration`, not just a client-side disconnect) and sends your message as a redirect — see [Steering](#steering) for how it works and its limits |
+| Shell-history recall (Up/Down) | When there's nothing queued, Up-arrow steps backward through this conversation's own previously sent messages (Down steps forward again) |
+| Persistent file-change previews | Approved `write_file`/`edit_file` previews stay in scrollback after the turn finishes, instead of disappearing once the approval prompt closes |
+| Immediate startup feedback | Prints "Starting dustm..." right away, before the (larger) UI dependency graph finishes loading, so the CLI doesn't look stuck on a slow/cold start |
+| Visible retry indicator | API/MCP call retries now show a spinner + `[attempt/max] Retrying ... — <error>` line instead of only ever showing up in `~/.dust-cli/logs/` - previously indistinguishable from "it didn't retry at all" |
 
 ### 🐛 Fixed
 
@@ -66,17 +74,17 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 | No Ctrl+Backspace / Ctrl+Left/Right word-jump | Never implemented upstream |
 | Transient stream errors showed a fatal, unrecoverable error | Never checked whether the answer had actually completed server-side |
 | Agent list / MCP / user-info fetches failed on one hiccup | No retry logic anywhere |
-| `--resume` wiped the terminal scrollback | `clearTerminal()` used the wrong escape sequence |
+| Re-rendering the view (resume, terminal resize) wiped the terminal scrollback | `clearTerminal()` used the wrong escape sequence — these cases now only clear the visible screen. A *deliberate* full wipe (screen + scrollback) still happens where a blank slate is the whole point: launching the chat, `/new`, and `/clear` |
 | UI glyphs rendered as garbage or misaligned boxes | Unicode glyphs unsupported on this console's font |
 | Code block borders/backgrounds rendered wrong | Ink/Yoga layout defaults, unpadded background fill |
 | Markdown headings/bold never rendered | Confirmed `marked-terminal@7.3.0` bug |
 | `npm run build` failed on Windows | Bash-style `NODE_ENV=x` syntax in scripts |
 | `search_content` (`--with-tools`) could silently fail | It shelled out to the system `grep` binary, not guaranteed to exist on plain Windows without Git for Windows/WSL |
-
-### 🔧 Changed
-
-- Renamed package/bin from `@dust-tt/dust-cli`/`dust` to **`dust-cli`**/**`dustm`** — installing this fork no longer shadows the official npm package's `dust` command on `PATH`, so both can be installed side by side if needed
-- Build config no longer generates `.d.ts` output (irrelevant for a CLI binary, and was crashing on an unrelated `rollup-plugin-dts` incompatibility)
+| Agent sometimes tried to run commands/create files in an unrelated sandbox | `run_command`'s description didn't distinguish it from Dust's own hosted, sandboxed code-interpreter tool — clarified to state it runs on the user's real local machine and current folder |
+| Ctrl+Delete deleted the previous word instead of the next one | It shared the same "delete previous word" branch as Ctrl+Backspace/Ctrl+W instead of deleting forward |
+| Delete key deleted backward like Backspace | Ink normalizes both keys to the same flag with no way to tell them apart from its public API; now disambiguated by reading the raw key sequence directly |
+| Terminal flickered, and fought manual scrolling, on long agent answers | The live streaming preview re-rendered the *entire* accumulated answer every second with no height limit — each redraw is new output, so the terminal auto-scrolled to reveal it, overriding any manual scroll-up; now capped to a small, constant-size tail (same footprint as the "Thinking" spinner) regardless of answer length |
+| `/new` (and `/clear`) left the old status bar/input box visible above the fresh one instead of replacing it | `clearTerminal()` writes raw ANSI codes directly to stdout, bypassing Ink's own render bookkeeping — the next render doesn't know the screen was wiped, so it doesn't correctly replace the previous frame. Same class of artifact already worked around for terminal *resizes*; now the same fix (forcing a full remount) applies here too |
 
 ---
 
@@ -173,11 +181,16 @@ When no command is given, `chat` is used by default.
 | `Enter` | Send message |
 | `Ctrl+Enter` / `Shift+Enter` | Insert a newline |
 | `Ctrl+W` | Delete the previous word (more reliable than Ctrl+Backspace across terminals) |
-| `Ctrl+Backspace` | Delete the previous word |
+| `Ctrl+Backspace` | Delete the previous word (best-effort — not every terminal reports it distinctly from plain Backspace) |
+| `Ctrl+Delete` | Delete the next word |
 | `Ctrl+Left` / `Ctrl+Right` | Jump to the previous/next word |
-| `Esc` | Clear input, or cancel the current generation |
-| `Ctrl+C` | Cancel generation if one is running; press twice within 2s to exit while idle |
+| `Esc` | Clear input if there's a draft, otherwise cancel the current generation (genuinely, server-side - see [Steering](#steering)) |
+| Enter (while the agent is working) | Queue the message — sent automatically once the current turn ends |
+| `Ctrl+S` (while the agent is working) | Steer — see [Steering](#steering) |
+| Up-arrow / Backspace on an empty input | Recall the last queued message for editing — clear it with `Esc` to cancel, or just send it. With nothing queued, Up/Down instead step through this conversation's own message history (shell-style) |
+| `Ctrl+C` | Cancel generation if one is running (same as Esc); press twice within 2s to exit while idle |
 | `Ctrl+G` | Open the current conversation in the browser |
+
 
 ### Status bar
 
@@ -193,6 +206,7 @@ Context-window usage and consumed credits come from endpoints the Dust web dashb
 
 - **`/exit`** — exit the chat session
 - **`/switch`** — switch to a different agent
+- **`/new`** / **`/clear`** — start a new conversation on a fully blank terminal (screen *and* scrollback cleared, same as launching `dustm`). Both do the same thing — `/clear` is just the more familiar name from other chat UIs
 - **`/attach`** — open a file selector to attach a file (includes a "Paste image from clipboard" option — also bound to Ctrl+V directly; Windows tested, macOS untested)
 - **`/clear-files`** — clear any attached files
 - **`/auto`** — toggle auto-approval of file edits
@@ -215,10 +229,12 @@ or via flags: `dustm chat --wId ws_abc123 --key sk_your_api_key_here`.
 
 ```bash
 npm install
-npm run build        # dev build
+npm run build        # dev build - points at http://localhost:3000, NOT the real API
 npm run build:prod    # production build (bakes in the production API domain)
 node dist/index.js <command>
 ```
+
+**If `dustm` (or `node dist/index.js`) fails with `fetch failed` / `ECONNREFUSED` against `localhost:3000`**, that's this: the last build was a dev build, which intentionally points at a local Dust server (for engineers developing against a local `dust-tt/dust` checkout) that isn't running on your machine. Run `npm run build:prod` and try again - this isn't a network or retry bug.
 
 `npm run dev` watches and rebuilds on change.
 

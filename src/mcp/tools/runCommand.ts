@@ -6,7 +6,11 @@ import type { McpTool } from "../types/tools.js";
 export class RunCommandTool implements McpTool {
   name = "run_command";
   description =
-    "Execute system commands with full control over arguments, working directory, and timeout. Returns structured output with exit code, stdout, stderr, and command info. Use this for running shell commands, build scripts, tests, or any system operations.";
+    "Executes a shell command directly on the user's local machine (the real OS and filesystem the CLI itself is " +
+    "running on), NOT a hosted/sandboxed execution environment. Use this - never a hosted code interpreter or " +
+    "isolated sandbox - whenever the user asks you to run a command, script, build, or test in their actual project. " +
+    "Defaults to the CLI's current working directory when `cwd` is omitted. Returns structured output with exit " +
+    "code, stdout, stderr, and command info.";
 
   inputSchema = z.object({
     command: z

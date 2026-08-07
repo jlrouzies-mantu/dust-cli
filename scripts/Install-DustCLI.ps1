@@ -27,11 +27,12 @@ $NvmRoot     = "C:\Temp\Nvm"
 $NvmZipPath  = Join-Path $NvmRoot "nvm-noinstall.zip"
 $NodeVersion = "24.16.0"
 
-$ReleaseAsset   = "dustm-windows-x64.zip"
-$ReleaseZipUrl  = "https://github.com/jlrouzies-mantu/dust-cli/releases/latest/download/$ReleaseAsset"
-$InstallRoot    = Join-Path $env:USERPROFILE ".dust-cli-mantu"
-$ReleaseZipPath = Join-Path $InstallRoot $ReleaseAsset
-$RepoDir        = Join-Path $InstallRoot "dust-cli"
+$ReleaseAsset       = "dustm-windows-x64.zip"
+$ReleaseApiUrl      = "https://api.github.com/repos/jlrouzies-mantu/dust-cli/releases/latest"
+$ReleaseFallbackUrl = "https://github.com/jlrouzies-mantu/dust-cli/releases/latest/download/$ReleaseAsset"
+$InstallRoot        = Join-Path $env:USERPROFILE ".dust-cli-mantu"
+$ReleaseCacheDir    = Join-Path $InstallRoot "release-cache"
+$RepoDir            = Join-Path $InstallRoot "dust-cli"
 
 # Force console output to UTF-8
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
@@ -104,7 +105,21 @@ function Invoke-CollapsedStep {
         [Parameter(Mandatory)][scriptblock]$ScriptBlock
     )
 
-    $job = Start-Job -ScriptBlock $ScriptBlock
+    # NOTE: deliberately NOT setting $ErrorActionPreference = "Stop" here.
+    # Windows PowerShell treats any stderr output from a native command
+    # (git, npm, nvm.exe, node) as a non-terminating error by default - under
+    # "Stop" that becomes fatal, so a routine warning like npm's own "npm warn
+    # using --force" aborts the job before $LASTEXITCODE is even checked.
+    # Every native-command step below already does its own
+    # `if ($LASTEXITCODE -ne 0) { throw ... }` check, which is the correct
+    # way to detect failure for these. Load System.IO.Compression.FileSystem
+    # here instead: in Windows PowerShell 5.1 (unlike pwsh 7),
+    # [System.IO.Compression.ZipFile] isn't a resolvable type until this
+    # assembly is loaded, and that has to happen in every job's own session
+    # since Start-Job doesn't inherit Add-Type calls from the caller.
+    $job = Start-Job -InitializationScript {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+    } -ScriptBlock $ScriptBlock
     $frame = 0
     while ($job.State -eq "Running" -or $job.State -eq "NotStarted") {
         $color = Get-PulseColor -Frame $frame
@@ -277,58 +292,71 @@ try {
         } | Out-Null
 
         Invoke-CollapsedStep -Title "Extracting nvm-windows into $NvmRoot" -ScriptBlock {
-            [System.IO.Compression.ZipFile]::ExtractToDirectory($using:NvmZipPath, $using:NvmRoot, $true)
+            # No overwrite:bool overload exists on Windows PowerShell 5.1's
+            # System.IO.Compression.FileSystem (only .NET Core/5+ has it) -
+            # this only runs when nvm.exe is missing, i.e. a fresh $NvmRoot,
+            # so there's nothing to overwrite.
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($using:NvmZipPath, $using:NvmRoot)
         } | Out-Null
     }
 
     $NodeJsSymlink = Join-Path $NvmRoot "nodejs"
 
-    Write-Step "Configuring NVM environment variables..."
-    Write-Info "NVM_HOME    = $NvmRoot"
-    Write-Info "NVM_SYMLINK = $NodeJsSymlink"
-
-    [Environment]::SetEnvironmentVariable("NVM_HOME", $NvmRoot, "User")
-    [Environment]::SetEnvironmentVariable("NVM_SYMLINK", $NodeJsSymlink, "User")
-
-    $env:NVM_HOME = $NvmRoot
-    $env:NVM_SYMLINK = $NodeJsSymlink
-
-    Write-Step "Updating PATH for the current user..."
-
+    # SetEnvironmentVariable(...,"User") is idempotent, but re-running it
+    # (plus rewriting settings.txt) every time this script runs is pure
+    # noise once it's already correct. Skip the persisted writes when
+    # nothing needs to change - the in-session $env: assignments below
+    # still have to run every time, since a fresh process doesn't pick up
+    # a User-scope PATH/env-var change made by an earlier run of this
+    # script until a new terminal is opened.
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if ([string]::IsNullOrWhiteSpace($userPath)) {
         $userPath = ""
     }
+    $userPathEntries = $userPath -split ";"
+    $pathAlreadyConfigured = ($userPathEntries -contains $NvmRoot) -and ($userPathEntries -contains $NodeJsSymlink)
+    $envVarsAlreadyConfigured = ([Environment]::GetEnvironmentVariable("NVM_HOME", "User") -eq $NvmRoot) -and
+                                ([Environment]::GetEnvironmentVariable("NVM_SYMLINK", "User") -eq $NodeJsSymlink)
 
-    foreach ($p in @($NvmRoot, $NodeJsSymlink)) {
-        $existingPaths = $userPath -split ";"
-        if ($existingPaths -notcontains $p) {
-            if ([string]::IsNullOrWhiteSpace($userPath)) {
-                $userPath = $p
-            }
-            else {
-                $userPath = [string]::Join(";", @($userPath, $p))
+    if ($pathAlreadyConfigured -and $envVarsAlreadyConfigured) {
+        Write-Info "NVM environment variables and PATH already configured - skipping."
+    }
+    else {
+        Write-Step "Configuring NVM environment variables..."
+        Write-Info "NVM_HOME    = $NvmRoot"
+        Write-Info "NVM_SYMLINK = $NodeJsSymlink"
+
+        [Environment]::SetEnvironmentVariable("NVM_HOME", $NvmRoot, "User")
+        [Environment]::SetEnvironmentVariable("NVM_SYMLINK", $NodeJsSymlink, "User")
+
+        Write-Step "Updating PATH for the current user..."
+
+        foreach ($p in @($NvmRoot, $NodeJsSymlink)) {
+            if ($userPathEntries -notcontains $p) {
+                $userPath = if ([string]::IsNullOrWhiteSpace($userPath)) { $p } else { [string]::Join(";", @($userPath, $p)) }
             }
         }
+
+        [Environment]::SetEnvironmentVariable("Path", $userPath, "User")
+
+        Write-Success "PATH updated for user and current session."
+
+        $settingsFile = Join-Path $NvmRoot "settings.txt"
+        $settingsContent = @(
+            "root: $NvmRoot",
+            "path: $NodeJsSymlink",
+            "arch: 64",
+            "proxy: none",
+            "originalpath:",
+            "originalversion:"
+        )
+        $settingsContent | Set-Content -Path $settingsFile -Encoding ASCII
     }
 
-    [Environment]::SetEnvironmentVariable("Path", $userPath, "User")
-
+    $env:NVM_HOME = $NvmRoot
+    $env:NVM_SYMLINK = $NodeJsSymlink
     $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $env:Path = [string]::Join(";", @($userPath, $machinePath))
-
-    Write-Success "PATH updated for user and current session."
-
-    $settingsFile = Join-Path $NvmRoot "settings.txt"
-    $settingsContent = @(
-        "root: $NvmRoot",
-        "path: $NodeJsSymlink",
-        "arch: 64",
-        "proxy: none",
-        "originalpath:",
-        "originalversion:"
-    )
-    $settingsContent | Set-Content -Path $settingsFile -Encoding ASCII
 
     if (-not (Test-Path $nvmExe)) {
         throw "nvm.exe was not found after extraction at $nvmExe"
@@ -349,24 +377,36 @@ try {
         } | Out-Null
     }
 
-    Invoke-CollapsedStep -Title "Selecting Node.js $NodeVersion" -ScriptBlock {
-        & $using:nvmExe use $using:NodeVersion
-        if ($LASTEXITCODE -ne 0) { throw "nvm use failed with exit code $LASTEXITCODE" }
+    # `nvm use` (re)points the nodejs symlink even when it's already
+    # pointing at this exact version, and re-pointing it is what can
+    # trigger nvm-windows' elevate.vbs -> UAC prompt fallback on machines
+    # without symlink-creation privilege. Skip it entirely when nothing
+    # would actually change.
+    $expectedNodeExe = Join-Path $NodeJsSymlink "node.exe"
+    $activeVersion = ((& $nvmExe current 2>$null) | Out-String).Trim().TrimStart('v')
+    if ($activeVersion -eq $NodeVersion -and (Test-Path $expectedNodeExe)) {
+        Write-Info "Node.js $NodeVersion is already the active NVM version - skipping 'nvm use' (avoids an unnecessary symlink update, which can trigger a UAC prompt)."
+    }
+    else {
+        Invoke-CollapsedStep -Title "Selecting Node.js $NodeVersion" -ScriptBlock {
+            & $using:nvmExe use $using:NodeVersion
+            if ($LASTEXITCODE -ne 0) { throw "nvm use failed with exit code $LASTEXITCODE" }
 
-        # Right after nvm (re)points the nodejs symlink, the filesystem can
-        # take a brief moment before Test-Path/Get-Item reflect it - poll
-        # briefly instead of trusting the very first check (or re-running
-        # nvm use, which doesn't help and just duplicates its output).
-        $expectedNodeExe = Join-Path $using:NodeJsSymlink "node.exe"
-        $found = $false
-        for ($i = 0; $i -lt 10; $i++) {
-            if (Test-Path $expectedNodeExe) { $found = $true; break }
-            Start-Sleep -Milliseconds 500
-        }
-        if (-not $found) {
-            throw "nvm use reported success but node.exe was not found at: $expectedNodeExe (waited 5s)"
-        }
-    } | Out-Null
+            # Right after nvm (re)points the nodejs symlink, the filesystem can
+            # take a brief moment before Test-Path/Get-Item reflect it - poll
+            # briefly instead of trusting the very first check (or re-running
+            # nvm use, which doesn't help and just duplicates its output).
+            $expectedNodeExe = Join-Path $using:NodeJsSymlink "node.exe"
+            $found = $false
+            for ($i = 0; $i -lt 10; $i++) {
+                if (Test-Path $expectedNodeExe) { $found = $true; break }
+                Start-Sleep -Milliseconds 500
+            }
+            if (-not $found) {
+                throw "nvm use reported success but node.exe was not found at: $expectedNodeExe (waited 5s)"
+            }
+        } | Out-Null
+    }
 
     Write-Success "Node.js $NodeVersion is now active."
 
@@ -404,28 +444,140 @@ try {
     }
     Write-Success "npm found at: $npmCommandPath"
 
-    Invoke-CollapsedStep -Title "Updating npm to the latest version" -ScriptBlock {
-        & $using:npmCommandPath install -g npm@latest
-        if ($LASTEXITCODE -ne 0) { throw "npm install -g npm@latest failed with exit code $LASTEXITCODE" }
-    } | Out-Null
-    Write-Success "npm is up to date."
+    $currentNpmVersion = (& $npmCommandPath --version).Trim()
+    $latestNpmVersion = $null
+    try {
+        $latestNpmVersion = ((& $npmCommandPath view npm version 2>$null) | Out-String).Trim()
+    }
+    catch {
+        $latestNpmVersion = $null
+    }
+
+    if ($latestNpmVersion -and ($currentNpmVersion -eq $latestNpmVersion)) {
+        Write-Info "npm is already the latest version ($currentNpmVersion) - skipping update."
+    }
+    else {
+        Invoke-CollapsedStep -Title "Updating npm to the latest version" -ScriptBlock {
+            & $using:npmCommandPath install -g npm@latest
+            if ($LASTEXITCODE -ne 0) { throw "npm install -g npm@latest failed with exit code $LASTEXITCODE" }
+        } | Out-Null
+        Write-Success "npm is up to date."
+    }
 
     Write-Header "Step 5/7 - Downloading the prebuilt Mantu fork release"
 
     if (-not (Test-Path $InstallRoot)) {
         New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
     }
+    if (-not (Test-Path $ReleaseCacheDir)) {
+        New-Item -ItemType Directory -Path $ReleaseCacheDir -Force | Out-Null
+    }
 
-    Invoke-CollapsedStep -Title "Downloading $ReleaseAsset (latest release)" -ScriptBlock {
-        Invoke-WebRequest -Uri $using:ReleaseZipUrl -OutFile $using:ReleaseZipPath
-    } | Out-Null
+    # Ask GitHub's API for the latest release's version and this asset's
+    # published sha256 digest, so we can: show the version being installed,
+    # cache the zip by version instead of re-downloading ~20MB on every run,
+    # and actually verify a cache hit against the real checksum rather than
+    # just trusting a same-named file on disk. Falls back to the old
+    # always-download, no-cache behavior if the API is unreachable (e.g. a
+    # proxy that allows github.com release downloads but blocks
+    # api.github.com).
+    $releaseVersion = $null
+    $releaseDownloadUrl = $null
+    $releaseDigest = $null
+    try {
+        $releaseInfo = Invoke-RestMethod -Uri $ReleaseApiUrl -Headers @{ "User-Agent" = "dust-cli-installer" }
+        $releaseVersion = $releaseInfo.tag_name
+        $asset = $releaseInfo.assets | Where-Object { $_.name -eq $ReleaseAsset } | Select-Object -First 1
+        if ($asset) {
+            $releaseDownloadUrl = $asset.browser_download_url
+            $releaseDigest = $asset.digest
+        }
+    }
+    catch {
+        Write-Info "Could not reach the GitHub releases API ($($_.Exception.Message)) - falling back to a plain download with no version caching."
+    }
+
+    if (-not $releaseDownloadUrl) {
+        $releaseDownloadUrl = $ReleaseFallbackUrl
+    }
+
+    if ($releaseVersion) {
+        Write-Success "Latest release: $releaseVersion"
+        $releaseZipPath = Join-Path $ReleaseCacheDir "dustm-windows-x64-$releaseVersion.zip"
+    }
+    else {
+        # Version unknown (API unreachable) - nothing meaningful to key a
+        # cache off of, so use a throwaway path and always re-download, same
+        # as before this feature existed.
+        $releaseZipPath = Join-Path $InstallRoot $ReleaseAsset
+    }
+
+    function Test-ReleaseZipHash($Path, $Digest) {
+        if (-not $Digest) { return $true }
+        $expected = ($Digest -split ':')[-1]
+        $actual = (Get-FileHash -Path $Path -Algorithm SHA256).Hash
+        return $actual -eq $expected
+    }
+
+    $needsDownload = $true
+    if ($releaseVersion -and (Test-Path $releaseZipPath)) {
+        if (Test-ReleaseZipHash -Path $releaseZipPath -Digest $releaseDigest) {
+            $needsDownload = $false
+            $verifiedNote = if ($releaseDigest) { " (sha256 verified)" } else { " (no published checksum to verify against)" }
+            Write-Info "Using cached $ReleaseAsset $releaseVersion$verifiedNote - skipping download."
+        }
+        else {
+            Write-Info "Cached $ReleaseAsset $releaseVersion failed sha256 verification - re-downloading."
+            Remove-Item -Force $releaseZipPath -ErrorAction SilentlyContinue
+        }
+    }
+
+    if ($needsDownload) {
+        $downloadTitle = if ($releaseVersion) { "Downloading $ReleaseAsset $releaseVersion (latest release)" } else { "Downloading $ReleaseAsset (latest release)" }
+        Invoke-CollapsedStep -Title $downloadTitle -ScriptBlock {
+            Invoke-WebRequest -Uri $using:releaseDownloadUrl -OutFile $using:releaseZipPath
+        } | Out-Null
+
+        if ($releaseDigest -and -not (Test-ReleaseZipHash -Path $releaseZipPath -Digest $releaseDigest)) {
+            Remove-Item -Force $releaseZipPath -ErrorAction SilentlyContinue
+            throw "Downloaded $ReleaseAsset failed sha256 verification against GitHub's published digest. The file was removed - re-run the installer."
+        }
+        if ($releaseDigest) {
+            Write-Success "sha256 verified."
+        }
+    }
+
+    # Prune cached zips for other versions so the cache doesn't grow
+    # unbounded - only the current version is worth keeping around.
+    if ($releaseVersion) {
+        Get-ChildItem -Path $ReleaseCacheDir -Filter "dustm-windows-x64-*.zip" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -ne $releaseZipPath } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
 
     Invoke-CollapsedStep -Title "Extracting the release" -ScriptBlock {
-        if (Test-Path $using:RepoDir) {
-            Remove-Item -Recurse -Force $using:RepoDir
+        $repoDir = $using:RepoDir
+        if (Test-Path $repoDir) {
+            Remove-Item -Recurse -Force $repoDir
         }
-        [System.IO.Compression.ZipFile]::ExtractToDirectory($using:ReleaseZipPath, $using:RepoDir, $true)
-        Remove-Item -Force $using:ReleaseZipPath
+        # No overwrite:bool overload exists on Windows PowerShell 5.1's
+        # System.IO.Compression.FileSystem (only .NET Core/5+ has it) -
+        # $repoDir was just removed above, so there's nothing to overwrite.
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($using:releaseZipPath, $repoDir)
+
+        # As with the nvm symlink above, a directory this job just created
+        # doesn't always show up to Test-Path in the parent process the
+        # instant this job returns - poll briefly instead of letting
+        # Push-Location fail with a confusing "path does not exist" right
+        # after this step reported success.
+        $found = $false
+        for ($i = 0; $i -lt 10; $i++) {
+            if (Test-Path (Join-Path $repoDir "package.json")) { $found = $true; break }
+            Start-Sleep -Milliseconds 500
+        }
+        if (-not $found) {
+            throw "Extraction reported success but $repoDir (or its package.json) was not found (waited 5s)."
+        }
     } | Out-Null
     Write-Success "Ready at: $RepoDir"
 
@@ -465,7 +617,11 @@ try {
 
         Invoke-CollapsedStep -Title "Linking the 'dustm' command globally (npm link)" -ScriptBlock {
             Set-Location $using:RepoDir
-            & $using:npmCommandPath link
+            # This script always wipes and recreates $RepoDir, so an old
+            # 'dustm' shim from the previous run's (now-deleted) directory
+            # is still sitting in npm's global bin - npm won't overwrite a
+            # file it doesn't recognize as its own without --force.
+            & $using:npmCommandPath link --force
             if ($LASTEXITCODE -ne 0) { throw "npm link failed with exit code $LASTEXITCODE" }
         } | Out-Null
     }

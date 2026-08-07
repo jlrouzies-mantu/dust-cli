@@ -94,7 +94,21 @@ function Invoke-CollapsedStep {
         [Parameter(Mandatory)][scriptblock]$ScriptBlock
     )
 
-    $job = Start-Job -ScriptBlock $ScriptBlock
+    # NOTE: deliberately NOT setting $ErrorActionPreference = "Stop" here.
+    # Windows PowerShell treats any stderr output from a native command
+    # (git, npm, nvm.exe, node) as a non-terminating error by default - under
+    # "Stop" that becomes fatal, so a routine warning like npm's own "npm warn
+    # using --force" aborts the job before $LASTEXITCODE is even checked.
+    # Every native-command step below already does its own
+    # `if ($LASTEXITCODE -ne 0) { throw ... }` check, which is the correct
+    # way to detect failure for these. Load System.IO.Compression.FileSystem
+    # here instead: in Windows PowerShell 5.1 (unlike pwsh 7),
+    # [System.IO.Compression.ZipFile] isn't a resolvable type until this
+    # assembly is loaded, and that has to happen in every job's own session
+    # since Start-Job doesn't inherit Add-Type calls from the caller.
+    $job = Start-Job -InitializationScript {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+    } -ScriptBlock $ScriptBlock
     $frame = 0
     while ($job.State -eq "Running" -or $job.State -eq "NotStarted") {
         $color = Get-PulseColor -Frame $frame
@@ -217,58 +231,71 @@ try {
         } | Out-Null
 
         Invoke-CollapsedStep -Title "Extracting nvm-windows into $NvmRoot" -ScriptBlock {
-            [System.IO.Compression.ZipFile]::ExtractToDirectory($using:NvmZipPath, $using:NvmRoot, $true)
+            # No overwrite:bool overload exists on Windows PowerShell 5.1's
+            # System.IO.Compression.FileSystem (only .NET Core/5+ has it) -
+            # this only runs when nvm.exe is missing, i.e. a fresh $NvmRoot,
+            # so there's nothing to overwrite.
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($using:NvmZipPath, $using:NvmRoot)
         } | Out-Null
     }
 
     $NodeJsSymlink = Join-Path $NvmRoot "nodejs"
 
-    Write-Step "Configuring NVM environment variables..."
-    Write-Info "NVM_HOME    = $NvmRoot"
-    Write-Info "NVM_SYMLINK = $NodeJsSymlink"
-
-    [Environment]::SetEnvironmentVariable("NVM_HOME", $NvmRoot, "User")
-    [Environment]::SetEnvironmentVariable("NVM_SYMLINK", $NodeJsSymlink, "User")
-
-    $env:NVM_HOME = $NvmRoot
-    $env:NVM_SYMLINK = $NodeJsSymlink
-
-    Write-Step "Updating PATH for the current user..."
-
+    # SetEnvironmentVariable(...,"User") is idempotent, but re-running it
+    # (plus rewriting settings.txt) every time this script runs is pure
+    # noise once it's already correct. Skip the persisted writes when
+    # nothing needs to change - the in-session $env: assignments below
+    # still have to run every time, since a fresh process doesn't pick up
+    # a User-scope PATH/env-var change made by an earlier run of this
+    # script until a new terminal is opened.
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if ([string]::IsNullOrWhiteSpace($userPath)) {
         $userPath = ""
     }
+    $userPathEntries = $userPath -split ";"
+    $pathAlreadyConfigured = ($userPathEntries -contains $NvmRoot) -and ($userPathEntries -contains $NodeJsSymlink)
+    $envVarsAlreadyConfigured = ([Environment]::GetEnvironmentVariable("NVM_HOME", "User") -eq $NvmRoot) -and
+                                ([Environment]::GetEnvironmentVariable("NVM_SYMLINK", "User") -eq $NodeJsSymlink)
 
-    foreach ($p in @($NvmRoot, $NodeJsSymlink)) {
-        $existingPaths = $userPath -split ";"
-        if ($existingPaths -notcontains $p) {
-            if ([string]::IsNullOrWhiteSpace($userPath)) {
-                $userPath = $p
-            }
-            else {
-                $userPath = [string]::Join(";", @($userPath, $p))
+    if ($pathAlreadyConfigured -and $envVarsAlreadyConfigured) {
+        Write-Info "NVM environment variables and PATH already configured - skipping."
+    }
+    else {
+        Write-Step "Configuring NVM environment variables..."
+        Write-Info "NVM_HOME    = $NvmRoot"
+        Write-Info "NVM_SYMLINK = $NodeJsSymlink"
+
+        [Environment]::SetEnvironmentVariable("NVM_HOME", $NvmRoot, "User")
+        [Environment]::SetEnvironmentVariable("NVM_SYMLINK", $NodeJsSymlink, "User")
+
+        Write-Step "Updating PATH for the current user..."
+
+        foreach ($p in @($NvmRoot, $NodeJsSymlink)) {
+            if ($userPathEntries -notcontains $p) {
+                $userPath = if ([string]::IsNullOrWhiteSpace($userPath)) { $p } else { [string]::Join(";", @($userPath, $p)) }
             }
         }
+
+        [Environment]::SetEnvironmentVariable("Path", $userPath, "User")
+
+        Write-Success "PATH updated for user and current session."
+
+        $settingsFile = Join-Path $NvmRoot "settings.txt"
+        $settingsContent = @(
+            "root: $NvmRoot",
+            "path: $NodeJsSymlink",
+            "arch: 64",
+            "proxy: none",
+            "originalpath:",
+            "originalversion:"
+        )
+        $settingsContent | Set-Content -Path $settingsFile -Encoding ASCII
     }
 
-    [Environment]::SetEnvironmentVariable("Path", $userPath, "User")
-
+    $env:NVM_HOME = $NvmRoot
+    $env:NVM_SYMLINK = $NodeJsSymlink
     $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $env:Path = [string]::Join(";", @($userPath, $machinePath))
-
-    Write-Success "PATH updated for user and current session."
-
-    $settingsFile = Join-Path $NvmRoot "settings.txt"
-    $settingsContent = @(
-        "root: $NvmRoot",
-        "path: $NodeJsSymlink",
-        "arch: 64",
-        "proxy: none",
-        "originalpath:",
-        "originalversion:"
-    )
-    $settingsContent | Set-Content -Path $settingsFile -Encoding ASCII
 
     if (-not (Test-Path $nvmExe)) {
         throw "nvm.exe was not found after extraction at $nvmExe"
@@ -344,11 +371,25 @@ try {
     }
     Write-Success "npm found at: $npmCommandPath"
 
-    Invoke-CollapsedStep -Title "Updating npm to the latest version" -ScriptBlock {
-        & $using:npmCommandPath install -g npm@latest
-        if ($LASTEXITCODE -ne 0) { throw "npm install -g npm@latest failed with exit code $LASTEXITCODE" }
-    } | Out-Null
-    Write-Success "npm is up to date."
+    $currentNpmVersion = (& $npmCommandPath --version).Trim()
+    $latestNpmVersion = $null
+    try {
+        $latestNpmVersion = ((& $npmCommandPath view npm version 2>$null) | Out-String).Trim()
+    }
+    catch {
+        $latestNpmVersion = $null
+    }
+
+    if ($latestNpmVersion -and ($currentNpmVersion -eq $latestNpmVersion)) {
+        Write-Info "npm is already the latest version ($currentNpmVersion) - skipping update."
+    }
+    else {
+        Invoke-CollapsedStep -Title "Updating npm to the latest version" -ScriptBlock {
+            & $using:npmCommandPath install -g npm@latest
+            if ($LASTEXITCODE -ne 0) { throw "npm install -g npm@latest failed with exit code $LASTEXITCODE" }
+        } | Out-Null
+        Write-Success "npm is up to date."
+    }
 
     Write-Header "Step 5/7 - Verifying the local git checkout"
 
@@ -438,7 +479,11 @@ try {
 
         Invoke-CollapsedStep -Title "Linking the '$binName' command globally (npm link)" -ScriptBlock {
             Set-Location $using:RepoDir
-            & $using:npmCommandPath link
+            # If a branch's bin name changed since the last local-mode build
+            # (e.g. from "dust" to "dustm"), or the checkout moved, an old
+            # shim can be sitting in npm's global bin that npm won't
+            # overwrite without --force.
+            & $using:npmCommandPath link --force
             if ($LASTEXITCODE -ne 0) { throw "npm link failed with exit code $LASTEXITCODE" }
         } | Out-Null
     }

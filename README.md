@@ -58,7 +58,6 @@
 | `write_file` tool | Local file creation/overwrite (`--with-tools`), so "create a file" lands on disk in the current folder instead of Dust's hosted, web-only file preview |
 | Message queuing | Type and send while the agent is still working — queued messages show in a bordered box below the input and auto-send in order once the current turn ends; recall the last one with Up-arrow/Backspace to edit or cancel it |
 | Persistent file-change previews | Approved `write_file`/`edit_file` previews stay in scrollback after the turn finishes, instead of disappearing once the approval prompt closes |
-| Upstream version in the banner | Shows both this fork's version and the upstream `dust-tt/dust` `cli/dust-cli` version it was last synced against |
 | Immediate startup feedback | Prints "Starting dustm..." right away, before the (larger) UI dependency graph finishes loading, so the CLI doesn't look stuck on a slow/cold start |
 | Visible retry indicator | API/MCP call retries now show a spinner + `[attempt/max] Retrying ... — <error>` line instead of only ever showing up in `~/.dust-cli/logs/` - previously indistinguishable from "it didn't retry at all" |
 
@@ -79,7 +78,6 @@
 | Agent sometimes tried to run commands/create files in an unrelated sandbox | `run_command`'s description didn't distinguish it from Dust's own hosted, sandboxed code-interpreter tool — clarified to state it runs on the user's real local machine and current folder |
 | Ctrl+Delete deleted the previous word instead of the next one | It shared the same "delete previous word" branch as Ctrl+Backspace/Ctrl+W instead of deleting forward |
 | Delete key deleted backward like Backspace | Ink normalizes both keys to the same flag with no way to tell them apart from its public API; now disambiguated by reading the raw key sequence directly |
-| "Running a tool…" status was missing the pulsing brand icon shown next to "Thinking" | Icon was only wired up on the thinking branch |
 | Terminal flickered, and fought manual scrolling, on long agent answers | The live streaming preview re-rendered the *entire* accumulated answer every second with no height limit — each redraw is new output, so the terminal auto-scrolled to reveal it, overriding any manual scroll-up; now capped to a small, constant-size tail (same footprint as the "Thinking" spinner) regardless of answer length |
 | LaTeX math (`$...$` / `$$...$$`) rendered as raw, garbled `\commands`, mangled nested commands (`\frac{1}{\sqrt{x}}`), and could silently drop `=`/`-` signs | A terminal can't typeset math; math spans are now converted to readable Unicode (Greek letters, `\frac`, `\sqrt`, accents, sub/superscripts) via a small recursive parser (handles nesting, unlike the regex it replaced) before markdown ever sees them, with the equation's own `=`/`-` line-starts escaped so markdown doesn't misread them as heading/list syntax and eat them |
 

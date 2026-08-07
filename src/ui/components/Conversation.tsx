@@ -14,6 +14,7 @@ import React, {
 
 import type { TodoItem } from "../../mcp/tools/todoWrite.js";
 import {
+  BUG_REPORT_YELLOW,
   CODE_BLOCK_BG,
   MANTU_AGENT_ACCENT,
   MANTU_GOLD,
@@ -28,9 +29,11 @@ import { formatFileSize, isImageFile } from "../../utils/fileHandling.js";
 import { getGitBranch } from "../../utils/gitInfo.js";
 import { useTerminalSize } from "../../utils/hooks/use_terminal_size.js";
 import { clearTerminal } from "../../utils/terminal.js";
-import { CLI_VERSION } from "../../utils/version.js";
+import { CLI_VERSION, UPSTREAM_CLI_VERSION } from "../../utils/version.js";
 import type { Command } from "../commands/types.js";
 import { CommandSelector } from "./CommandSelector.js";
+import type { DiffContent } from "./DiffView.js";
+import { DiffView } from "./DiffView.js";
 import type { UploadedFile } from "./FileUpload.js";
 import type { InlineSelectorItem } from "./InlineSelector.js";
 import { InlineSelector } from "./InlineSelector.js";
@@ -100,6 +103,13 @@ export type ConversationItem = { key: string } & (
       todos: TodoItem[];
       index: number;
     }
+  | ({
+      // A file write/edit that was approved and applied. Pushed once
+      // approval resolves (whether interactively or via auto-accept), so it
+      // stays visible in scrollback - unlike the ephemeral approval-prompt
+      // preview, which disappears as soon as the decision is made.
+      type: "file_change";
+    } & DiffContent)
   | {
       type: "separator";
     }
@@ -109,9 +119,11 @@ interface ConversationProps {
   conversationItems: ConversationItem[];
   isProcessingQuestion: boolean;
   actionStatus: string | null;
+  queuedMessages: { id: string; text: string }[];
   thinkingPreview: string;
   streamingContentPreview: MarkdownSegment[];
   showExitHint: boolean;
+  retryStatus: string | null;
   agentName: string | null;
   workspaceName: string | null;
   consumedCredits: CreditsUsage | null;
@@ -140,9 +152,11 @@ const _Conversation: FC<ConversationProps> = ({
   conversationItems,
   isProcessingQuestion,
   actionStatus,
+  queuedMessages,
   thinkingPreview,
   streamingContentPreview,
   showExitHint,
+  retryStatus,
   agentName,
   workspaceName,
   consumedCredits,
@@ -187,6 +201,14 @@ const _Conversation: FC<ConversationProps> = ({
         }}
       </Static>
 
+      {retryStatus && (
+        <Box marginTop={1}>
+          <Text color="yellow">
+            <Spinner type="dots" /> {retryStatus}
+          </Text>
+        </Box>
+      )}
+
       {isProcessingQuestion &&
         streamingContentPreview.map((segment, index) =>
           segment.type === "code" ? (
@@ -213,7 +235,8 @@ const _Conversation: FC<ConversationProps> = ({
         <Box marginTop={1}>
           {actionStatus ? (
             <Text color="yellow">
-              {actionStatus}
+              {" "}
+              <ThinkingIcon /> {actionStatus}
               <Spinner type="simpleDots" />
             </Text>
           ) : (
@@ -231,6 +254,37 @@ const _Conversation: FC<ConversationProps> = ({
           )}
         </Box>
       )}
+
+      {queuedMessages.length > 0 &&
+        (() => {
+          const lines = queuedMessages.map((queued, index) => {
+            const label = `${index + 1}. ${queued.text.split("\n")[0]}${
+              queued.text.includes("\n") ? " …" : ""
+            }`;
+            return { id: queued.id, label };
+          });
+          const maxWidth = Math.max(0, ...lines.map((l) => l.label.length));
+
+          return (
+            <Box
+              flexDirection="column"
+              marginTop={1}
+              paddingX={1}
+              borderStyle="classic"
+              borderColor="gray"
+            >
+              <Text color={MANTU_GOLD} bold>
+                Queued ({queuedMessages.length}) — Up-arrow or Backspace
+                (empty input) to edit, Esc to cancel
+              </Text>
+              {lines.map((line) => (
+                <Text key={line.id} color={MANTU_GOLD}>
+                  {line.label.padEnd(maxWidth, " ")}
+                </Text>
+              ))}
+            </Box>
+          );
+        })()}
 
       <InputBox
         userInput={showCommandSelector ? `/${commandQuery}` : userInput}
@@ -266,8 +320,9 @@ const _Conversation: FC<ConversationProps> = ({
       {!showCommandSelector && !inlineSelector && (
         <Box marginTop={0} paddingLeft={1}>
           <Text dimColor>
-            Enter to send · Ctrl+Enter or Shift+Enter for new line · Ctrl+W
-            delete word · ESC to clear
+            {isProcessingQuestion ? "Enter to queue" : "Enter to send"} ·
+            Ctrl/Shift+Enter for new line · ESC to{" "}
+            {isProcessingQuestion ? "interrupt" : "clear"}
             {conversationId && " · Ctrl+G to open in browser"}
           </Text>
         </Box>
@@ -417,11 +472,12 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
               <Text bold color={MANTU_PURPLE}>
                 MANTU FORK
               </Text>
-              <Text color={MANTU_GOLD}>
+              <Text color={BUG_REPORT_YELLOW}>
                 Report bug here: https://github.com/jlrouzies-mantu/dust-cli
               </Text>
               <Text dimColor>
-                Dust CLI v{CLI_VERSION} · {displayPath}
+                Dust CLI v{CLI_VERSION} (upstream v{UPSTREAM_CLI_VERSION}) ·{" "}
+                {displayPath}
                 {gitBranch && ` · branch: ${gitBranch}`}
               </Text>
               <Text dimColor>
@@ -528,6 +584,28 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
       return (
         <Box marginBottom={1} marginTop={1}>
           <Text color="red">[Cancelled]</Text>
+        </Box>
+      );
+    case "file_change":
+      return (
+        <Box
+          flexDirection="column"
+          alignSelf="flex-start"
+          marginLeft={2}
+          marginBottom={1}
+          paddingX={1}
+          borderStyle="classic"
+          borderColor="gray"
+        >
+          <Text bold color={MANTU_PURPLE}>
+            {item.originalContent === "" ? "Created" : "Modified"}{" "}
+            {item.filePath}
+          </Text>
+          <DiffView
+            originalContent={item.originalContent}
+            updatedContent={item.updatedContent}
+            filePath={item.filePath}
+          />
         </Box>
       );
     case "todo_list":

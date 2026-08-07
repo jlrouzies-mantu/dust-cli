@@ -10,6 +10,7 @@ import { RunCommandTool } from "../tools/runCommand.js";
 import { SearchContentTool } from "../tools/searchContent.js";
 import { SearchFilesTool } from "../tools/searchFiles.js";
 import { TodoWriteTool } from "../tools/todoWrite.js";
+import { WriteFileTool } from "../tools/writeFile.js";
 import { CLIMcpTransport } from "./cliTransport.js";
 
 // Add local development tools to the MCP server
@@ -20,7 +21,8 @@ export const useFileSystemServer = async (
     originalContent: string,
     updatedContent: string,
     filePath: string
-  ) => Promise<boolean>
+  ) => Promise<boolean>,
+  onRetry?: (attempt: number, maxAttempts: number, error: unknown) => void
 ): Promise<Result<void, Error>> => {
   // Check if using API key authentication - MCP servers require OAuth
   const apiKey = await dustAPI.getApiKey();
@@ -36,11 +38,13 @@ export const useFileSystemServer = async (
   const searchFilesTool = new SearchFilesTool();
   const searchContentTool = new SearchContentTool();
   const editFileTool = new EditFileTool();
+  const writeFileTool = new WriteFileTool();
   const runCommandTool = new RunCommandTool();
   const todoWriteTool = new TodoWriteTool();
 
   if (diffApprovalCallback) {
     editFileTool.setDiffApprovalCallback(diffApprovalCallback);
+    writeFileTool.setDiffApprovalCallback(diffApprovalCallback);
   }
 
   const tools = [
@@ -48,6 +52,7 @@ export const useFileSystemServer = async (
     searchFilesTool,
     searchContentTool,
     editFileTool,
+    writeFileTool,
     runCommandTool,
     todoWriteTool,
   ];
@@ -93,5 +98,5 @@ export const useFileSystemServer = async (
         )
       );
     }
-  });
+  }, 5, 500, onRetry);
 };

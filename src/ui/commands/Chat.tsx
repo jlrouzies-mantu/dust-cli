@@ -4,10 +4,8 @@ import type {
   CreateConversationResponseType,
   GetAgentConfigurationsResponseType,
 } from "@dust-tt/client";
-import chalk from "chalk";
-import { structuredPatch } from "diff";
 import { readdir, stat } from "fs/promises";
-import { Box, Text, useApp, useInput, useStdout } from "ink";
+import { Box, Text, useApp, useInput, useStdin, useStdout } from "ink";
 import Spinner from "ink-spinner";
 import open from "open";
 import path from "path";
@@ -45,6 +43,8 @@ import { appendTranscriptEntry } from "../../utils/transcriptStore.js";
 import AgentSelector from "../components/AgentSelector.js";
 import type { ConversationItem } from "../components/Conversation.js";
 import Conversation from "../components/Conversation.js";
+import { DiffView } from "../components/DiffView.js";
+import type { DiffContent } from "../components/DiffView.js";
 import type { UploadedFile } from "../components/FileUpload.js";
 import { FileUpload } from "../components/FileUpload.js";
 import type { InlineSelectorItem } from "../components/InlineSelector.js";
@@ -54,6 +54,12 @@ import { createCommands } from "./types.js";
 
 type AgentConfiguration =
   GetAgentConfigurationsResponseType["agentConfigurations"][number];
+
+interface QueuedMessage {
+  id: string;
+  text: string;
+  files: UploadedFile[];
+}
 
 interface CliChatProps {
   sId?: string;
@@ -83,6 +89,27 @@ function getLastConversationItem<T extends ConversationItem>(
     }
   }
   return null;
+}
+
+// The live streaming preview re-renders the *entire* accumulated answer on
+// every tick (see the comment on pushFinalContentToConversationItems for
+// why it can't incrementally commit to the Static list instead). Every one
+// of those re-renders is new output from the terminal's point of view, so
+// it auto-scrolls to reveal it - which is what fights back when you try to
+// scroll up to read earlier output while a long answer is still streaming.
+// A big live region makes each of those forced scrolls jarring; keeping it
+// to just a handful of lines (about the same footprint as the "Thinking"
+// spinner, which doesn't cause this complaint) keeps each one small enough
+// to not fight your own scrolling. The full untruncated content still
+// lands in scrollback normally once the message finishes.
+const STREAMING_PREVIEW_MAX_LINES = 6;
+function truncateForStreamingPreview(text: string): string {
+  const maxLines = STREAMING_PREVIEW_MAX_LINES;
+  const lines = text.split("\n");
+  if (lines.length <= maxLines) {
+    return text;
+  }
+  return `…\n${lines.slice(-maxLines).join("\n")}`;
 }
 
 function buildConversationItemsFromHistory(
@@ -204,6 +231,7 @@ const CliChat: FC<CliChatProps> = ({
   >(null);
   const [pendingFiles, setPendingFiles] = useState<FileInfo[]>([]);
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
+  const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
   const [isUploadingFiles, setIsUploadingFiles] = useState(false);
   const [fileSystemInitialized, setFileSystemInitialized] = useState(false);
   const [fileSystemServerId, setFileSystemServerId] = useState<string | null>(
@@ -221,6 +249,10 @@ const CliChat: FC<CliChatProps> = ({
     MarkdownSegment[]
   >([]);
   const [showExitHint, setShowExitHint] = useState(false);
+  // Surfaces retryResult()'s retry attempts (API/MCP calls) in the UI -
+  // otherwise they only show up in the debug log, indistinguishable from
+  // "it didn't retry at all" from the user's perspective.
+  const [retryStatus, setRetryStatus] = useState<string | null>(null);
   const [workspaceName, setWorkspaceName] = useState<string | null>(null);
   const [consumedCredits, setConsumedCredits] = useState<CreditsUsage | null>(
     null
@@ -497,77 +529,20 @@ const CliChat: FC<CliChatProps> = ({
     return JSON.stringify(inputs, null, 2);
   };
 
-  const DIFF_COLORS = {
-    addedFg: "#2D5A3D",
-    removedFg: "#8B3A3A",
-    contextFg: "#6B7280",
-  } as const;
-
-  const DIFF_TYPE_MAP = {
-    remove: { color: DIFF_COLORS.removedFg, symbol: "- " },
-    add: { color: DIFF_COLORS.addedFg, symbol: "+ " },
-    context: { color: DIFF_COLORS.contextFg, symbol: "  " },
-  } as const;
-
-  const renderDiffLines = (diff: {
-    originalContent: string;
-    updatedContent: string;
-    filePath: string;
-  }) => {
-    const patch = structuredPatch(
-      diff.filePath,
-      diff.filePath,
-      diff.originalContent,
-      diff.updatedContent,
-      undefined,
-      undefined,
-      { context: 3 }
-    );
-
-    const lines: {
-      type: "remove" | "add" | "context";
-      lineNumber: number;
-      content: string;
-    }[] = [];
-    for (const hunk of patch.hunks) {
-      let oldLineNum = hunk.oldStart;
-      let newLineNum = hunk.newStart;
-      for (const line of hunk.lines) {
-        if (line.startsWith("-")) {
-          lines.push({
-            type: "remove",
-            lineNumber: oldLineNum,
-            content: line.substring(1),
-          });
-          oldLineNum++;
-        } else if (line.startsWith("+")) {
-          lines.push({
-            type: "add",
-            lineNumber: newLineNum,
-            content: line.substring(1),
-          });
-          newLineNum++;
-        } else if (line !== "\\ No newline at end of file") {
-          lines.push({
-            type: "context",
-            lineNumber: oldLineNum,
-            content: line.substring(1),
-          });
-          oldLineNum++;
-          newLineNum++;
-        }
-      }
-    }
-
-    return lines.map((line, index) => {
-      const { color, symbol } = DIFF_TYPE_MAP[line.type];
-      return (
-        <Text key={index}>
-          {chalk.hex(color)(`${symbol}${line.lineNumber}: ${line.content}`)}
-        </Text>
-      );
-    });
-  };
+  // Records an approved file write/edit permanently in the transcript
+  // (Static list), so it stays visible in scrollback after the response
+  // finishes - unlike the ephemeral approval-prompt preview, which is
+  // cleared as soon as the user (or auto-accept) decides.
+  const appendFileChangeItem = useCallback((diff: DiffContent) => {
+    setConversationItems((prev) => [
+      ...prev,
+      {
+        key: `file_change_${Date.now()}_${prev.length}`,
+        type: "file_change",
+        ...diff,
+      },
+    ]);
+  }, []);
 
   const handleApprovalRequest = useCallback(
     async (event: AgentActionSpecificEvent): Promise<boolean> => {
@@ -655,13 +630,16 @@ const CliChat: FC<CliChatProps> = ({
   const handleDiffApproval = useCallback(
     async (approved: boolean) => {
       if (diffApprovalResolver && pendingDiffApproval) {
+        if (approved) {
+          appendFileChangeItem(pendingDiffApproval);
+        }
         diffApprovalResolver(approved);
         setPendingDiffApproval(null);
         setDiffApprovalResolver(null);
         setInlineSelector(null);
       }
     },
-    [diffApprovalResolver, pendingDiffApproval]
+    [diffApprovalResolver, pendingDiffApproval, appendFileChangeItem]
   );
 
   const requestDiffApproval = useCallback(
@@ -670,8 +648,10 @@ const CliChat: FC<CliChatProps> = ({
       updatedContent: string,
       filePath: string
     ): Promise<boolean> => {
-      // If always accept flag is set, immediately return true
+      // If always accept flag is set, immediately return true - but still
+      // record the change in the transcript, same as the interactive path.
       if (autoAcceptEditsRef.current) {
+        appendFileChangeItem({ originalContent, updatedContent, filePath });
         return Promise.resolve(true);
       }
 
@@ -692,7 +672,7 @@ const CliChat: FC<CliChatProps> = ({
         });
       });
     },
-    []
+    [appendFileChangeItem]
   );
 
   const clearFiles = useCallback(() => {
@@ -1050,8 +1030,16 @@ const CliChat: FC<CliChatProps> = ({
         (serverId) => {
           setFileSystemServerId(serverId);
         },
-        requestDiffApproval
+        requestDiffApproval,
+        (attempt, maxAttempts, error) => {
+          setRetryStatus(
+            `[${attempt}/${maxAttempts}] Retrying file-system connection — ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+        }
       );
+      setRetryStatus(null);
       if (useFsServerRes.isErr()) {
         setError(useFsServerRes.error.message);
       }
@@ -1116,13 +1104,11 @@ const CliChat: FC<CliChatProps> = ({
     autoAcceptEditsRef.current = autoAcceptEdits;
   }, [autoAcceptEdits]);
 
+  // Note: intentionally does NOT gate on `!isProcessingQuestion` - while the
+  // agent is still working, Enter queues the message instead of sending it
+  // immediately (see the `key.return` handler below).
   const canSubmit =
-    me &&
-    !meError &&
-    !isMeLoading &&
-    !isProcessingQuestion &&
-    !inlineSelector &&
-    !!userInput.trim();
+    me && !meError && !isMeLoading && !inlineSelector && !!userInput.trim();
 
   const handleSubmitQuestion = useCallback(
     async (questionText: string, attachedFiles: UploadedFile[] = []) => {
@@ -1472,13 +1458,24 @@ const CliChat: FC<CliChatProps> = ({
         // this only subscribes to an existing message's answer - unlike
         // createConversation/postUserMessage above, it has no duplicate-
         // side-effect risk on retry.
-        const streamRes = await retryResult(() =>
-          dustClient.streamAgentAnswerEvents({
-            conversation: conversation,
-            userMessageId: userMessageId,
-            signal: controller.signal, // Add the abort signal
-          })
+        const streamRes = await retryResult(
+          () =>
+            dustClient.streamAgentAnswerEvents({
+              conversation: conversation,
+              userMessageId: userMessageId,
+              signal: controller.signal, // Add the abort signal
+            }),
+          5,
+          500,
+          (attempt, maxAttempts, error) => {
+            setRetryStatus(
+              `[${attempt}/${maxAttempts}] Retrying answer stream — ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            );
+          }
         );
+        setRetryStatus(null);
 
         if (streamRes.isErr()) {
           throw new Error(
@@ -1489,7 +1486,9 @@ const CliChat: FC<CliChatProps> = ({
         updateIntervalRef.current = setInterval(() => {
           updateThinkingPreview();
           setStreamingContentPreview(
-            renderMarkdownSegments(contentRef.current)
+            renderMarkdownSegments(
+              truncateForStreamingPreview(contentRef.current)
+            )
           );
         }, 1000);
 
@@ -1617,6 +1616,7 @@ const CliChat: FC<CliChatProps> = ({
       } finally {
         setIsProcessingQuestion(false);
         setAbortController(null);
+        setRetryStatus(null);
       }
     },
     [
@@ -1631,6 +1631,47 @@ const CliChat: FC<CliChatProps> = ({
     ]
   );
 
+  // Auto-send the next queued message once the current turn has finished -
+  // whether it completed normally or was interrupted with Esc, which is
+  // what gives queuing its "steering" effect: interrupt, then the queued
+  // follow-up takes over.
+  useEffect(() => {
+    if (isProcessingQuestion || messageQueue.length === 0) {
+      return;
+    }
+    if (!selectedAgent || !me || meError || isMeLoading) {
+      return;
+    }
+    const [next, ...rest] = messageQueue;
+    setMessageQueue(rest);
+    void handleSubmitQuestion(next.text, next.files);
+  }, [
+    isProcessingQuestion,
+    messageQueue,
+    selectedAgent,
+    me,
+    meError,
+    isMeLoading,
+    handleSubmitQuestion,
+  ]);
+
+  // Pulls the most recently queued message back into the input for editing
+  // or cancellation (Esc now clears the draft without aborting - see the
+  // `key.escape` handler below), mirroring Claude Code. Bound to both
+  // Backspace-on-empty-input and Up-arrow-on-empty-input.
+  const recallLastQueuedMessage = useCallback(() => {
+    setMessageQueue((prev) => {
+      if (prev.length === 0) {
+        return prev;
+      }
+      const last = prev[prev.length - 1];
+      setUserInput(last.text);
+      setCursorPosition(last.text.length);
+      setUploadedFiles(last.files);
+      return prev.slice(0, -1);
+    });
+  }, []);
+
   // Handle file upload completion
   const handleFileUploadComplete = useCallback(
     (files: UploadedFile[]) => {
@@ -1638,14 +1679,26 @@ const CliChat: FC<CliChatProps> = ({
       setIsUploadingFiles(false);
       setPendingFiles([]);
 
-      // If there's a message waiting to be sent with these files, send it now
+      // If there's a message waiting to be sent with these files, send it
+      // now - or queue it if the agent is still working a prior turn.
       if (userInput.trim()) {
-        void handleSubmitQuestion(userInput, files);
+        if (isProcessingQuestion) {
+          setMessageQueue((prev) => [
+            ...prev,
+            {
+              id: `queued_${Date.now()}_${prev.length}`,
+              text: userInput,
+              files,
+            },
+          ]);
+        } else {
+          void handleSubmitQuestion(userInput, files);
+        }
         setUserInput("");
         setCursorPosition(0);
       }
     },
-    [userInput, handleSubmitQuestion]
+    [userInput, isProcessingQuestion, handleSubmitQuestion]
   );
 
   // Handle file upload error
@@ -1654,6 +1707,29 @@ const CliChat: FC<CliChatProps> = ({
     setIsUploadingFiles(false);
     setPendingFiles([]);
   }, []);
+
+  // Ink's `useInput` normalizes both the physical Backspace key (raw DEL
+  // byte, 0x7F) and the physical Delete key (CSI `\x1b[3~`) to the same
+  // `key.delete` flag - there's no way to tell them apart from the `key`
+  // object alone. Tap Ink's own raw input feed (the same EventEmitter
+  // `useInput` is built on) to capture the raw sequence ourselves; since
+  // EventEmitter listeners fire in registration order and this effect is
+  // declared - and therefore registered - before the `useInput` call below,
+  // this ref is always up to date by the time that handler runs.
+  const lastRawWasForwardDeleteRef = useRef(false);
+  const { internal_eventEmitter } = useStdin();
+  useEffect(() => {
+    if (!internal_eventEmitter) {
+      return;
+    }
+    const handleRawInput = (chunk: Buffer | string) => {
+      lastRawWasForwardDeleteRef.current = chunk.toString() === "\x1b[3~";
+    };
+    internal_eventEmitter.on("input", handleRawInput);
+    return () => {
+      internal_eventEmitter.removeListener("input", handleRawInput);
+    };
+  }, [internal_eventEmitter]);
 
   // Handle keyboard events.
   useInput((input, key) => {
@@ -1681,6 +1757,44 @@ const CliChat: FC<CliChatProps> = ({
       }, 2000);
       return;
     }
+
+    // Ctrl+S "steer" is disabled - see README's Development section for
+    // why. Short version: Dust's agent loop runs server-side, and the
+    // streaming API has no way to inject a message (or reorder anything)
+    // into an already-running turn - the only mid-stream client actions
+    // are approve/reject-a-tool-call or a full abort. What this used to do
+    // was jump a message to the front of the *queue* (applied only once
+    // the current turn ends naturally), which isn't real steering and was
+    // confusing under that name. Left commented out rather than deleted in
+    // case Dust's platform ever adds a real interrupt/redirect capability
+    // to the stream protocol - if so, this can be revived (needs
+    // `showTransientHint` below un-commented too, and `steered: boolean`
+    // added back to `QueuedMessage`).
+    //
+    // if (key.ctrl && input === "s") {
+    //   const keyLabel = "Ctrl+S";
+    //   if (!isProcessingQuestion) {
+    //     showTransientHint(`${keyLabel} only steers while the agent is working.`);
+    //   } else if (userInput.trim()) {
+    //     setMessageQueue((prev) => [
+    //       { id: `steer_${Date.now()}`, text: userInput, files: uploadedFiles, steered: true },
+    //       ...prev,
+    //     ]);
+    //     setUserInput("");
+    //     setCursorPosition(0);
+    //     setUploadedFiles([]);
+    //   } else if (messageQueue.length > 0) {
+    //     setMessageQueue((prev) => [
+    //       { ...prev[prev.length - 1], steered: true },
+    //       ...prev.slice(0, -1),
+    //     ]);
+    //   } else {
+    //     showTransientHint(
+    //       `${keyLabel}: type a message, or queue one, then press ${keyLabel} to steer it.`
+    //     );
+    //   }
+    //   return;
+    // }
 
     if (!selectedAgent) {
       return;
@@ -1989,12 +2103,17 @@ const CliChat: FC<CliChatProps> = ({
     }
 
     if (key.escape) {
-      if (isProcessingQuestion && abortController) {
-        abortController.abort();
-      } else if (userInput) {
+      // Clearing a draft (including one just recalled from the queue via
+      // Up-arrow, below) takes priority over interrupting generation - so
+      // Esc can discard a queued/in-progress message without also
+      // cancelling the agent's current turn. Press Esc again with an empty
+      // input to interrupt.
+      if (userInput) {
         setUserInput("");
         setCursorPosition(0);
         pastedBlocksRef.current = [];
+      } else if (isProcessingQuestion && abortController) {
+        abortController.abort();
       }
       return;
     }
@@ -2032,8 +2151,26 @@ const CliChat: FC<CliChatProps> = ({
         return;
       }
 
-      // Only allow submission if not processing, "me" is loaded and user input is not empty
+      // Only allow submission/queueing if "me" is loaded and user input is not empty
       if (!canSubmit) {
+        return;
+      }
+
+      if (isProcessingQuestion) {
+        // The agent is still working the current turn - queue this message
+        // instead of sending it now. It's sent automatically once the
+        // in-flight turn ends.
+        setMessageQueue((prev) => [
+          ...prev,
+          {
+            id: `queued_${Date.now()}_${prev.length}`,
+            text: userInput,
+            files: uploadedFiles,
+          },
+        ]);
+        setUserInput("");
+        setCursorPosition(0);
+        setUploadedFiles([]);
         return;
       }
 
@@ -2049,11 +2186,12 @@ const CliChat: FC<CliChatProps> = ({
     // Ctrl+Backspace / Ctrl+W: delete the previous word (mirrors readline's
     // unix-word-rubout binding). Ctrl+Backspace's exact reported key shape
     // varies by terminal, so both are supported; Ctrl+W is the reliable,
-    // terminal-agnostic fallback.
+    // terminal-agnostic fallback. Ctrl+Delete is handled separately below -
+    // Delete removes the *next* word, not the previous one.
     if (
       currentCursorPos > 0 &&
       key.ctrl &&
-      ((key.backspace || key.delete) || input === "w")
+      (key.backspace || input === "w")
     ) {
       let newPosition = currentCursorPos - 1;
       while (newPosition > 0 && /\s/.test(currentInput[newPosition])) {
@@ -2073,7 +2211,53 @@ const CliChat: FC<CliChatProps> = ({
       return;
     }
 
+    // Ctrl+Delete: delete the next word (mirrors readline's kill-word
+    // binding), i.e. the forward counterpart of Ctrl+Backspace above.
+    if (currentCursorPos < currentInput.length && key.ctrl && key.delete) {
+      let newPosition = currentCursorPos;
+      if (/\s/.test(currentInput[newPosition])) {
+        while (
+          newPosition < currentInput.length &&
+          /\s/.test(currentInput[newPosition])
+        ) {
+          newPosition++;
+        }
+      } else {
+        while (
+          newPosition < currentInput.length &&
+          !/\s/.test(currentInput[newPosition])
+        ) {
+          newPosition++;
+        }
+      }
+      setCurrentInput(
+        currentInput.slice(0, currentCursorPos) +
+          currentInput.slice(newPosition)
+      );
+      if (isInCommandMode) {
+        setSelectedCommandIndex(0);
+      }
+      return;
+    }
+
     if (key.backspace || key.delete) {
+      // Forward delete (removes the character at/after the cursor, cursor
+      // stays put) - only when the raw sequence confirms this was the
+      // physical Delete key, not Backspace (see lastRawWasForwardDeleteRef
+      // above for why `key.delete` alone can't tell them apart).
+      if (key.delete && lastRawWasForwardDeleteRef.current) {
+        if (currentCursorPos < currentInput.length) {
+          setCurrentInput(
+            currentInput.slice(0, currentCursorPos) +
+              currentInput.slice(currentCursorPos + 1)
+          );
+          if (isInCommandMode) {
+            setSelectedCommandIndex(0);
+          }
+        }
+        return;
+      }
+
       if (currentCursorPos > 0) {
         setCurrentInput(
           currentInput.slice(0, currentCursorPos - 1) +
@@ -2089,6 +2273,12 @@ const CliChat: FC<CliChatProps> = ({
         setCommandQuery("");
         setSelectedCommandIndex(0);
         setCommandCursorPosition(0);
+      } else if (
+        !isInCommandMode &&
+        userInput === "" &&
+        messageQueue.length > 0
+      ) {
+        recallLastQueuedMessage();
       }
       return;
     }
@@ -2198,6 +2388,21 @@ const CliChat: FC<CliChatProps> = ({
 
     if (key.rightArrow && currentCursorPos < currentInput.length) {
       setCurrentCursorPos(currentCursorPos + 1);
+      return;
+    }
+
+    // Up-arrow on an empty input recalls the most recently queued message
+    // for editing or cancellation (clear it with Esc, or just send it as-is)
+    // - the same recall Backspace already does, surfaced on a more
+    // discoverable key. Only fires when the input is empty, so it never
+    // fights with the line-navigation Up-arrow handles below.
+    if (
+      key.upArrow &&
+      !isInCommandMode &&
+      userInput === "" &&
+      messageQueue.length > 0
+    ) {
+      recallLastQueuedMessage();
       return;
     }
 
@@ -2465,9 +2670,11 @@ const CliChat: FC<CliChatProps> = ({
         conversationItems={conversationItems}
         isProcessingQuestion={isProcessingQuestion}
         actionStatus={actionStatus}
+        queuedMessages={messageQueue}
         thinkingPreview={thinkingPreview}
         streamingContentPreview={streamingContentPreview}
         showExitHint={showExitHint}
+        retryStatus={retryStatus}
         agentName={selectedAgent?.name ?? null}
         workspaceName={workspaceName}
         consumedCredits={consumedCredits}
@@ -2529,7 +2736,7 @@ const CliChat: FC<CliChatProps> = ({
                     </Box>
                   ) : inlineSelector.mode === "diff" && pendingDiffApproval ? (
                     <Box flexDirection="column" marginBottom={1}>
-                      {renderDiffLines(pendingDiffApproval)}
+                      <DiffView {...pendingDiffApproval} />
                     </Box>
                   ) : undefined,
               }

@@ -5,6 +5,11 @@
 export const MANTU_PURPLE = "#B366FF";
 export const MANTU_GOLD = "#D4A72C";
 
+// Bright gold-yellow for the "report bug" hint line - shifted a bit further
+// toward yellow than MANTU_GOLD (which is reserved for the logo/branding
+// elsewhere in the header) so it reads as less orange, while staying bright.
+export const BUG_REPORT_YELLOW = "#E8C930";
+
 // Companions to MANTU_PURPLE/MANTU_GOLD for the chat transcript's speaker
 // names - same palette family, but distinct shades so the transcript
 // doesn't just repeat the exact accent colors already used everywhere else

@@ -1,6 +1,6 @@
 <div align="center">
 
-# ⟡ dust-cli
+# ⟡ dust-cli (dustm)
 
 ### The Mantu fork of the Dust CLI
 
@@ -9,7 +9,7 @@
 ![License](https://img.shields.io/badge/License-MIT-FFFFFF?style=for-the-badge&labelColor=7C2AE8)
 ![Node](https://img.shields.io/badge/Node-%3E%3D24.16-D4A72C?style=for-the-badge&labelColor=1A0B2E)
 
-*A hardened, restyled build of [`@dust-tt/dust-cli`](https://github.com/dust-tt/dust/tree/main/cli/dust-cli) — same agents, same account, a console experience that actually survives legacy Windows terminals.*
+*A hardened, restyled build of [`@dust-tt/dust-cli`](https://github.com/dust-tt/dust/tree/main/cli/dust-cli) — same agents, same account, but a more consistent console experience.*
 
 </div>
 
@@ -37,8 +37,6 @@
 
 ## Changelog: Mantu fork vs. upstream Dust CLI
 
-This fork exists to fix a specific, reproducible set of problems the official CLI has on Windows consoles without full VT/Unicode support (legacy `conhost`, PowerShell 5) — bad paste handling, unrecoverable crashes, no persistence — plus a set of UX upgrades. Auth, agent listing, and non-interactive mode are otherwise untouched.
-
 ### ✨ Added
 
 | Feature | Notes |
@@ -57,6 +55,12 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 | Clipboard image paste | Attach a screenshot straight from the clipboard via Ctrl+V or `/attach` — Windows tested, macOS untested — see [In-Chat Commands](#in-chat-commands) |
 | Paste compaction | Large multi-line pastes collapse to a `[Pasted N lines of text]` placeholder in the input instead of dumping the raw text inline |
 | Portable content search | `search_content` (`--with-tools`) no longer shells out to the system `grep` binary, and supports lines of context around each match |
+| `write_file` tool | Local file creation/overwrite (`--with-tools`), so "create a file" lands on disk in the current folder instead of Dust's hosted, web-only file preview |
+| Message queuing | Type and send while the agent is still working — queued messages show in a bordered box below the input and auto-send in order once the current turn ends; recall the last one with Up-arrow/Backspace to edit or cancel it |
+| Persistent file-change previews | Approved `write_file`/`edit_file` previews stay in scrollback after the turn finishes, instead of disappearing once the approval prompt closes |
+| Upstream version in the banner | Shows both this fork's version and the upstream `dust-tt/dust` `cli/dust-cli` version it was last synced against |
+| Immediate startup feedback | Prints "Starting dustm..." right away, before the (larger) UI dependency graph finishes loading, so the CLI doesn't look stuck on a slow/cold start |
+| Visible retry indicator | API/MCP call retries now show a spinner + `[attempt/max] Retrying ... — <error>` line instead of only ever showing up in `~/.dust-cli/logs/` - previously indistinguishable from "it didn't retry at all" |
 
 ### 🐛 Fixed
 
@@ -72,11 +76,12 @@ This fork exists to fix a specific, reproducible set of problems the official CL
 | Markdown headings/bold never rendered | Confirmed `marked-terminal@7.3.0` bug |
 | `npm run build` failed on Windows | Bash-style `NODE_ENV=x` syntax in scripts |
 | `search_content` (`--with-tools`) could silently fail | It shelled out to the system `grep` binary, not guaranteed to exist on plain Windows without Git for Windows/WSL |
-
-### 🔧 Changed
-
-- Renamed package/bin from `@dust-tt/dust-cli`/`dust` to **`dust-cli`**/**`dustm`** — installing this fork no longer shadows the official npm package's `dust` command on `PATH`, so both can be installed side by side if needed
-- Build config no longer generates `.d.ts` output (irrelevant for a CLI binary, and was crashing on an unrelated `rollup-plugin-dts` incompatibility)
+| Agent sometimes tried to run commands/create files in an unrelated sandbox | `run_command`'s description didn't distinguish it from Dust's own hosted, sandboxed code-interpreter tool — clarified to state it runs on the user's real local machine and current folder |
+| Ctrl+Delete deleted the previous word instead of the next one | It shared the same "delete previous word" branch as Ctrl+Backspace/Ctrl+W instead of deleting forward |
+| Delete key deleted backward like Backspace | Ink normalizes both keys to the same flag with no way to tell them apart from its public API; now disambiguated by reading the raw key sequence directly |
+| "Running a tool…" status was missing the pulsing brand icon shown next to "Thinking" | Icon was only wired up on the thinking branch |
+| Terminal flickered, and fought manual scrolling, on long agent answers | The live streaming preview re-rendered the *entire* accumulated answer every second with no height limit — each redraw is new output, so the terminal auto-scrolled to reveal it, overriding any manual scroll-up; now capped to a small, constant-size tail (same footprint as the "Thinking" spinner) regardless of answer length |
+| LaTeX math (`$...$` / `$$...$$`) rendered as raw, garbled `\commands`, mangled nested commands (`\frac{1}{\sqrt{x}}`), and could silently drop `=`/`-` signs | A terminal can't typeset math; math spans are now converted to readable Unicode (Greek letters, `\frac`, `\sqrt`, accents, sub/superscripts) via a small recursive parser (handles nesting, unlike the regex it replaced) before markdown ever sees them, with the equation's own `=`/`-` line-starts escaped so markdown doesn't misread them as heading/list syntax and eat them |
 
 ---
 
@@ -173,11 +178,16 @@ When no command is given, `chat` is used by default.
 | `Enter` | Send message |
 | `Ctrl+Enter` / `Shift+Enter` | Insert a newline |
 | `Ctrl+W` | Delete the previous word (more reliable than Ctrl+Backspace across terminals) |
-| `Ctrl+Backspace` | Delete the previous word |
+| `Ctrl+Backspace` | Delete the previous word (best-effort — not every terminal reports it distinctly from plain Backspace) |
+| `Ctrl+Delete` | Delete the next word |
 | `Ctrl+Left` / `Ctrl+Right` | Jump to the previous/next word |
-| `Esc` | Clear input, or cancel the current generation |
+| `Esc` | Clear input if there's a draft, otherwise interrupt the current generation |
+| Enter (while the agent is working) | Queue the message — sent automatically once the current turn ends |
+| Up-arrow / Backspace on an empty input | Recall the last queued message for editing — clear it with `Esc` to cancel, or just send it |
 | `Ctrl+C` | Cancel generation if one is running; press twice within 2s to exit while idle |
 | `Ctrl+G` | Open the current conversation in the browser |
+
+**Note on "steering":** there is no way to interrupt or redirect an agent's turn while it's running - a `Ctrl+S`-style shortcut for that existed briefly but was removed because it couldn't actually do that. Dust's agent loop (deciding what tool to call next, when to respond, when to finish) runs entirely server-side; this CLI just watches one stream of server-emitted events. The only mid-stream client actions the API exposes are approving/rejecting a specific tool call, or disconnecting the stream outright (with no way to resume). There's no endpoint to inject a message into an already-running turn, so real steering (like Claude Code, which owns its own agent loop locally and can inject between tool calls) isn't achievable from this CLI - it would need a new capability added to Dust's own platform/stream protocol. Queuing (above) is the closest available approximation: it doesn't interrupt anything, it just decides what runs *next*.
 
 ### Status bar
 
@@ -215,10 +225,12 @@ or via flags: `dustm chat --wId ws_abc123 --key sk_your_api_key_here`.
 
 ```bash
 npm install
-npm run build        # dev build
+npm run build        # dev build - points at http://localhost:3000, NOT the real API
 npm run build:prod    # production build (bakes in the production API domain)
 node dist/index.js <command>
 ```
+
+**If `dustm` (or `node dist/index.js`) fails with `fetch failed` / `ECONNREFUSED` against `localhost:3000`**, that's this: the last build was a dev build, which intentionally points at a local Dust server (for engineers developing against a local `dust-tt/dust` checkout) that isn't running on your machine. Run `npm run build:prod` and try again - this isn't a network or retry bug.
 
 `npm run dev` watches and rebuilds on change.
 

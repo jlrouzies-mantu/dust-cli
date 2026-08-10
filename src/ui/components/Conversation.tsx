@@ -1,4 +1,5 @@
 import { assertNever } from "@dust-tt/client";
+import chalk from "chalk";
 import { Box, Static, Text } from "ink";
 import Spinner from "ink-spinner";
 // biome-ignore lint/plugin/noBulkLodash: existing usage
@@ -25,6 +26,11 @@ import {
   QUEUED_BODY_FG,
   QUEUED_TITLE_BG,
   QUEUED_TITLE_FG,
+  contextUsageColor,
+  creditsUsageColor,
+  STATUS_BAR_BRANCH,
+  STATUS_BAR_TEXT,
+  STATUS_BAR_WORKSPACE,
   STEERED_BODY_BG,
   STEERED_BODY_FG,
   STEERED_TITLE_BG,
@@ -48,7 +54,10 @@ import { InlineSelector } from "./InlineSelector.js";
 import { InputBox } from "./InputBox.js";
 import { ThinkingIcon } from "./ThinkingIcon.js";
 
-function formatTokenCount(n: number): string {
+// Compact thousands formatting for the status bar's counters (tokens and
+// credits alike), so a long figure can't push the bar into another wrapped
+// line. Named generically since it's no longer token-specific.
+function formatCompactCount(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 
@@ -57,6 +66,85 @@ function formatPercent(used: number, total: number): string {
     return "0";
   }
   return ((used / total) * 100).toFixed(0);
+}
+
+// Width of the context gauge, in characters.
+const CONTEXT_GAUGE_WIDTH = 16;
+
+/**
+ * Renders a filled/empty bar for a 0-100 percentage, the filled part in the
+ * gauge colour for that level and the remainder dimmed.
+ *
+ * Only uses the CP437 shade ramp (U+2588 full, U+2593 dark, U+2592 medium,
+ * U+2591 light) so it still renders on the legacy Windows consoles this
+ * fork targets - the eighth-block glyphs (▏▎▍▌…) that would give finer
+ * steps are exactly the sort of Unicode that comes out as garbage there.
+ *
+ * The two mid shades stand in for a fractional trailing cell, which triples
+ * the effective resolution: at 16 cells that's ~2% per visible step rather
+ * than 6.25%.
+ */
+function renderContextGauge(percentUsed: number): string {
+  const clamped = Math.max(0, Math.min(100, percentUsed));
+  const exact = (clamped / 100) * CONTEXT_GAUGE_WIDTH;
+  const full = Math.floor(exact);
+  const remainder = exact - full;
+
+  let partial = "";
+  if (full < CONTEXT_GAUGE_WIDTH) {
+    if (remainder >= 0.66) {
+      partial = "▓";
+    } else if (remainder >= 0.33) {
+      partial = "▒";
+    }
+  }
+  // Any non-zero usage shows something, so the bar never reads as empty
+  // while tokens are actually in use.
+  if (clamped > 0 && full === 0 && !partial) {
+    partial = "▒";
+  }
+
+  const empty = CONTEXT_GAUGE_WIDTH - full - (partial ? 1 : 0);
+  return (
+    chalk.hex(contextUsageColor(clamped))("█".repeat(full) + partial) +
+    chalk.dim("░".repeat(empty))
+  );
+}
+
+// Number of dots in the credits meter, so each one is a round 10%.
+const CREDITS_DOT_COUNT = 10;
+
+/**
+ * Renders the credits meter as a dot ramp, coloured on a continuous lilac ->
+ * red-lilac fade (see creditsUsageColor).
+ *
+ * Deliberately a different shape *and* a different colour behaviour from the
+ * context gauge's block ramp: they sit next to each other in the status bar,
+ * so "spent budget" and "window pressure" shouldn't read as the same widget.
+ *
+ * Caveat: unlike the context gauge's CP437 blocks, U+25CF/U+25CB aren't in
+ * that legacy codepage, so very old Windows consoles may not have them in
+ * their font. Chosen anyway for how much better the ramp reads; swap for a
+ * shade ramp if they ever show up as replacement boxes.
+ */
+function renderCreditsDots(percentUsed: number): string {
+  const clamped = Math.max(0, Math.min(100, percentUsed));
+  // Any non-zero spend lights at least one dot, so the meter never reads as
+  // untouched once credits have actually been used.
+  const filled =
+    clamped === 0
+      ? 0
+      : Math.max(
+          1,
+          Math.min(
+            CREDITS_DOT_COUNT,
+            Math.round((clamped / 100) * CREDITS_DOT_COUNT)
+          )
+        );
+  return (
+    chalk.hex(creditsUsageColor(clamped))("●".repeat(filled)) +
+    chalk.dim("○".repeat(CREDITS_DOT_COUNT - filled))
+  );
 }
 
 export type ConversationItem = { key: string } & (
@@ -137,7 +225,6 @@ interface ConversationProps {
   showExitHint: boolean;
   transientHint: string | null;
   retryStatus: string | null;
-  agentName: string | null;
   workspaceName: string | null;
   consumedCredits: CreditsUsage | null;
   contextUsage: ContextUsage | null;
@@ -171,7 +258,6 @@ const _Conversation: FC<ConversationProps> = ({
   showExitHint,
   transientHint,
   retryStatus,
-  agentName,
   workspaceName,
   consumedCredits,
   contextUsage,
@@ -200,6 +286,112 @@ const _Conversation: FC<ConversationProps> = ({
       gitBranch: getGitBranch(cwd),
     };
   }, []);
+
+  // See the comment at the render site for why the status bar is laid out
+  // into lines here rather than left to Ink's own text wrapping.
+  const statusBarLines = useMemo(() => {
+    const SEPARATOR = " · ";
+    // Each segment carries its plain text (for width math, since the
+    // colored form is full of zero-width escape codes) alongside the
+    // pre-colored string that actually gets rendered.
+    const segments: { plain: string; colored: string }[] = [];
+    const add = (plain: string, colored: string) =>
+      segments.push({ plain, colored });
+
+    if (workspaceName) {
+      add(workspaceName, chalk.hex(STATUS_BAR_WORKSPACE)(workspaceName));
+    }
+    add(displayPath, chalk.hex(MANTU_GOLD)(displayPath));
+    if (gitBranch) {
+      add(gitBranch, chalk.hex(STATUS_BAR_BRANCH)(gitBranch));
+    }
+    if (conversationId) {
+      const shortId = conversationId.slice(0, 8);
+      add(shortId, chalk.dim(shortId));
+    }
+    if (contextUsage) {
+      const used = formatCompactCount(contextUsage.contextUsage);
+      const total = formatCompactCount(contextUsage.contextSize);
+      const percent = formatPercent(
+        contextUsage.contextUsage,
+        contextUsage.contextSize
+      );
+      // Gauge is driven by the raw ratio rather than the rounded display
+      // string, so the bar and colour step on the true value.
+      const ratio =
+        contextUsage.contextSize > 0
+          ? (contextUsage.contextUsage / contextUsage.contextSize) * 100
+          : 0;
+      const label = `${used}/${total} (${percent}%) context`;
+      // Plain form counts the gauge's cells plus the joining space, since
+      // each block character occupies exactly one column.
+      add(
+        `${"x".repeat(CONTEXT_GAUGE_WIDTH)} ${label}`,
+        `${renderContextGauge(ratio)} ${chalk.hex(contextUsageColor(ratio))(
+          label
+        )}`
+      );
+    }
+    if (consumedCredits !== null) {
+      const limitSuffix =
+        consumedCredits.limit !== null
+          ? `/${formatCompactCount(consumedCredits.limit)} (${formatPercent(
+              consumedCredits.consumed,
+              consumedCredits.limit
+            )}%)`
+          : "";
+      const text = `${formatCompactCount(
+        consumedCredits.consumed
+      )}${limitSuffix} credits used`;
+      // Only shown when there's a limit to measure against - without one
+      // there's no percentage, so a meter would be meaningless.
+      if (consumedCredits.limit !== null) {
+        const ratio =
+          consumedCredits.limit > 0
+            ? (consumedCredits.consumed / consumedCredits.limit) * 100
+            : 0;
+        // The label deliberately stays neutral grey while only the dots
+        // carry the ramp - the reverse of the context field, where bar and
+        // label share a colour. One more axis of separation between them.
+        add(
+          `${"x".repeat(CREDITS_DOT_COUNT)} ${text}`,
+          `${renderCreditsDots(ratio)} ${chalk.hex(STATUS_BAR_TEXT)(text)}`
+        );
+      } else {
+        add(text, chalk.hex(STATUS_BAR_TEXT)(text));
+      }
+    }
+
+    // Greedily pack whole segments into lines that fit. -2 accounts for the
+    // container's paddingLeft plus a column of slack, so the terminal can't
+    // wrap a line on its own either.
+    const maxWidth = Math.max(20, (stdout?.columns || 80) - 2);
+    const lines: { plain: string; colored: string }[] = [];
+    for (const segment of segments) {
+      const current = lines[lines.length - 1];
+      if (!current) {
+        lines.push({ ...segment });
+        continue;
+      }
+      if (current.plain.length + SEPARATOR.length + segment.plain.length <=
+        maxWidth
+      ) {
+        current.plain += SEPARATOR + segment.plain;
+        current.colored += chalk.dim(SEPARATOR) + segment.colored;
+      } else {
+        lines.push({ ...segment });
+      }
+    }
+    return lines.map((line) => line.colored);
+  }, [
+    workspaceName,
+    displayPath,
+    gitBranch,
+    conversationId,
+    contextUsage,
+    consumedCredits,
+    stdout?.columns,
+  ]);
 
   return (
     <Box flexDirection="column">
@@ -402,84 +594,29 @@ const _Conversation: FC<ConversationProps> = ({
           </Text>
         </Box>
       )}
-      <Box paddingLeft={1}>
-        <Text>
-          {workspaceName && (
-            <>
-              <Text dimColor>{workspaceName}</Text>
-              <Text dimColor>
-                {" "}
-                ·{" "}
-              </Text>
-            </>
-          )}
-          {agentName && (
-            <>
-              <Text bold color={MANTU_PURPLE}>
-                @{agentName}
-              </Text>
-              <Text dimColor>
-                {" "}
-                ·{" "}
-              </Text>
-            </>
-          )}
-          <Text color={MANTU_GOLD}>{displayPath}</Text>
-          {gitBranch && (
-            <>
-              <Text dimColor>
-                {" "}
-                ·{" "}
-              </Text>
-              <Text color={MANTU_PURPLE}>{gitBranch}</Text>
-            </>
-          )}
-          {conversationId && (
-            <>
-              <Text dimColor>
-                {" "}
-                ·{" "}
-              </Text>
-              <Text dimColor>{conversationId.slice(0, 8)}</Text>
-            </>
-          )}
-          {contextUsage && (
-            <>
-              <Text dimColor>
-                {" "}
-                ·{" "}
-              </Text>
-              <Text color={MANTU_PURPLE}>
-                {formatTokenCount(contextUsage.contextUsage)}/
-                {formatTokenCount(contextUsage.contextSize)} (
-                {formatPercent(
-                  contextUsage.contextUsage,
-                  contextUsage.contextSize
-                )}
-                %) context
-              </Text>
-            </>
-          )}
-          {consumedCredits !== null && (
-            <>
-              <Text dimColor>
-                {" "}
-                ·{" "}
-              </Text>
-              <Text color={MANTU_GOLD}>
-                {consumedCredits.consumed}
-                {consumedCredits.limit !== null &&
-                  `/${consumedCredits.limit}`}
-                {consumedCredits.limit !== null &&
-                  ` (${formatPercent(
-                    consumedCredits.consumed,
-                    consumedCredits.limit
-                  )}%)`}{" "}
-                credits used
-              </Text>
-            </>
-          )}
-        </Text>
+      {/*
+        The status bar is packed into lines by hand (see statusBarLines) and
+        each line rendered with wrap disabled, rather than handing one long
+        string to Ink and letting it wrap.
+
+        Ink wraps via wrap-ansi, which is supposed to re-emit the active SGR
+        codes at the start of each new line but doesn't do so reliably for
+        24-bit color: at some widths the continuation line comes out with no
+        escape at all and renders in the default foreground. It's
+        width-dependent, which is what made it look intermittent. Packing
+        whole segments per line means a break never lands mid-segment, so
+        every rendered line already carries its own complete escapes and
+        nothing has to be re-emitted.
+
+        The agent name is deliberately absent - the input box's own
+        "@agent" prefix already shows it, directly above this line.
+      */}
+      <Box flexDirection="column" paddingLeft={1}>
+        {statusBarLines.map((line, index) => (
+          <Text key={index} wrap="truncate-end">
+            {line}
+          </Text>
+        ))}
       </Box>
     </Box>
   );
@@ -550,9 +687,9 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
               <Text color={BUG_REPORT_YELLOW}>
                 Report bug here: https://github.com/jlrouzies-mantu/dust-cli
               </Text>
+              {/* No folder path here - the status bar already shows it. */}
               <Text dimColor>
-                Dust CLI v{CLI_VERSION} (upstream v{UPSTREAM_CLI_VERSION}) ·{" "}
-                {displayPath}
+                Dust CLI v{CLI_VERSION} (upstream v{UPSTREAM_CLI_VERSION})
                 {gitBranch && ` · branch: ${gitBranch}`}
               </Text>
               <Text dimColor>

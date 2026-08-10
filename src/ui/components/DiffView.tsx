@@ -71,8 +71,24 @@ function computeDiffLines(diff: DiffContent) {
   return lines;
 }
 
-export const DiffView: FC<DiffContent> = (diff) => {
-  const lines = computeDiffLines(diff);
+export const DiffView: FC<DiffContent & { maxLines?: number }> = ({
+  maxLines,
+  ...diff
+}) => {
+  const allLines = computeDiffLines(diff);
+  // Capping matters for the approval prompt specifically: that lives in
+  // Ink's *non-static* output, and once that region reaches the terminal
+  // height Ink stops doing incremental updates and instead clears the whole
+  // terminal and reprints the entire transcript on every render - which
+  // shows up as violent full-screen flicker. An unbounded diff (approving a
+  // several-hundred-line write_file, say) blows straight past that. The
+  // permanent transcript copy passes no maxLines, since Static output
+  // doesn't count toward that height.
+  const lines =
+    maxLines !== undefined && allLines.length > maxLines
+      ? allLines.slice(0, maxLines)
+      : allLines;
+  const hiddenCount = allLines.length - lines.length;
 
   return (
     <>
@@ -84,6 +100,12 @@ export const DiffView: FC<DiffContent> = (diff) => {
           </Text>
         );
       })}
+      {hiddenCount > 0 && (
+        <Text dimColor>
+          … {hiddenCount} more diff line{hiddenCount === 1 ? "" : "s"} (shown
+          in full once applied)
+        </Text>
+      )}
     </>
   );
 };

@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 
-import { MANTU_PURPLE } from "./utils/brand.js";
+import { ANSI_RESET, ansiForegroundFor } from "./utils/color.js";
+import {
+  PULSE_COLOR_FRAMES,
+  PULSE_ICON,
+  PULSE_INTERVAL_MS,
+} from "./utils/pulse.js";
 
 // Print immediate feedback before pulling in the ink/react/App dependency
 // graph below - resolving and loading that many transitive node_modules can
@@ -9,15 +14,34 @@ import { MANTU_PURPLE } from "./utils/brand.js";
 // in this file, so without this the terminal would show nothing at all
 // during that window, making the CLI look stuck before it even gets a
 // chance to render its own "Loading" spinner. Dynamic `import()` is what
-// lets this line run first. Styled by hand with a raw ANSI escape (rather
-// than chalk/ink) so this print doesn't itself wait on anything heavier
-// than ./utils/brand.js, which has zero dependencies.
-function hexToRgb(hex: string): [number, number, number] {
-  const n = Number.parseInt(hex.slice(1), 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-}
-const [r, g, b] = hexToRgb(MANTU_PURPLE);
-process.stdout.write(`\x1b[38;2;${r};${g};${b}m♦\x1b[0m Starting dustm...\n`);
+// lets this line run first.
+//
+// The glyph pulses through the same brand colors as the in-app Thinking
+// indicator (shared via ./utils/pulse.js, which is dependency-free for
+// exactly this reason - importing ThinkingIcon here would drag in all of
+// Ink and defeat the point). Redrawn in place with a carriage return, so no
+// newline is emitted until the animation stops.
+const isInteractiveStdout = Boolean(process.stdout.isTTY);
+let pulseFrame = 0;
+const writeStartupLine = () => {
+  const color = ansiForegroundFor(
+    PULSE_COLOR_FRAMES[pulseFrame % PULSE_COLOR_FRAMES.length]
+  );
+  process.stdout.write(
+    `\r${color}${PULSE_ICON}${ANSI_RESET} Starting dustm...`
+  );
+};
+writeStartupLine();
+// Only animate on a real terminal: with output piped or redirected, \r
+// rewrites would pile up as repeated junk in the captured text.
+const pulseTimer = isInteractiveStdout
+  ? setInterval(() => {
+      pulseFrame++;
+      writeStartupLine();
+    }, PULSE_INTERVAL_MS)
+  : null;
+// Don't let this timer hold the event loop open on its own.
+pulseTimer?.unref();
 
 import { initLogger, registerInkCleanup } from "./utils/logger.js";
 
@@ -32,6 +56,14 @@ const [{ render }, { default: meow }, { createElement }, { default: App }] =
     import("react"),
     import("./ui/App.js"),
   ]);
+
+// Loading is done - stop pulsing and close off the line so anything printed
+// next (Ink's first frame, or a one-shot command's output) starts cleanly on
+// its own row rather than overwriting this one.
+if (pulseTimer) {
+  clearInterval(pulseTimer);
+}
+process.stdout.write("\n");
 
 const cli = meow({
   importMeta: import.meta,

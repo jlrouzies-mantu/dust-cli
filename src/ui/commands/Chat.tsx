@@ -676,19 +676,46 @@ const CliChat: FC<CliChatProps> = ({
     []
   );
 
+  // The approval prompt lives in Ink's non-static output, and once that
+  // region reaches the terminal height Ink switches from incremental updates
+  // to clearing the whole terminal and reprinting the entire transcript
+  // every render - which reads as violent full-screen flicker. Tool inputs
+  // are arbitrarily large (write_file's `content`, for one), so both the
+  // number of lines and each line's length are bounded here: an over-long
+  // single line still wraps into many rows, so truncating line count alone
+  // wouldn't be enough.
+  const APPROVAL_INPUT_MAX_LINES = 8;
   const formatInputs = (inputs: unknown): string => {
     if (!inputs) {
       return "";
     }
+    const maxLineLength = Math.max(40, (stdout?.columns ?? 80) - 8);
+    const clampLine = (line: string) =>
+      line.length > maxLineLength
+        ? `${line.slice(0, maxLineLength - 1)}…`
+        : line;
+    const clampBlock = (text: string) => {
+      const lines = text.split("\n");
+      const shown = lines.slice(0, APPROVAL_INPUT_MAX_LINES).map(clampLine);
+      const hidden = lines.length - shown.length;
+      return hidden > 0
+        ? [...shown, `… ${hidden} more line${hidden === 1 ? "" : "s"}`].join(
+            "\n"
+          )
+        : shown.join("\n");
+    };
+
     if (typeof inputs === "string") {
-      return inputs;
+      return clampBlock(inputs);
     }
     if (typeof inputs === "object" && !Array.isArray(inputs)) {
-      return Object.entries(inputs as Record<string, unknown>)
-        .map(([key, value]) => `- ${key}: ${JSON.stringify(value)}`)
-        .join("\n");
+      return clampBlock(
+        Object.entries(inputs as Record<string, unknown>)
+          .map(([key, value]) => `- ${key}: ${JSON.stringify(value)}`)
+          .join("\n")
+      );
     }
-    return JSON.stringify(inputs, null, 2);
+    return clampBlock(JSON.stringify(inputs, null, 2));
   };
 
   // Records an approved file write/edit permanently in the transcript
@@ -3005,7 +3032,6 @@ const CliChat: FC<CliChatProps> = ({
         showExitHint={showExitHint}
         retryStatus={retryStatus}
         transientHint={transientHint}
-        agentName={selectedAgent?.name ?? null}
         workspaceName={workspaceName}
         consumedCredits={consumedCredits}
         contextUsage={contextUsage}
@@ -3066,7 +3092,14 @@ const CliChat: FC<CliChatProps> = ({
                     </Box>
                   ) : inlineSelector.mode === "diff" && pendingDiffApproval ? (
                     <Box flexDirection="column" marginBottom={1}>
-                      <DiffView {...pendingDiffApproval} />
+                      {/*
+                        Capped: this preview is ephemeral non-static output,
+                        and letting it exceed the terminal height makes Ink
+                        clear-and-reprint everything each render (flicker).
+                        The permanent copy pushed to the transcript after
+                        approval renders the diff in full.
+                      */}
+                      <DiffView {...pendingDiffApproval} maxLines={14} />
                     </Box>
                   ) : undefined,
               }

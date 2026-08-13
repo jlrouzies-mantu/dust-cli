@@ -45,13 +45,6 @@
 
 | Feature | Notes |
 |---|---|
-| Crash recovery | Falls back to fetching the conversation from the server instead of showing a fatal error |
-| Auto-retry on API errors | Up to 5x with backoff on transient failures; skipped for non-idempotent calls |
-| Actionable error messages | Fatal errors include the exact command to resume that conversation |
-| Local crash-safe transcripts | Every turn appended to `~/.dust-cli/transcripts/<id>.jsonl` |
-| Ctrl+C safety net | Genuinely cancels generation server-side (via `cancelMessageGeneration`) if running, not just a client-side disconnect; otherwise double-press within 2s to exit |
-| `/clear` command | Alias for `/new` — the more familiar name from other chat UIs |
-| LaTeX math rendering | `$...$` / `$$...$$` spans (Greek letters, `\frac`, `\sqrt`, accents, sub/superscripts) converted to readable Unicode before markdown ever sees them, since a terminal can't typeset real math |
 | Markdown rendering | Syntax-highlighted code fences, boxed on their own |
 | Transient "Thinking…" status | `◊` icon pulsing between brand colors instead of a permanent scrollback dump |
 | Persistent, colorized status bar | Workspace, agent, folder, branch, tokens, credits — see [Status bar](#status-bar) |
@@ -76,6 +69,13 @@
 | Immediate "Cancelling…" feedback | Esc/Ctrl+C now shows a red `✗ Cancelling` status the instant it's pressed, instead of leaving "Thinking…" up for the couple of seconds `cancelMessageGeneration` takes to actually confirm the cancel server-side |
 | Mid-turn context/credit refresh | The status bar's usage numbers now update after every completed tool call, and every ~20s during a long stretch of plain-text generation — previously they only refreshed once the whole turn finished, so a long task showed no movement in the meantime |
 | Clean exit from `dustm login` | Prints "Push 'Enter' to exit, and use 'dustm' to start a chat." and actually exits on Enter — it used to just sit there with no indication the process was done, other than Ctrl+C |
+| LaTeX math rendering | `$...$` / `$$...$$` spans (Greek letters, `\frac`, `\sqrt`, accents, sub/superscripts) converted to readable Unicode before markdown ever sees them, since a terminal can't typeset real math |
+| Crash recovery | Falls back to fetching the conversation from the server instead of showing a fatal error |
+| Auto-retry on API errors | Up to 5x with backoff on transient failures; skipped for non-idempotent calls |
+| Actionable error messages | Fatal errors include the exact command to resume that conversation |
+| Local crash-safe transcripts | Every turn appended to `~/.dust-cli/transcripts/<id>.jsonl` |
+| Ctrl+C safety net | Genuinely cancels generation server-side (via `cancelMessageGeneration`) if running, not just a client-side disconnect; otherwise double-press within 2s to exit |
+| `/clear` command | Alias for `/new` — the more familiar name from other chat UIs |
 
 ### 🐛 Fixed
 
@@ -85,15 +85,9 @@
 | No Ctrl+Backspace / Ctrl+Left/Right word-jump | Never implemented upstream |
 | Transient stream errors showed a fatal, unrecoverable error | Never checked whether the answer had actually completed server-side |
 | Agent list / MCP / user-info fetches failed on one hiccup | No retry logic anywhere |
-| Re-rendering the view (resume, terminal resize) wiped the terminal scrollback | `clearTerminal()` used the wrong escape sequence — these cases now only clear the visible screen. A *deliberate* full wipe (screen + scrollback) still happens where a blank slate is the whole point: launching the chat, `/new`, and `/clear` |
 | UI glyphs rendered as garbage or misaligned boxes | Unicode glyphs unsupported on this console's font |
-| Code block borders/backgrounds rendered wrong | Ink/Yoga layout defaults, unpadded background fill |
-| Markdown headings/bold never rendered | Confirmed `marked-terminal@7.3.0` bug |
-| `npm run build` failed on Windows | Bash-style `NODE_ENV=x` syntax in scripts |
 | `search_content` (`--with-tools`) could silently fail | It shelled out to the system `grep` binary, not guaranteed to exist on plain Windows without Git for Windows/WSL |
 | Agent sometimes tried to run commands/create files in an unrelated sandbox | `run_command`'s description didn't distinguish it from Dust's own hosted, sandboxed code-interpreter tool — clarified to state it runs on the user's real local machine and current folder |
-| Ctrl+Delete deleted the previous word instead of the next one | It shared the same "delete previous word" branch as Ctrl+Backspace/Ctrl+W instead of deleting forward |
-| Delete key deleted backward like Backspace | Ink normalizes both keys to the same flag with no way to tell them apart from its public API; now disambiguated by reading the raw key sequence directly |
 | Terminal flickered, and fought manual scrolling, on long agent answers | The live streaming preview re-rendered the *entire* accumulated answer every second with no height limit — each redraw is new output, so the terminal auto-scrolled to reveal it, overriding any manual scroll-up; now capped to a small, constant-size tail (same footprint as the "Thinking" spinner) regardless of answer length |
 | `/new` (and `/clear`) left the old status bar/input box visible above the fresh one instead of replacing it | `clearTerminal()` writes raw ANSI codes directly to stdout, bypassing Ink's own render bookkeeping — the next render doesn't know the screen was wiped, so it doesn't correctly replace the previous frame. Same class of artifact already worked around for terminal *resizes*; now the same fix (forcing a full remount) applies here too |
 | Multi-line input rendered corrupted — cursor looked stuck on the first line, and moving it left could leave stale text behind | The cursor-highlighted line was built from three sibling `<Text>` elements instead of one nested `<Text>`; Ink only wraps/tracks height correctly within a single `Text` subtree, so a long or wrapped row overflowed it and the next keystroke's redraw didn't fully clear the old frame |

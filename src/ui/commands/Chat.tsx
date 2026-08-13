@@ -18,6 +18,21 @@ import type { TodoItem } from "../../mcp/tools/todoWrite.js";
 import { todoListEmitter } from "../../mcp/tools/todoWrite.js";
 import AuthService from "../../utils/authService.js";
 import { MANTU_THINKING_PINK } from "../../utils/brand.js";
+import type { ChatMode } from "../../utils/chatMode.js";
+import {
+  chatModeLabel,
+  describeChatMode,
+  isAutoAcceptMode,
+  isPlanMode,
+  nextChatMode,
+} from "../../utils/chatMode.js";
+import type { ClaudeContext } from "../../utils/claudeMemory.js";
+import {
+  buildPrimingBlock,
+  hasAnyContext,
+  loadClaudeContext,
+  summarizeContext,
+} from "../../utils/claudeMemory.js";
 import { getClipboardImagePath } from "../../utils/clipboardImage.js";
 import type { ContextUsage } from "../../utils/contextUsage.js";
 import { getContextUsage } from "../../utils/contextUsage.js";
@@ -25,6 +40,20 @@ import type { CreditsUsage } from "../../utils/creditsInfo.js";
 import { getConsumedCredits } from "../../utils/creditsInfo.js";
 import { getDustClient } from "../../utils/dustClient.js";
 import { normalizeError } from "../../utils/errors.js";
+import type { PlanDecision } from "../../utils/planMode.js";
+import {
+  PLAN_MODE_BLOCKED_TOOLS,
+  planModePreamble,
+  planModeReminder,
+  setPlanMode,
+} from "../../utils/planMode.js";
+import { saveApprovedPlan } from "../../utils/planStore.js";
+import type { LoopState } from "../../utils/loopController.js";
+import {
+  describeLoop,
+  formatInterval,
+  parseLoopCommand,
+} from "../../utils/loopController.js";
 import type { FileInfo } from "../../utils/fileHandling.js";
 import {
   formatFileSize,
@@ -54,7 +83,7 @@ import { FileUpload } from "../components/FileUpload.js";
 import type { InlineSelectorItem } from "../components/InlineSelector.js";
 import { ThinkingIcon } from "../components/ThinkingIcon.js";
 import { resolveSpaceId, validateProjectFlags } from "./chat/nonInteractive.js";
-import { createCommands } from "./types.js";
+import { createCommands, splitCommandQuery } from "./types.js";
 
 type AgentConfiguration =
   GetAgentConfigurationsResponseType["agentConfigurations"][number];
@@ -67,6 +96,9 @@ interface QueuedMessage {
   // sent next; this just tracks that for display, so the UI can show them
   // in their own "Steered" block, separate from plain queued ones.
   steered: boolean;
+  // Set on messages a /loop tick enqueued, so the next tick can tell whether
+  // its predecessor has actually been sent yet (see loopBusyRef).
+  loop?: boolean;
 }
 
 interface CliChatProps {
@@ -74,6 +106,7 @@ interface CliChatProps {
   agentSearch?: string;
   conversationId?: string;
   autoAcceptEditsFlag?: boolean;
+  planModeFlag?: boolean;
   projectName?: string;
   projectId?: string;
 }
@@ -81,6 +114,17 @@ interface CliChatProps {
 // Pastes with more lines than this get collapsed to a placeholder in the
 // input box instead of dumping the raw text inline.
 const PASTE_COMPACT_LINE_THRESHOLD = 4;
+
+// Raw escape sequences for Home/End, across the terminal variants that send
+// different ones (xterm vs. legacy VT vs. application-cursor-mode) - see
+// lastRawSequenceRef above for why these have to be matched by hand.
+const HOME_KEY_SEQUENCES = new Set([
+  "\x1b[H",
+  "\x1b[1~",
+  "\x1b[7~",
+  "\x1bOH",
+]);
+const END_KEY_SEQUENCES = new Set(["\x1b[F", "\x1b[4~", "\x1b[8~", "\x1bOF"]);
 
 // See clipboardImage.ts - Windows is tested, macOS is best-effort/unverified.
 const SUPPORTS_CLIPBOARD_IMAGE =
@@ -225,11 +269,39 @@ const CliChat: FC<CliChatProps> = ({
   agentSearch,
   conversationId,
   autoAcceptEditsFlag,
+  planModeFlag,
   projectName,
   projectId,
 }) => {
-  const [autoAcceptEdits, setAutoAcceptEdits] = useState(!!autoAcceptEditsFlag);
+  // One tri-state permission mode cycled with Shift+Tab, rather than separate
+  // auto-accept and plan flags - see utils/chatMode.ts for why they can't
+  // both be on. `/auto` and `/plan` set it directly.
+  const [chatMode, setChatMode] = useState<ChatMode>(
+    planModeFlag ? "plan" : autoAcceptEditsFlag ? "auto" : "normal"
+  );
+  const autoAcceptEdits = isAutoAcceptMode(chatMode);
   const autoAcceptEditsRef = useRef(autoAcceptEdits);
+  const chatModeRef = useRef(chatMode);
+
+  // /claude-code-mode: whether the agent gets primed with the user's Claude
+  // Code memories. `claudeContextRef` holds the loaded context so it can be
+  // re-primed after /new without re-reading the disk, and
+  // `pendingClaudePrimingRef` is the "not yet sent on this conversation"
+  // latch - see toggleClaudeCodeMode for why priming rides along with the
+  // next message rather than being sent as one of its own.
+  const [claudeCodeMode, setClaudeCodeMode] = useState(false);
+  const claudeContextRef = useRef<ClaudeContext | null>(null);
+  const pendingClaudePrimingRef = useRef(false);
+  const claudeCodeModeRef = useRef(false);
+
+  // /loop: re-sends one prompt on an interval. `loopRef` mirrors the state
+  // for the interval callback (a setInterval closure would otherwise capture
+  // the value from the render that armed it), and `loopBusyRef` mirrors
+  // "a turn is in flight or a loop message is still queued", which is what
+  // makes a tick skip instead of stack.
+  const [loop, setLoop] = useState<LoopState | null>(null);
+  const loopRef = useRef<LoopState | null>(null);
+  const loopBusyRef = useRef(false);
 
   const [error, setError] = useState<string | null>(null);
 
@@ -237,6 +309,22 @@ const CliChat: FC<CliChatProps> = ({
     null
   );
   const [isProcessingQuestion, setIsProcessingQuestion] = useState(false);
+  // True from the moment Esc/Ctrl+C asks the server to cancel until the
+  // turn actually ends - cancelMessageGeneration is a real round trip
+  // (confirmed by testing: it isn't instant), and without this the
+  // "Thinking"/tool-status line just sits there for a couple of seconds
+  // looking like the keypress didn't register at all.
+  const [isCancelling, setIsCancelling] = useState(false);
+  // Reset alongside isProcessingQuestion rather than at every place that
+  // sets it false (agent_generation_cancelled, the aborted catch branch,
+  // agent_message_success, error paths, ...) - "the turn is over" already
+  // has one source of truth, and isCancelling only ever means "waiting on
+  // that to happen".
+  useEffect(() => {
+    if (!isProcessingQuestion) {
+      setIsCancelling(false);
+    }
+  }, [isProcessingQuestion]);
   const [currentConversationId, setCurrentConversationId] = useState<
     string | null
   >(conversationId ? conversationId : null);
@@ -269,11 +357,23 @@ const CliChat: FC<CliChatProps> = ({
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const [commandCursorPosition, setCommandCursorPosition] = useState(0);
   const [inlineSelector, setInlineSelector] = useState<{
-    mode: "agent" | "file" | "conversation" | "approval" | "diff";
+    mode:
+      | "agent"
+      | "file"
+      | "conversation"
+      | "approval"
+      | "diff"
+      | "plan"
+      | "mention";
     items: InlineSelectorItem[];
     query: string;
     selectedIndex: number;
     currentPath?: string;
+    // Position in `userInput` where the "@" that opened this selector sits -
+    // mention mode never edits `userInput` while it's open (typing goes into
+    // `query`, same as the other filterable modes), so this is where the
+    // chosen path gets spliced back in on selection.
+    mentionAnchor?: number;
   } | null>(null);
   const [pendingApproval, setPendingApproval] =
     useState<AgentActionSpecificEvent | null>(null);
@@ -288,6 +388,15 @@ const CliChat: FC<CliChatProps> = ({
   const [diffApprovalResolver, setDiffApprovalResolver] = useState<
     ((approved: boolean) => void) | null
   >(null);
+  // The plan awaiting approval (markdown), and the resolver that hands the
+  // decision back to the present_plan tool call still waiting on it.
+  const [pendingPlan, setPendingPlan] = useState<string | null>(null);
+  const [planApprovalResolver, setPlanApprovalResolver] = useState<
+    ((decision: PlanDecision) => void) | null
+  >(null);
+  // Set while "Reject with a comment" is collecting that comment through the
+  // normal input box, with the present_plan call still awaiting an answer.
+  const [awaitingPlanComment, setAwaitingPlanComment] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<FileInfo[]>([]);
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
@@ -676,6 +785,41 @@ const CliChat: FC<CliChatProps> = ({
     []
   );
 
+  // Flat, recursive file listing for "@" mentions (see the mention trigger
+  // below) - unlike loadDirectoryItems, which browses one folder at a time
+  // for /attach, a mention is meant to be typed-and-filtered against the
+  // whole project in one go. Cached for the life of the session: the cwd
+  // doesn't change mid-session, and re-walking the tree on every "@" would
+  // make the popup feel laggy on a large repo.
+  const mentionFilesCacheRef = useRef<InlineSelectorItem[] | null>(null);
+  const loadMentionFiles = useCallback(async (): Promise<
+    InlineSelectorItem[]
+  > => {
+    if (mentionFilesCacheRef.current) {
+      return mentionFilesCacheRef.current;
+    }
+    const { glob } = await import("glob");
+    const matches = await glob("**/*", {
+      cwd: process.cwd(),
+      nodir: true,
+      dot: false,
+      ignore: [
+        "**/node_modules/**",
+        "**/.git/**",
+        "**/dist/**",
+        "**/build/**",
+        "**/.next/**",
+        "**/coverage/**",
+      ],
+    });
+    const items: InlineSelectorItem[] = matches
+      .sort((a, b) => a.length - b.length || a.localeCompare(b))
+      .slice(0, 2000)
+      .map((relativePath) => ({ id: relativePath, label: relativePath }));
+    mentionFilesCacheRef.current = items;
+    return items;
+  }, []);
+
   // The approval prompt lives in Ink's non-static output, and once that
   // region reaches the terminal height Ink switches from incremental updates
   // to clearing the whole terminal and reprinting the entire transcript
@@ -738,6 +882,29 @@ const CliChat: FC<CliChatProps> = ({
       if (event.type !== "tool_approve_execution") {
         return false;
       }
+
+      // Plan mode short-circuit, checked before anything else.
+      //
+      // This prompt is Dust's own server-side tool-approval step, which fires
+      // *before* the tool runs and knows nothing about plan mode. Without this
+      // branch, asking the agent to do something while planning means being
+      // prompted to approve a write that our own gate is then guaranteed to
+      // refuse - which reads as plan mode not working at all.
+      //
+      // Returning true here looks backwards but is deliberate: it lets the call
+      // reach the tool, whose refusal explains plan mode and points at
+      // present_plan (see planModeRefusal). Returning false would abort it with
+      // a bare "rejected by user", teaching the agent nothing and leaving it to
+      // guess why.
+      if (
+        isPlanMode(chatModeRef.current) &&
+        (PLAN_MODE_BLOCKED_TOOLS as readonly string[]).includes(
+          event.metadata.toolName
+        )
+      ) {
+        return true;
+      }
+
       // Auto-approve if stake is never_ask
       if (event.stake === "never_ask") {
         return true;
@@ -890,9 +1057,351 @@ const CliChat: FC<CliChatProps> = ({
     });
   }, [loadDirectoryItems]);
 
+  // Pushes plain lines + a separator into permanent scrollback, the same
+  // shape /help and /resume's empty state use for CLI-side (non-agent)
+  // output.
+  const pushNoticeLines = useCallback((lines: string[], keyPrefix: string) => {
+    const stamp = Date.now();
+    setConversationItems((prev) => [
+      ...prev,
+      ...lines.map((line, i) => ({
+        key: `${keyPrefix}_${stamp}_${i}`,
+        type: "agent_message_content_line" as const,
+        text: line,
+        index: 0,
+      })),
+      { key: `${keyPrefix}_sep_${stamp}`, type: "separator" as const },
+    ]);
+  }, []);
+
+  /**
+   * Single entry point for every mode change (Shift+Tab, `/auto`, `/plan`).
+   *
+   * Deliberately writes nothing to the conversation: the status bar shows the
+   * mode permanently, so a line per change would just be noise - and cycling
+   * with Shift+Tab makes it easy to generate several in a row.
+   */
+  const applyChatMode = useCallback((next: ChatMode) => {
+    if (chatModeRef.current === next) {
+      return;
+    }
+    chatModeRef.current = next;
+    setChatMode(next);
+  }, []);
+
   const toggleAutoEdits = useCallback(() => {
-    setAutoAcceptEdits((prev) => !prev);
-  }, [setAutoAcceptEdits]);
+    // `/auto` means "auto-accept on or off", so it toggles against normal
+    // rather than stepping through the cycle - from plan mode it turns
+    // auto-accept on, which is what asking for it implies.
+    applyChatMode(chatModeRef.current === "auto" ? "normal" : "auto");
+  }, [applyChatMode]);
+
+  const togglePlanMode = useCallback(() => {
+    applyChatMode(chatModeRef.current === "plan" ? "normal" : "plan");
+  }, [applyChatMode]);
+
+  const cycleChatMode = useCallback(() => {
+    applyChatMode(nextChatMode(chatModeRef.current));
+  }, [applyChatMode]);
+
+  /**
+   * Resolves a pending present_plan call with the user's decision.
+   *
+   * Declared here rather than beside requestDiffApproval because it needs
+   * applyChatMode above - approval is what switches plan mode off.
+   */
+  const resolvePlanDecision = useCallback(
+    async (decision: PlanDecision) => {
+      if (!planApprovalResolver || pendingPlan === null) {
+        return;
+      }
+
+      const approved = decision.kind === "approve";
+
+      let savedPath: string | null = null;
+      if (approved) {
+        // Leaving plan mode is the *approval*, not the presenting: this is the
+        // only place it happens, so the agent can't lift the restriction on
+        // its own. Which mode it lands in is the user's choice: "implement now"
+        // means auto-accept, since having just approved the whole plan they
+        // don't want to confirm each edit within it; "wait" returns to normal,
+        // where edits are confirmed one at a time.
+        applyChatMode(decision.then === "auto" ? "auto" : "normal");
+        savedPath = await saveApprovedPlan(currentConversationId, pendingPlan);
+      }
+
+      // Deliberately does NOT include the plan text - it's already permanent
+      // on screen from the plan_proposed item requestPlanApproval pushed the
+      // moment this plan was presented. Repeating it here in a second Static
+      // item is what used to make it appear twice: pushed after the save so
+      // it can name the file the plan landed in.
+      setConversationItems((prev) => [
+        ...prev,
+        {
+          key: `plan_decision_${Date.now()}`,
+          type: "plan_decision" as const,
+          filePath: savedPath,
+          outcome:
+            decision.kind === "approve"
+              ? decision.then === "auto"
+                ? "approved-auto"
+                : "approved-wait"
+              : "rejected",
+          comment: decision.kind === "reject" ? decision.comment : undefined,
+        },
+      ]);
+
+      planApprovalResolver(decision);
+      setPendingPlan(null);
+      setPlanApprovalResolver(null);
+      setAwaitingPlanComment(false);
+      setInlineSelector(null);
+    },
+    [planApprovalResolver, pendingPlan, applyChatMode, currentConversationId]
+  );
+
+  /**
+   * Handles a choice from the plan approval prompt. "Reject with a comment"
+   * doesn't resolve yet - it hands over to the normal input box to collect the
+   * comment (see awaitingPlanComment), because a rejection reason is free text
+   * and the selector has no room for it.
+   */
+  const handlePlanChoice = useCallback(
+    (id: string) => {
+      switch (id) {
+        case "approve_auto":
+          void resolvePlanDecision({ kind: "approve", then: "auto" });
+          return;
+        case "approve_wait":
+          void resolvePlanDecision({ kind: "approve", then: "wait" });
+          return;
+        case "reject_comment":
+          setInlineSelector(null);
+          setAwaitingPlanComment(true);
+          setUserInput("");
+          setCursorPosition(0);
+          return;
+        default:
+          void resolvePlanDecision({ kind: "reject" });
+      }
+    },
+    [resolvePlanDecision]
+  );
+
+  const requestPlanApproval = useCallback(
+    async (plan: string): Promise<PlanDecision> => {
+      return new Promise<PlanDecision>((resolve) => {
+        // Pushed as permanent scrollback immediately, before the ephemeral
+        // selector even opens - see the plan_proposed item's comment in
+        // Conversation.tsx for why the plan text must never again be shown
+        // as ephemeral content (it's what caused the plan to render twice).
+        setConversationItems((prev) => [
+          ...prev,
+          {
+            key: `plan_proposed_${Date.now()}`,
+            type: "plan_proposed" as const,
+            planMarkdown: plan,
+          },
+        ]);
+
+        setPendingPlan(plan);
+        setPlanApprovalResolver(() => (decision: PlanDecision) => {
+          resolve(decision);
+        });
+
+        setInlineSelector({
+          mode: "plan",
+          items: [
+            {
+              id: "approve_auto",
+              label: "Approve and implement in auto mode",
+            },
+            {
+              id: "approve_wait",
+              label: "Approve and wait for further instructions",
+            },
+            { id: "reject_comment", label: "Reject with comment" },
+            { id: "reject", label: "Reject" },
+          ],
+          query: "",
+          selectedIndex: 0,
+        });
+      });
+    },
+    []
+  );
+
+  const stopLoop = useCallback(
+    (reason: string) => {
+      const current = loopRef.current;
+      if (!current) {
+        return false;
+      }
+      loopRef.current = null;
+      setLoop(null);
+      pushNoticeLines(
+        [
+          `↻ Loop stopped - ${reason}.`,
+          `  Ran ${current.runs} of ${current.maxRuns}${
+            current.skipped > 0
+              ? `, skipped ${current.skipped} tick${
+                  current.skipped === 1 ? "" : "s"
+                } while the agent was busy`
+              : ""
+          }.`,
+        ],
+        "loop_stop"
+      );
+      return true;
+    },
+    [pushNoticeLines]
+  );
+
+  /**
+   * Handles `/loop` in all its forms (see parseLoopCommand).
+   *
+   * A tick does not call handleSubmitQuestion directly - it appends to
+   * `messageQueue`, and the existing drain effect sends it once the agent is
+   * idle. That reuse is the whole reason this is small: "never overlap a
+   * running turn" and "show what's pending" both already work for queued
+   * messages, so a loop gets them for free.
+   */
+  const runLoopCommand = useCallback(
+    (args: string) => {
+      const parsed = parseLoopCommand(args);
+      if (!parsed.ok) {
+        pushNoticeLines([`↻ ${parsed.error}`], "loop_error");
+        return;
+      }
+
+      const command = parsed.value;
+
+      if (command.kind === "status") {
+        const current = loopRef.current;
+        pushNoticeLines(
+          current
+            ? [
+                `↻ Looping ${describeLoop(current)}`,
+                `  Prompt: ${current.prompt}`,
+                "  /loop stop to cancel.",
+              ]
+            : [
+                "↻ No loop running.",
+                "  /loop <interval> <prompt> to start one, e.g. /loop 10m check CI and fix any failures",
+                "  Add xN to cap the runs: /loop 10m x5 <prompt>",
+              ],
+          "loop_status"
+        );
+        return;
+      }
+
+      if (command.kind === "stop") {
+        if (!stopLoop("cancelled")) {
+          pushNoticeLines(["↻ No loop running."], "loop_status");
+        }
+        return;
+      }
+
+      if (loopRef.current) {
+        pushNoticeLines(
+          [
+            "↻ A loop is already running - /loop stop it first.",
+            `  Currently: ${describeLoop(loopRef.current)}`,
+          ],
+          "loop_error"
+        );
+        return;
+      }
+
+      const started: LoopState = {
+        id: `loop_${Date.now()}`,
+        intervalMs: command.intervalMs,
+        prompt: command.prompt,
+        runs: 0,
+        maxRuns: command.maxRuns,
+        skipped: 0,
+      };
+      loopRef.current = started;
+      setLoop(started);
+
+      pushNoticeLines(
+        [
+          `↻ Looping every ${formatInterval(command.intervalMs)}, up to ${
+            command.maxRuns
+          } runs.`,
+          `  Prompt: ${command.prompt}`,
+          "  Runs once now, then on the interval. Esc or /loop stop to cancel.",
+        ],
+        "loop_start"
+      );
+    },
+    [pushNoticeLines, stopLoop]
+  );
+
+  /**
+   * Toggles Claude Code mode: reads the memories and instruction files
+   * Claude Code keeps for this directory (see utils/claudeMemory.ts) and
+   * arranges for them to reach the agent once.
+   *
+   * The memories ride along with the *next* message the user sends rather
+   * than being posted as a message of their own the moment the mode is
+   * switched on. Both cost the same tokens, but a standalone priming
+   * message spends a whole round trip on a context dump the agent can only
+   * reply to with an acknowledgement - and burns credits doing it. Wrapping
+   * the next real message is the same mechanism steering already uses
+   * (buildSteerRedirectPrompt): what's sent to the agent is wrapped, what's
+   * shown in the transcript is only ever what the user actually typed.
+   */
+  const toggleClaudeCodeMode = useCallback(() => {
+    const enabling = !claudeCodeModeRef.current;
+
+    if (!enabling) {
+      setClaudeCodeMode(false);
+      claudeCodeModeRef.current = false;
+      claudeContextRef.current = null;
+      pendingClaudePrimingRef.current = false;
+      pushNoticeLines(
+        [
+          "◊ Claude Code mode off - memories already sent stay in this conversation's history.",
+          "  Run /new for a conversation without them.",
+        ],
+        "ccmode_off"
+      );
+      return;
+    }
+
+    void (async () => {
+      const context = await loadClaudeContext();
+      const summary = summarizeContext(context);
+
+      if (!hasAnyContext(context)) {
+        // Nothing to send - leave the mode off rather than switching it on
+        // and having it silently do nothing to every later message.
+        pushNoticeLines(
+          [
+            "◊ Claude Code mode not enabled - no memories or instruction files found.",
+            ...summary.map((line) => `  ${line}`),
+          ],
+          "ccmode_empty"
+        );
+        return;
+      }
+
+      claudeContextRef.current = context;
+      pendingClaudePrimingRef.current = true;
+      claudeCodeModeRef.current = true;
+      setClaudeCodeMode(true);
+
+      pushNoticeLines(
+        [
+          "◊ Claude Code mode on - the agent will be primed with:",
+          ...summary.map((line) => `  · ${line}`),
+          "  Sent once, with your next message. It is not shown in the transcript.",
+        ],
+        "ccmode_on"
+      );
+    })();
+  }, [pushNoticeLines]);
 
   // Helper to create a conversation for file uploads if none exists
   // Only useful for uploading files to the first message
@@ -989,12 +1498,32 @@ const CliChat: FC<CliChatProps> = ({
     setUploadedFiles([]);
     setPendingFiles([]);
     setContextUsage(null);
-  }, [selectedAgent]);
+
+    // A new conversation has none of the old one's history, so the memories
+    // the agent was primed with are gone with it - re-arm so the next
+    // message primes the fresh conversation too. Uses the context already
+    // read from disk, since /new shouldn't silently pick up memory edits
+    // made since the mode was switched on (re-run /claude-code-mode for
+    // that).
+    if (claudeCodeModeRef.current && claudeContextRef.current) {
+      pendingClaudePrimingRef.current = true;
+    }
+
+    // A loop is stopped rather than carried across: its prompt was written
+    // for the conversation being discarded, and leaving it armed would have
+    // it fire into the blank one without the user asking.
+    stopLoop("/new started a fresh conversation");
+  }, [selectedAgent, stopLoop]);
 
   const showHelp = useCallback(() => {
     const helpText =
-      "Commands: /help /switch /new /clear /resume /attach /clear-files /auto /exit\n" +
-      "Shortcuts: Enter=send · Ctrl+Enter/Shift+Enter=newline · Ctrl+W=delete word · Esc=clear/cancel · Ctrl+G=browser";
+      "Commands: /help /switch /new /clear /resume /attach /clear-files /auto /plan /loop /claude-code-mode /exit\n" +
+      `Modes (Shift+Tab cycles, shown in the status bar): ${(
+        ["normal", "auto", "plan"] as ChatMode[]
+      )
+        .map((m) => `${chatModeLabel(m)} = ${describeChatMode(m)}`)
+        .join(" · ")}\n` +
+      "Shortcuts: Enter=send · Ctrl+Enter/Shift+Enter=newline · Ctrl+W=delete word · Esc=clear/cancel · Ctrl+G=browser · @=mention a file";
     const lines = helpText.split("\n");
     setConversationItems((prev) => [
       ...prev,
@@ -1128,6 +1657,9 @@ const CliChat: FC<CliChatProps> = ({
     startNewConversation,
     showHelp,
     resumeConversation,
+    toggleClaudeCodeMode,
+    runLoopCommand,
+    togglePlanMode,
   });
 
   // Clear the terminal (screen + scrollback) once, when the interactive
@@ -1181,17 +1713,25 @@ const CliChat: FC<CliChatProps> = ({
     // Select the first matching agent (same as SelectWithSearch behavior)
     const agentToSelect = matchingAgents[0];
 
-    // Set the selected agent and initial conversation items
     setSelectedAgent(agentToSelect);
-    setConversationItems([
-      {
-        key: "welcome_header",
-        type: "welcome_header",
-        agentName: agentToSelect.name,
-        agentDescription: agentToSelect.description,
-      },
-    ]);
-  }, [agentSearch, allAgents, selectedAgent]);
+    // Skip the generic welcome header when a specific conversation is about
+    // to be resumed (--conversationId) - the resume effect below is about
+    // to clear the terminal and replace conversationItems with the actual
+    // history's own welcome header anyway. Painting this one first just
+    // means two clear+remount cycles happen back to back instead of one,
+    // which is what showed up as the status bar rendering twice (and with
+    // the wrong colors on the first pass) right after a resume.
+    if (!conversationId) {
+      setConversationItems([
+        {
+          key: "welcome_header",
+          type: "welcome_header",
+          agentName: agentToSelect.name,
+          agentDescription: agentToSelect.description,
+        },
+      ]);
+    }
+  }, [agentSearch, allAgents, selectedAgent, conversationId]);
 
   // Auto-select @dust agent when no agent/sId/search is specified
   useEffect(() => {
@@ -1205,16 +1745,20 @@ const CliChat: FC<CliChatProps> = ({
     const dustAgent = allAgents.find((agent) => agent.sId === "dust");
     if (dustAgent) {
       setSelectedAgent(dustAgent);
-      setConversationItems([
-        {
-          key: "welcome_header",
-          type: "welcome_header",
-          agentName: dustAgent.name,
-          agentDescription: dustAgent.description,
-        },
-      ]);
+      // See the matching comment in the agentSearch effect above: skip this
+      // when a resume is about to replace it anyway.
+      if (!conversationId) {
+        setConversationItems([
+          {
+            key: "welcome_header",
+            type: "welcome_header",
+            agentName: dustAgent.name,
+            agentDescription: dustAgent.description,
+          },
+        ]);
+      }
     }
-  }, [allAgents, selectedAgent, requestedAgentId, agentSearch]);
+  }, [allAgents, selectedAgent, requestedAgentId, agentSearch, conversationId]);
 
   // Auto-initialize filesystem server when agent is selected.
   useEffect(() => {
@@ -1247,14 +1791,20 @@ const CliChat: FC<CliChatProps> = ({
               error instanceof Error ? error.message : String(error)
             }`
           );
-        }
+        },
+        requestPlanApproval
       );
       setRetryStatus(null);
       if (useFsServerRes.isErr()) {
         setError(useFsServerRes.error.message);
       }
     })();
-  }, [selectedAgent, fileSystemInitialized, requestDiffApproval]);
+  }, [
+    selectedAgent,
+    fileSystemInitialized,
+    requestDiffApproval,
+    requestPlanApproval,
+  ]);
 
   // Load conversation history when resuming via --resume
   useEffect(() => {
@@ -1315,6 +1865,87 @@ const CliChat: FC<CliChatProps> = ({
     autoAcceptEditsRef.current = autoAcceptEdits;
   }, [autoAcceptEdits]);
 
+  // Push the mode across into the module-level flag the MCP tools read (see
+  // utils/planMode.ts). This effect is the single point where UI state becomes
+  // tool behaviour, so the two can't disagree - including on the very first
+  // render, which matters for `--plan`.
+  useEffect(() => {
+    chatModeRef.current = chatMode;
+    setPlanMode(isPlanMode(chatMode));
+  }, [chatMode]);
+
+  useEffect(() => {
+    claudeCodeModeRef.current = claudeCodeMode;
+  }, [claudeCodeMode]);
+
+  // A loop tick must not fire while its predecessor is still unsent or still
+  // running, so it needs to know both. Mirrored into a ref because the tick
+  // runs inside a setInterval closure.
+  useEffect(() => {
+    loopBusyRef.current =
+      isProcessingQuestion || messageQueue.some((message) => message.loop);
+  }, [isProcessingQuestion, messageQueue]);
+
+  // The loop's timer. Keyed on the loop's id and interval only - not on the
+  // whole object - so counting a run doesn't tear the interval down and
+  // restart it, which would push every subsequent tick later.
+  useEffect(() => {
+    if (!loop) {
+      return;
+    }
+
+    const tick = () => {
+      const current = loopRef.current;
+      if (!current) {
+        return;
+      }
+
+      if (current.runs >= current.maxRuns) {
+        stopLoop(`reached its ${current.maxRuns}-run limit`);
+        return;
+      }
+
+      // Skip rather than stack. Queueing a tick that the agent has no chance
+      // of reaching before the next one arrives is how an unattended loop
+      // runs away with a credit balance.
+      if (loopBusyRef.current) {
+        const skipped = { ...current, skipped: current.skipped + 1 };
+        loopRef.current = skipped;
+        setLoop(skipped);
+        showTransientHint(
+          `↻ Loop tick skipped - agent still working (${skipped.skipped} so far).`
+        );
+        return;
+      }
+
+      const advanced = { ...current, runs: current.runs + 1 };
+      loopRef.current = advanced;
+      setLoop(advanced);
+      setMessageQueue((prev) => [
+        ...prev,
+        {
+          id: `loop_msg_${current.id}_${advanced.runs}`,
+          text: current.prompt,
+          files: [],
+          steered: false,
+          loop: true,
+        },
+      ]);
+    };
+
+    // Fire once straight away rather than making the user wait out a full
+    // interval before anything happens - `/loop 1h <prompt>` should not sit
+    // idle for an hour. Safe against re-running: this effect is keyed on the
+    // loop's id, which doesn't change as runs are counted.
+    tick();
+
+    const intervalId = setInterval(tick, loop.intervalMs);
+
+    // Cleanup matters here: without it, unmounting mid-loop (or re-arming)
+    // would leave a timer running against a dead component.
+    return () => clearInterval(intervalId);
+  }, [loop?.id, loop?.intervalMs, stopLoop, showTransientHint]);
+
   // Note: intentionally does NOT gate on `!isProcessingQuestion` - while the
   // agent is still working, Enter queues the message instead of sending it
   // immediately (see the `key.return` handler below).
@@ -1365,6 +1996,30 @@ const CliChat: FC<CliChatProps> = ({
           partialContent,
           fullQuestionText
         );
+      }
+
+      // Plan mode is stated on *every* message while it's on, not once: it can
+      // be entered or left at any point (Shift+Tab works mid-turn), so each
+      // turn has to carry the state that applies to it. Sits immediately above
+      // the user's text - closest to the request it constrains - and below the
+      // memory priming added next.
+      if (isPlanMode(chatModeRef.current)) {
+        fullQuestionText = `${planModePreamble()}\n\n${fullQuestionText}\n\n${planModeReminder()}`;
+      }
+
+      // Claude Code mode's one-time priming (see toggleClaudeCodeMode).
+      // Applied after any steer wrapping so the memories sit above the whole
+      // prompt. The latch is only cleared once the message has actually been
+      // accepted by the API (further down, next to the transcript write) -
+      // clearing it here would lose the memories for the rest of the
+      // conversation on any of the failure paths in between, which abandon
+      // the send entirely and leave the user to retype.
+      const primingThisMessage =
+        pendingClaudePrimingRef.current && claudeContextRef.current !== null;
+      if (primingThisMessage && claudeContextRef.current) {
+        fullQuestionText = `${buildPrimingBlock(
+          claudeContextRef.current
+        )}\n\n${fullQuestionText}`;
       }
 
       setConversationItems((prev) => {
@@ -1609,8 +2264,13 @@ const CliChat: FC<CliChatProps> = ({
           }));
 
           const convRes = await dustClient.createConversation({
-            title: `CLI Question: ${fullQuestionText.substring(0, 30)}${
-              fullQuestionText.length > 30 ? "..." : ""
+            // Titled from what the user actually typed, not from
+            // fullQuestionText - that may carry a wrapper the user never
+            // wrote (Claude Code mode's priming block, which lands on the
+            // first message of a conversation and would otherwise become
+            // its title).
+            title: `CLI Question: ${expandedQuestionText.substring(0, 30)}${
+              expandedQuestionText.length > 30 ? "..." : ""
             }`,
             visibility: "unlisted",
             message: {
@@ -1694,6 +2354,14 @@ const CliChat: FC<CliChatProps> = ({
         activeDustClientRef.current = dustClient;
         activeConversationIdRef.current = conversation.sId;
 
+        // The message carrying the priming block is on the server now, so
+        // the latch can be dropped - anything from here on (a failed answer
+        // stream, a cancel) leaves it in the conversation's history, and
+        // re-priming a later message would only duplicate it.
+        if (primingThisMessage) {
+          pendingClaudePrimingRef.current = false;
+        }
+
         // Crash-safety net: record the user's side of the exchange before
         // waiting on the agent's (potentially long-running, potentially
         // failing) stream below.
@@ -1732,6 +2400,7 @@ const CliChat: FC<CliChatProps> = ({
           );
         }
 
+        let usageRefreshTickCount = 0;
         updateIntervalRef.current = setInterval(() => {
           updateThinkingPreview();
           setStreamingContentPreview(
@@ -1739,6 +2408,16 @@ const CliChat: FC<CliChatProps> = ({
               truncateForStreamingPreview(contentRef.current)
             )
           );
+          // A long stretch of plain-text generation (no tool calls to
+          // trigger the refresh above) would otherwise leave the status
+          // bar's numbers frozen for the whole turn - piggyback on this
+          // existing 1s tick, but only act on every 20th one so a long
+          // task still feels "live" without hammering the endpoint every
+          // second.
+          usageRefreshTickCount++;
+          if (usageRefreshTickCount % 20 === 0) {
+            refreshUsageStats();
+          }
         }, 1000);
 
         for await (const event of streamRes.value.eventStream) {
@@ -1814,6 +2493,13 @@ const CliChat: FC<CliChatProps> = ({
           } else if (event.type === "agent_action_success") {
             setActionStatus(null);
             toolCallInFlightRef.current = false;
+
+            // Each completed tool call is a natural checkpoint where usage
+            // actually changed - refresh here rather than waiting for the
+            // whole turn to end, so a long multi-tool-call task shows its
+            // context/credit numbers moving instead of sitting frozen
+            // until it's all done.
+            refreshUsageStats();
 
             // A steer requested while this tool call was running was held
             // rather than interrupting it mid-flight - fire it now that
@@ -1980,13 +2666,23 @@ const CliChat: FC<CliChatProps> = ({
   // declared - and therefore registered - before the `useInput` call below,
   // this ref is always up to date by the time that handler runs.
   const lastRawWasForwardDeleteRef = useRef(false);
+  // Home/End go further than that: Ink's parser recognizes them (see
+  // ink/build/parse-keypress.js) but the `key` object it hands to
+  // `useInput` has no `.home`/`.end` field at all, so both arrive as
+  // `input === ""` with every flag false - a complete no-op as far as this
+  // app could tell, which is why End didn't appear to do anything. Same
+  // workaround as above: read the raw sequence directly and match it
+  // against every variant these keys are known to send.
+  const lastRawSequenceRef = useRef("");
   const { internal_eventEmitter } = useStdin();
   useEffect(() => {
     if (!internal_eventEmitter) {
       return;
     }
     const handleRawInput = (chunk: Buffer | string) => {
-      lastRawWasForwardDeleteRef.current = chunk.toString() === "\x1b[3~";
+      const raw = chunk.toString();
+      lastRawSequenceRef.current = raw;
+      lastRawWasForwardDeleteRef.current = raw === "\x1b[3~";
     };
     internal_eventEmitter.on("input", handleRawInput);
     return () => {
@@ -2001,12 +2697,26 @@ const CliChat: FC<CliChatProps> = ({
     // — require a second press within 2s, with a visible hint in between.
     // (Ink's default exitOnCtrlC is disabled in index.tsx for this reason.)
     if (key.ctrl && input === "c") {
+      // Same reasoning as Esc: stop the loop too, or the interrupt looks
+      // like it didn't take when the next tick arrives.
+      stopLoop("Ctrl+C");
       if (isProcessingQuestion && abortController) {
+        setIsCancelling(true);
         void cancelCurrentGeneration();
         return;
       }
       const now = Date.now();
       if (now - lastCtrlCTimeRef.current < 2000) {
+        // A double Ctrl+C is easy to hit by mistake (e.g. reflexively
+        // interrupting a runaway turn), and unlike /exit it gives no
+        // chance to note the conversation/agent down first - print the
+        // exact command to pick it back up, right under the status bar
+        // that's about to disappear with the rest of the screen.
+        if (currentConversationId && selectedAgent) {
+          process.stdout.write(
+            `\nTo continue this conversation, run 'dustm --agent ${selectedAgent.name} --conversationId ${currentConversationId}'.\n\n`
+          );
+        }
         exit();
         return;
       }
@@ -2018,6 +2728,21 @@ const CliChat: FC<CliChatProps> = ({
       exitHintTimeoutRef.current = setTimeout(() => {
         setShowExitHint(false);
       }, 2000);
+      return;
+    }
+
+    // Shift+Tab cycles the permission mode (normal -> auto-accept -> plan),
+    // matching Claude Code. Handled here, ahead of every other key, so it
+    // works while the agent is mid-turn - switching to plan mode because you
+    // saw it about to do something you don't want is exactly when you need it.
+    //
+    // Ink reports the backtab sequence (CSI Z) as tab+shift, which is why the
+    // command selector's own Tab handler checks `!key.shift`. Skipped while an
+    // inline selector is open: those have their own Tab/Enter semantics, and
+    // changing the mode underneath a pending approval prompt would be
+    // ambiguous.
+    if (key.tab && key.shift && !inlineSelector) {
+      cycleChatMode();
       return;
     }
 
@@ -2108,6 +2833,12 @@ const CliChat: FC<CliChatProps> = ({
           void handleApproval(false);
         } else if (inlineSelector.mode === "diff") {
           void handleDiffApproval(false);
+        } else if (inlineSelector.mode === "plan") {
+          // Esc on a plan means "not this one" - a plain rejection, which keeps
+          // plan mode on. It must not simply dismiss the prompt: the
+          // present_plan tool call is still awaiting an answer, and
+          // abandoning it would hang the turn.
+          void resolvePlanDecision({ kind: "reject" });
         } else {
           setInlineSelector(null);
         }
@@ -2115,7 +2846,9 @@ const CliChat: FC<CliChatProps> = ({
       }
 
       const isFixedMode =
-        inlineSelector.mode === "approval" || inlineSelector.mode === "diff";
+        inlineSelector.mode === "approval" ||
+        inlineSelector.mode === "diff" ||
+        inlineSelector.mode === "plan";
       const filtered = isFixedMode
         ? inlineSelector.items
         : inlineSelector.items.filter((item) =>
@@ -2167,6 +2900,11 @@ const CliChat: FC<CliChatProps> = ({
 
           if (inlineSelector.mode === "diff") {
             void handleDiffApproval(selected.id === "accept");
+            return;
+          }
+
+          if (inlineSelector.mode === "plan") {
+            handlePlanChoice(selected.id);
             return;
           }
 
@@ -2231,6 +2969,19 @@ const CliChat: FC<CliChatProps> = ({
                 setInlineSelector(null);
               }
             })();
+          } else if (inlineSelector.mode === "mention") {
+            // userInput/cursorPosition were never touched while this
+            // selector was open (typing went into `query` instead, same as
+            // every other filterable mode) - so they're still exactly what
+            // they were when "@" was pressed, and mentionAnchor is where it
+            // sits. Splice the chosen path in there, in place of the "@".
+            const anchor = inlineSelector.mentionAnchor ?? cursorPosition;
+            const insertion = `@${selected.id} `;
+            const newInput =
+              userInput.slice(0, anchor) + insertion + userInput.slice(anchor);
+            setUserInput(newInput);
+            setCursorPosition(anchor + insertion.length);
+            setInlineSelector(null);
           } else if (inlineSelector.mode === "conversation") {
             void handleConversationSelected(selected.id);
             setInlineSelector(null);
@@ -2296,10 +3047,15 @@ const CliChat: FC<CliChatProps> = ({
         return;
       }
 
+      // Only the first token names the command; the rest are its arguments
+      // (see splitCommandQuery). Matching must ignore them, or a command
+      // stops being findable the moment its arguments are typed.
+      const [commandName, commandArgs] = splitCommandQuery(commandQuery);
+      const filteredCommands = commands.filter((cmd) =>
+        cmd.name.toLowerCase().startsWith(commandName.toLowerCase())
+      );
+
       if (key.downArrow) {
-        const filteredCommands = commands.filter((cmd) =>
-          cmd.name.toLowerCase().startsWith(commandQuery.toLowerCase())
-        );
         setSelectedCommandIndex((prev) =>
           Math.min(filteredCommands.length - 1, prev + 1)
         );
@@ -2307,15 +3063,12 @@ const CliChat: FC<CliChatProps> = ({
       }
 
       if (key.return) {
-        const filteredCommands = commands.filter((cmd) =>
-          cmd.name.toLowerCase().startsWith(commandQuery.toLowerCase())
-        );
         if (
           filteredCommands.length > 0 &&
           selectedCommandIndex < filteredCommands.length
         ) {
           const selectedCommand = filteredCommands[selectedCommandIndex];
-          void selectedCommand.execute({ triggerAgentSwitch });
+          void selectedCommand.execute(commandArgs);
           setShowCommandSelector(false);
           setCommandQuery("");
           setSelectedCommandIndex(0);
@@ -2328,17 +3081,19 @@ const CliChat: FC<CliChatProps> = ({
 
       // Tab completes the currently-highlighted command's name into the
       // input (shell-style), without running it - Enter still does that.
+      // A command that takes arguments gets a trailing space, so typing can
+      // continue straight into them.
       if (key.tab && !key.shift) {
-        const filteredCommands = commands.filter((cmd) =>
-          cmd.name.toLowerCase().startsWith(commandQuery.toLowerCase())
-        );
         if (
           filteredCommands.length > 0 &&
           selectedCommandIndex < filteredCommands.length
         ) {
           const selectedCommand = filteredCommands[selectedCommandIndex];
-          setCommandQuery(selectedCommand.name);
-          setCommandCursorPosition(selectedCommand.name.length);
+          const completed = selectedCommand.usage
+            ? `${selectedCommand.name} `
+            : selectedCommand.name;
+          setCommandQuery(completed);
+          setCommandCursorPosition(completed.length);
         }
         return;
       }
@@ -2359,11 +3114,10 @@ const CliChat: FC<CliChatProps> = ({
       return;
     }
 
-    // Shift+Tab to toggle auto-approval mode
-    if (key.tab && key.shift) {
-      setAutoAcceptEdits((prev) => !prev);
-      return;
-    }
+    // (Shift+Tab was handled at the top of this handler - it used to toggle
+    // auto-accept as a binary here, and now cycles all three permission modes
+    // instead. Moved up so it also works mid-turn, which is when switching to
+    // plan mode is most useful.)
 
     // Ctrl+V for an image: when the clipboard holds only an image (no
     // text), most terminals - including Windows Terminal - have nothing to
@@ -2394,6 +3148,16 @@ const CliChat: FC<CliChatProps> = ({
     }
 
     if (key.escape) {
+      // While collecting a rejection comment, Esc means "reject, never mind the
+      // comment" rather than clearing the draft: the present_plan call is still
+      // waiting, so it has to be answered one way or another.
+      if (awaitingPlanComment) {
+        void resolvePlanDecision({ kind: "reject" });
+        setUserInput("");
+        setCursorPosition(0);
+        return;
+      }
+
       // Clearing a draft (including one just recalled from the queue via
       // Up-arrow, below) takes priority over interrupting generation - so
       // Esc can discard a queued/in-progress message without also
@@ -2404,8 +3168,19 @@ const CliChat: FC<CliChatProps> = ({
         setCursorPosition(0);
         pastedBlocksRef.current = [];
         setHistoryIndex(null);
-      } else if (isProcessingQuestion && abortController) {
+        return;
+      }
+
+      // With nothing typed, Esc on a running loop stops the loop as well as
+      // interrupting the current turn. Cancelling only the turn would leave
+      // the loop to re-send moments later, which reads as Esc not working.
+      const stoppedLoop = stopLoop("Esc");
+      if (isProcessingQuestion && abortController) {
+        setIsCancelling(true);
         void cancelCurrentGeneration();
+      } else if (!stoppedLoop) {
+        // Nothing to clear, stop or cancel - leave the existing no-op
+        // behaviour rather than inventing feedback for an idle Esc.
       }
       return;
     }
@@ -2425,6 +3200,23 @@ const CliChat: FC<CliChatProps> = ({
           userInput.slice(cursorPosition);
         setUserInput(newInput);
         setCursorPosition(cursorPosition + 1);
+        return;
+      }
+
+      // Enter while collecting a rejection comment submits the comment to the
+      // waiting present_plan call, not a message to the agent. Checked before
+      // the paste heuristics below because a multi-line rejection comment is
+      // fine but a *sent message* here would leave the plan unanswered.
+      if (awaitingPlanComment) {
+        void resolvePlanDecision({
+          kind: "reject",
+          // Empty is allowed and means the same as a plain rejection - having
+          // opened the comment box and thought better of it shouldn't trap the
+          // user with nothing but Esc.
+          comment: userInput.trim() || undefined,
+        });
+        setUserInput("");
+        setCursorPosition(0);
         return;
       }
 
@@ -2675,6 +3467,42 @@ const CliChat: FC<CliChatProps> = ({
       return;
     }
 
+    // Home/End: move to the beginning/end of the current line (same target
+    // as Ctrl+A/Ctrl+E above) - see lastRawSequenceRef for why these can't
+    // be detected via `key` directly.
+    if (
+      input === "" &&
+      !key.ctrl &&
+      !key.shift &&
+      !key.meta &&
+      HOME_KEY_SEQUENCES.has(lastRawSequenceRef.current)
+    ) {
+      let newPosition = currentCursorPos;
+      while (newPosition > 0 && currentInput[newPosition - 1] !== "\n") {
+        newPosition--;
+      }
+      setCurrentCursorPos(newPosition);
+      return;
+    }
+
+    if (
+      input === "" &&
+      !key.ctrl &&
+      !key.shift &&
+      !key.meta &&
+      END_KEY_SEQUENCES.has(lastRawSequenceRef.current)
+    ) {
+      let newPosition = currentCursorPos;
+      while (
+        newPosition < currentInput.length &&
+        currentInput[newPosition] !== "\n"
+      ) {
+        newPosition++;
+      }
+      setCurrentCursorPos(newPosition);
+      return;
+    }
+
     // Regular arrow key handling (left/right for character movement)
     if (key.leftArrow && currentCursorPos > 0) {
       setCurrentCursorPos(currentCursorPos - 1);
@@ -2855,6 +3683,35 @@ const CliChat: FC<CliChatProps> = ({
         return;
       }
 
+      // "@" opens a file-mention popup, same trigger convention as most
+      // chat tools: only when it starts a fresh token (start of input, or
+      // right after whitespace), so an email address or the like typed
+      // mid-word doesn't hijack the keyboard. Falls through to a plain "@"
+      // character otherwise.
+      if (
+        input === "@" &&
+        !isInCommandMode &&
+        (cursorPosition === 0 ||
+          /\s/.test(userInput.charAt(cursorPosition - 1)))
+      ) {
+        const anchor = cursorPosition;
+        setInlineSelector({
+          mode: "mention",
+          items: [],
+          query: "",
+          selectedIndex: 0,
+          mentionAnchor: anchor,
+        });
+        void loadMentionFiles().then((items) => {
+          setInlineSelector((prev) =>
+            prev && prev.mode === "mention" && prev.mentionAnchor === anchor
+              ? { ...prev, items }
+              : prev
+          );
+        });
+        return;
+      }
+
       const newInput =
         currentInput.slice(0, currentCursorPos) +
         input +
@@ -2961,14 +3818,18 @@ const CliChat: FC<CliChatProps> = ({
         onError={setError}
         onConfirm={async (agents) => {
           setSelectedAgent(agents[0]);
-          setConversationItems([
-            {
-              key: "welcome_header",
-              type: "welcome_header",
-              agentName: agents[0].name,
-              agentDescription: agents[0].description,
-            },
-          ]);
+          // See the matching comment on the agentSearch effect above: skip
+          // this when a resume (--conversationId) is about to replace it.
+          if (!conversationId) {
+            setConversationItems([
+              {
+                key: "welcome_header",
+                type: "welcome_header",
+                agentName: agents[0].name,
+                agentDescription: agents[0].description,
+              },
+            ]);
+          }
         }}
       />
     );
@@ -3025,6 +3886,7 @@ const CliChat: FC<CliChatProps> = ({
         key={conversationRenderKey}
         conversationItems={conversationItems}
         isProcessingQuestion={isProcessingQuestion}
+        isCancelling={isCancelling}
         actionStatus={actionStatus}
         queuedMessages={messageQueue}
         thinkingPreview={thinkingPreview}
@@ -3040,12 +3902,16 @@ const CliChat: FC<CliChatProps> = ({
           inlineSelector ? inlineSelector.query.length : cursorPosition
         }
         mentionPrefix={
-          inlineSelector
+          awaitingPlanComment
+            ? "Why reject it? (Enter to send, Esc to reject without a reason) "
+            : inlineSelector
             ? inlineSelector.mode === "agent"
               ? "Switch agent: "
               : inlineSelector.mode === "file"
                 ? `📁 ${inlineSelector.currentPath ?? ""} `
-                : inlineSelector.mode === "conversation"
+                : inlineSelector.mode === "mention"
+                  ? "📎 Mention a file: "
+                  : inlineSelector.mode === "conversation"
                   ? "Resume conversation: "
                   : inlineSelector.mode === "approval" &&
                       pendingApproval &&
@@ -3053,7 +3919,9 @@ const CliChat: FC<CliChatProps> = ({
                     ? `Tool Approval Required: the agent wants to use ${pendingApproval.metadata.toolName}, what do you want to do? `
                     : inlineSelector.mode === "diff" && pendingDiffApproval
                       ? `Changes Preview: ${pendingDiffApproval.filePath} `
-                      : mentionPrefix
+                      : inlineSelector.mode === "plan"
+                        ? "Plan ready for review — approve to start implementing "
+                        : mentionPrefix
             : mentionPrefix
         }
         conversationId={currentConversationId}
@@ -3063,7 +3931,9 @@ const CliChat: FC<CliChatProps> = ({
         selectedCommandIndex={selectedCommandIndex}
         commandCursorPosition={commandCursorPosition}
         commands={commands}
-        autoAcceptEdits={autoAcceptEdits}
+        chatMode={chatMode}
+        claudeCodeMode={claudeCodeMode}
+        loop={loop}
         inlineSelector={
           inlineSelector
             ? {
@@ -3075,10 +3945,13 @@ const CliChat: FC<CliChatProps> = ({
                     ? "Select an agent:"
                     : inlineSelector.mode === "file"
                       ? "Select a file:"
-                      : inlineSelector.mode === "conversation"
+                      : inlineSelector.mode === "mention"
+                        ? "Select a file to mention:"
+                        : inlineSelector.mode === "conversation"
                         ? "Select a conversation:"
                         : inlineSelector.mode === "approval" ||
-                            inlineSelector.mode === "diff"
+                            inlineSelector.mode === "diff" ||
+                            inlineSelector.mode === "plan"
                           ? "Use Up/Down to navigate, Enter to confirm, Esc to reject:"
                           : undefined,
                 header:
@@ -3100,6 +3973,24 @@ const CliChat: FC<CliChatProps> = ({
                         approval renders the diff in full.
                       */}
                       <DiffView {...pendingDiffApproval} maxLines={14} />
+                    </Box>
+                  ) : inlineSelector.mode === "plan" ? (
+                    // The plan itself is NOT repeated here - it was already
+                    // pushed as permanent, Static scrollback the moment
+                    // requestPlanApproval was called (see plan_proposed in
+                    // Conversation.tsx), immediately above this prompt. This
+                    // header used to re-render the full plan text as
+                    // ephemeral content on every keystroke here, which is
+                    // what caused it to appear twice: Ink erases and redraws
+                    // its ephemeral region by moving the cursor up a fixed
+                    // number of lines, and that count desyncs once the region
+                    // is taller than the terminal - a real plan easily is.
+                    // The leftover, never-fully-erased ephemeral copy is
+                    // exactly what showed up sitting above the new permanent
+                    // one. Keeping this header to one line, always, is what
+                    // keeps that arithmetic safe.
+                    <Box marginBottom={1}>
+                      <Text dimColor>↑ Reviewing the plan proposed above.</Text>
                     </Box>
                   ) : undefined,
               }

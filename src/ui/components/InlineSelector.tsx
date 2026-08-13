@@ -32,7 +32,11 @@ export function InlineSelector({
   const remaining = filtered.length - visible.length;
 
   return (
-    <Box flexDirection="column">
+    // marginBottom separates the last option from whatever renders next -
+    // the status bar sits directly below this in Conversation.tsx with no
+    // gap of its own, so without this the final choice ("Reject", "Approve",
+    // ...) ran straight into the status bar line with no visual break.
+    <Box flexDirection="column" marginBottom={1}>
       {header && <Box paddingX={1}>{header}</Box>}
       {prompt && (
         <Box paddingX={1}>

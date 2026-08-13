@@ -97,9 +97,10 @@ export const CODE_BLOCK_BG = "#121212";
 // path/credits text nearby.
 export const STATUS_BAR_TEXT = "#B7B8C2";
 
-// Filled-block styling for the queued / steered message boxes under the
-// input: a title bar fading into a darker shade of the same hue for the
-// message rows. Warm gold marks "waiting", purple marks "interrupting".
+// Filled-block styling for the queued / steered / looping message boxes
+// under the input: a title bar fading into a darker shade of the same hue
+// for the message rows. Warm gold marks "waiting", purple marks
+// "interrupting", blue marks "repeating on a timer".
 //
 // Both blocks deliberately stay *dark* - light text on a dark tinted
 // background, rather than dark text on a saturated brand-color bar. A
@@ -118,3 +119,27 @@ export const STEERED_TITLE_BG = "#2B1247";
 export const STEERED_TITLE_FG = "#C9A6F0";
 export const STEERED_BODY_BG = "#1B0B2E";
 export const STEERED_BODY_FG = "#9C82C0";
+
+// Permission-mode colours for the status bar segment (see utils/chatMode.ts).
+// Deliberately a set of their own rather than reusing the queued/steered/loop
+// hues: those mark *pending work*, while this marks a standing permission
+// level, and a shared colour would imply a relationship that isn't there.
+//
+// Grey recedes for the default. Amber is the warning tone for "edits land
+// without asking". Teal is unused anywhere else in the UI, so plan mode reads
+// as its own distinct state rather than borrowing gold's "waiting" or blue's
+// "looping" connotation.
+export const MODE_NORMAL_FG = "#8A8A8A";
+export const MODE_AUTO_FG = "#E8A548";
+export const MODE_PLAN_FG = "#4FD1C5";
+
+// Blue, for the /loop block. Unlike the other two this one is persistent -
+// it stays up for as long as a loop is armed, not just while something is
+// pending - so it's pitched a touch darker than the steered pair to sit
+// quietly under the input rather than nag. Blue also keeps it clearly
+// distinct from gold "waiting" and purple "interrupting" on the same screen,
+// which can all three be visible at once.
+export const LOOP_TITLE_BG = "#0E2947";
+export const LOOP_TITLE_FG = "#9CC6F0";
+export const LOOP_BODY_BG = "#081A2E";
+export const LOOP_BODY_FG = "#7A9EC0";

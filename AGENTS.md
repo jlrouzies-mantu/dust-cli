@@ -111,6 +111,34 @@ last-synced commit (procedure step 3 above):
 - `src/utils/gitInfo.ts`, `src/utils/creditsInfo.ts`, `src/utils/contextUsage.ts` - status bar data sources
 - `src/ui/components/ThinkingIcon.tsx` - transient pulsing "Thinking" indicator
 - `src/mcp/tools/todoWrite.ts` - `todo_write` tool (`--with-tools` mode)
+- `src/utils/chatMode.ts`, `src/utils/planMode.ts`, `src/utils/planStore.ts`,
+  `src/mcp/tools/presentPlan.ts` - plan mode and the Shift+Tab mode cycle (see
+  README). Two rules to preserve here: the permission mode is **one tri-state**,
+  never separate auto/plan booleans (they contradict each other), and
+  `planMode.ts` is a module-level singleton **on purpose** - the tools that
+  respect it run in the MCP transport layer and cannot read React state, the
+  same boundary that makes `todoListEmitter` an emitter. Also: only user
+  approval clears plan mode. If you add a writing tool, gate it in its
+  `execute` and add it to `PLAN_MODE_BLOCKED_TOOLS`, or plan mode silently
+  stops being a guarantee - and append `PLAN_MODE_TOOL_NOTICE` to its
+  `description` too, or an agent that ignores the per-turn preamble has one
+  more tool it wasn't warned away from.
+- `src/utils/loopController.ts` - `/loop` and `--loop` interval parsing and
+  caps (see README). Pure and unit-tested; keep the limits (30s floor, run
+  ceiling, unit-required parsing) here rather than inlining them at call
+  sites - they exist to stop an unattended loop spending a credit balance.
+- `src/utils/claudeMemory.ts`, `src/mcp/tools/readMemory.ts`,
+  `src/mcp/tools/writeMemory.ts` - `/claude-code-mode` (see README). These
+  read and write `~/.claude`, whose directory layout and memory file format
+  are **Claude Code's own internals, not a documented contract**. If that
+  layout changes, `claudeMemory.ts` is the only place that needs updating -
+  every read there is best-effort and degrades to "absent" rather than
+  throwing, so a layout change downgrades the feature instead of breaking
+  the CLI. Don't spread `~/.claude` path knowledge into other files.
+  Note the two different confidence levels in there: the per-project memory
+  path (`projects/<encoded-cwd>/memory/`) is reverse-engineered, while
+  `CLAUDE.md` and `.claude/rules/` are documented Claude Code features. Treat
+  the former as liable to move without notice.
 - `src/types/marked-terminal.d.ts` - type shim
 - Everything under `.github/`, `scripts/`, `img/`, plus `AGENTS.md` and
   `README.md` themselves

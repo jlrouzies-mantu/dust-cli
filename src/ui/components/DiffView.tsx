@@ -76,14 +76,19 @@ export const DiffView: FC<DiffContent & { maxLines?: number }> = ({
   ...diff
 }) => {
   const allLines = computeDiffLines(diff);
-  // Capping matters for the approval prompt specifically: that lives in
-  // Ink's *non-static* output, and once that region reaches the terminal
-  // height Ink stops doing incremental updates and instead clears the whole
+  // Capping matters most for the approval prompt: that lives in Ink's
+  // *non-static* output, and once that region reaches the terminal height
+  // Ink stops doing incremental updates and instead clears the whole
   // terminal and reprints the entire transcript on every render - which
   // shows up as violent full-screen flicker. An unbounded diff (approving a
-  // several-hundred-line write_file, say) blows straight past that. The
-  // permanent transcript copy passes no maxLines, since Static output
-  // doesn't count toward that height.
+  // several-hundred-line write_file, say) blows straight past that.
+  //
+  // The permanent transcript copy (Static output, which doesn't count
+  // toward that height) is capped too, just more generously - see
+  // FILE_CHANGE_MAX_LINES in Conversation.tsx. Static can't flicker, but a
+  // newly created file is one giant "+" hunk with no real diff to speak
+  // of, and dumping the whole thing into scrollback isn't useful on its
+  // own terms even without the flicker risk.
   const lines =
     maxLines !== undefined && allLines.length > maxLines
       ? allLines.slice(0, maxLines)
@@ -102,8 +107,8 @@ export const DiffView: FC<DiffContent & { maxLines?: number }> = ({
       })}
       {hiddenCount > 0 && (
         <Text dimColor>
-          … {hiddenCount} more diff line{hiddenCount === 1 ? "" : "s"} (shown
-          in full once applied)
+          … {hiddenCount} more diff line{hiddenCount === 1 ? "" : "s"} not
+          shown ({diff.filePath} has the full contents)
         </Text>
       )}
     </>

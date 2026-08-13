@@ -1,5 +1,5 @@
 import type { MeResponseType } from "@dust-tt/client";
-import { Box, Text } from "ink";
+import { Box, Text, useApp, useInput } from "ink";
 import Spinner from "ink-spinner";
 import { jwtDecode } from "jwt-decode";
 import fetch from "node-fetch";
@@ -58,6 +58,18 @@ const Auth: FC<AuthProps> = ({ force = false, apiKey, wId }) => {
   const [showWorkspaceSelector, setShowWorkspaceSelector] = useState(false);
   const [authComplete, setAuthComplete] = useState(false);
   const [userInfo, setUserInfo] = useState<MeResponseType["user"] | null>(null);
+
+  const { exit } = useApp();
+
+  // Once authComplete renders, the process has nothing left to do and would
+  // otherwise sit there indefinitely - Ink doesn't exit on its own just
+  // because there's no more pending work, so without this the only way out
+  // is Ctrl+C. Enter is the natural "done reading this, move on" key here.
+  useInput((_input, key) => {
+    if (authComplete && key.return) {
+      exit();
+    }
+  });
 
   // Check for environment variables first, then fall back to passed flags
   const effectiveApiKey = apiKey || process.env.DUST_API_KEY;
@@ -389,6 +401,11 @@ const Auth: FC<AuthProps> = ({ force = false, apiKey, wId }) => {
         <Box marginTop={1}>
           <Text>Logged in as: </Text>
           <Text bold>{userInfo?.email}</Text>
+        </Box>
+        <Box marginTop={1}>
+          <Text dimColor>
+            Push 'Enter' to exit, and use 'dustm' to start a chat.
+          </Text>
         </Box>
       </Box>
     );

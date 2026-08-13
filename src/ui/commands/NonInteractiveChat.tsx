@@ -6,7 +6,13 @@ import { useFileSystemServer } from "../../mcp/servers/fsServer.js";
 import { getDustClient } from "../../utils/dustClient.js";
 import { normalizeError } from "../../utils/errors.js";
 import {
+  DEFAULT_MAX_LOOP_RUNS,
+  MAX_LOOP_RUNS_CEILING,
+  parseInterval,
+} from "../../utils/loopController.js";
+import {
   fetchAgentMessageFromConversation,
+  runNonInteractiveLoop,
   sendNonInteractiveMessage,
   validateNonInteractiveFlags,
 } from "./chat/nonInteractive.js";
@@ -20,6 +26,9 @@ interface NonInteractiveChatProps {
   projectName?: string;
   projectId?: string;
   withTools?: boolean;
+  loop?: string;
+  maxRuns?: number;
+  loopFreshConversation?: boolean;
 }
 
 const NonInteractiveChat: FC<NonInteractiveChatProps> = ({
@@ -31,6 +40,9 @@ const NonInteractiveChat: FC<NonInteractiveChatProps> = ({
   projectName,
   projectId,
   withTools,
+  loop,
+  maxRuns,
+  loopFreshConversation,
 }) => {
   const [error, setError] = useState<string | null>(null);
 
@@ -49,6 +61,39 @@ const NonInteractiveChat: FC<NonInteractiveChatProps> = ({
       );
       if (validationError) {
         setError(validationError);
+        return;
+      }
+
+      // --loop validation happens up front, alongside the other flag checks:
+      // a bad interval or run cap must fail before any message is sent, not
+      // after the first run has already spent credits.
+      let loopConfig: { intervalMs: number; maxRuns: number } | null = null;
+      if (loop !== undefined) {
+        if (!message) {
+          setError("Invalid usage: --loop requires --message");
+          return;
+        }
+        if (messageId) {
+          setError("Invalid usage: --loop cannot be used with --messageId");
+          return;
+        }
+        const interval = parseInterval(loop);
+        if (!interval.ok) {
+          setError(`Invalid --loop value: ${interval.error}`);
+          return;
+        }
+        const runs = maxRuns ?? DEFAULT_MAX_LOOP_RUNS;
+        if (!Number.isInteger(runs) || runs < 1 || runs > MAX_LOOP_RUNS_CEILING) {
+          setError(
+            `Invalid --maxRuns value: must be a whole number between 1 and ${MAX_LOOP_RUNS_CEILING}`
+          );
+          return;
+        }
+        loopConfig = { intervalMs: interval.value, maxRuns: runs };
+      } else if (maxRuns !== undefined || loopFreshConversation) {
+        setError(
+          "Invalid usage: --maxRuns and --loopFreshConversation require --loop"
+        );
         return;
       }
 
@@ -152,6 +197,22 @@ const NonInteractiveChat: FC<NonInteractiveChatProps> = ({
           }
         }
 
+        if (loopConfig) {
+          await runNonInteractiveLoop(
+            message,
+            selectedAgent,
+            me,
+            { ...loopConfig, freshConversation: loopFreshConversation },
+            conversationId,
+            details,
+            projectName,
+            projectId,
+            setError,
+            fileSystemServerId
+          );
+          return;
+        }
+
         // Call the standalone function
         await sendNonInteractiveMessage(
           message,
@@ -179,6 +240,9 @@ const NonInteractiveChat: FC<NonInteractiveChatProps> = ({
     projectName,
     projectId,
     withTools,
+    loop,
+    maxRuns,
+    loopFreshConversation,
   ]);
 
   if (error) {

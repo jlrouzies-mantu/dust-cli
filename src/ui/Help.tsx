@@ -94,6 +94,33 @@ const Help: FC = () => {
       </Box>
       <Box marginLeft={2}>
         <Text>
+          <Text bold>--plan</Text> Start the interactive chat in plan mode: the
+          agent researches read-only and must get a plan approved before it
+          edits anything. Shift+Tab cycles normal / auto-accept / plan.
+        </Text>
+      </Box>
+      <Box marginLeft={2}>
+        <Text>
+          <Text bold>--loop</Text> Re-send --message on an interval, e.g. 30s,
+          5m, 2h (requires --message; use /loop inside an interactive chat).{" "}
+          <Text bold color="yellow">
+            WARNING: every run is a full agent turn and spends credits.
+          </Text>
+        </Text>
+      </Box>
+      <Box marginLeft={2}>
+        <Text>
+          <Text bold>--maxRuns</Text> Maximum runs for --loop (default 50)
+        </Text>
+      </Box>
+      <Box marginLeft={2}>
+        <Text>
+          <Text bold>--loopFreshConversation</Text> Start each --loop run in a
+          new conversation instead of continuing the same one
+        </Text>
+      </Box>
+      <Box marginLeft={2}>
+        <Text>
           <Text bold>-c, --conversationId</Text> Conversation ID (use with
           --agent and --message, or with --messageId)
         </Text>

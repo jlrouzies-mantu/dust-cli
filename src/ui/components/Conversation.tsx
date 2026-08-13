@@ -720,15 +720,28 @@ const _Conversation: FC<ConversationProps> = ({
         </Box>
       )}
       {!showCommandSelector && !inlineSelector && (
-        <Box marginTop={0} paddingLeft={1}>
-          <Text dimColor>
-            {isProcessingQuestion ? "Enter to queue" : "Enter to send"} ·
-            Ctrl/Shift+Enter for new line · ESC to{" "}
-            {isProcessingQuestion ? "interrupt" : "clear"}
-            {isProcessingQuestion && " · Ctrl+S to steer"}
-            {conversationId && " · Ctrl+G to open in browser"}
-          </Text>
-        </Box>
+        <>
+          <Box marginTop={0} paddingLeft={1}>
+            <Text dimColor>
+              {isProcessingQuestion ? "Enter to queue" : "Enter to send"} ·
+              Ctrl/Shift+Enter for new line · ESC to{" "}
+              {isProcessingQuestion ? "interrupt" : "clear"}
+              {isProcessingQuestion && " · Ctrl+S to steer"}
+              {conversationId && " · Ctrl+G to open in browser"}
+            </Text>
+          </Box>
+          {/*
+            A thin rule between the keyboard-shortcut hint and the status
+            bar below it - "how to use this box" and "what's going on"
+            were sitting flush against each other with nothing to tell
+            them apart at a glance.
+          */}
+          <Box paddingLeft={1}>
+            <Text dimColor>
+              {"─".repeat(Math.max(0, (stdout?.columns || 80) - 2))}
+            </Text>
+          </Box>
+        </>
       )}
       {/*
         The status bar is packed into lines by hand (see statusBarLines) and
@@ -826,7 +839,6 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
               {/* No folder path here - the status bar already shows it. */}
               <Text dimColor>
                 Dust CLI v{CLI_VERSION} (upstream v{UPSTREAM_CLI_VERSION})
-                {gitBranch && ` · branch: ${gitBranch}`}
               </Text>
               <Text dimColor>
                 Chatting with{" "}

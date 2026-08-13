@@ -5,6 +5,7 @@ import type {
   DustAPI,
   GetAgentConfigurationsResponseType,
 } from "@dust-tt/client";
+import chalk from "chalk";
 import { readdir, stat } from "fs/promises";
 import { Box, Text, useApp, useInput, useStdin, useStdout } from "ink";
 import Spinner from "ink-spinner";
@@ -410,6 +411,18 @@ const CliChat: FC<CliChatProps> = ({
   );
   const [isResolvingSpace, setIsResolvingSpace] = useState(
     !!(projectName || projectId)
+  );
+  // Startup resume (`--conversationId` / `--resume`) in progress. Rendered as
+  // an ephemeral loading screen rather than a "Loading conversation..." line
+  // pushed into conversationItems, because <Static> is append-only: it
+  // remembers how many items it has already committed and renders only the
+  // ones past that index. Committing a loading line first therefore made
+  // Static treat index 0 as already-drawn, so when the fetched history
+  // replaced the array its *first* item - the welcome header - was skipped
+  // and never appeared. Keeping Static empty until the real history lands
+  // means it renders that array from index 0, header included.
+  const [isLoadingResume, setIsLoadingResume] = useState(
+    Boolean(conversationId)
   );
   const [actionStatus, setActionStatus] = useState<string | null>(null);
   const [thinkingPreview, setThinkingPreview] = useState("");
@@ -1813,25 +1826,21 @@ const CliChat: FC<CliChatProps> = ({
     }
     resumeLoadedRef.current = true;
 
-    setConversationItems((prev) => [
-      ...prev,
-      {
-        key: `loading_resume_init_${Date.now()}`,
-        type: "agent_message_content_line" as const,
-        text: "Loading conversation...",
-        index: 0,
-      },
-    ]);
-
+    // No "Loading conversation..." item pushed here on purpose - it renders
+    // as an ephemeral screen instead (see isLoadingResume), so <Static>
+    // stays empty until the real history arrives and can't swallow the
+    // welcome header at index 0.
     void (async () => {
       const dustClientRes = await getDustClient();
       if (dustClientRes.isErr()) {
         setError(dustClientRes.error.message);
+        setIsLoadingResume(false);
         return;
       }
       const dustClient = dustClientRes.value;
       if (!dustClient) {
         setError("Authentication required. Run `dustm login` first.");
+        setIsLoadingResume(false);
         return;
       }
 
@@ -1840,6 +1849,7 @@ const CliChat: FC<CliChatProps> = ({
       });
       if (convRes.isErr()) {
         setError(`Failed to load conversation: ${convRes.error.message}`);
+        setIsLoadingResume(false);
         return;
       }
 
@@ -1848,9 +1858,19 @@ const CliChat: FC<CliChatProps> = ({
         description: selectedAgent.description,
       });
 
-      await clearTerminal();
-      setConversationRenderKey((k) => k + 1);
+      // Deliberately no clearTerminal()/conversationRenderKey bump here,
+      // unlike /new and /clear. Those manually wipe the terminal with a
+      // raw ANSI write because they're replacing content that's already
+      // on screen with a genuinely blank slate - but a raw write outside
+      // Ink's own render cycle desyncs Ink's internal "what did I last
+      // write" cache from the real terminal, and the next diffed render
+      // can then skip re-emitting parts of a line it wrongly believes are
+      // unchanged. Nothing here needs that wipe: until this point the only
+      // thing drawn is the ephemeral loading screen, which Ink erases
+      // itself, and <Static> has committed nothing yet - so it renders the
+      // whole resumed history (welcome header first) from a clean slate.
       setConversationItems(items);
+      setIsLoadingResume(false);
       void getContextUsage(conversationId).then(setContextUsageIfPresent);
       void getConsumedCredits().then(setConsumedCreditsIfPresent);
     })();
@@ -2713,8 +2733,9 @@ const CliChat: FC<CliChatProps> = ({
         // exact command to pick it back up, right under the status bar
         // that's about to disappear with the rest of the screen.
         if (currentConversationId && selectedAgent) {
+          const resumeCommand = `dustm --agent ${selectedAgent.name} --conversationId ${currentConversationId}`;
           process.stdout.write(
-            `\nTo continue this conversation, run 'dustm --agent ${selectedAgent.name} --conversationId ${currentConversationId}'.\n\n`
+            `\nTo continue this conversation, run '${chalk.yellow(resumeCommand)}'.\n\n`
           );
         }
         exit();
@@ -3794,6 +3815,22 @@ const CliChat: FC<CliChatProps> = ({
             <Text color="gray">Press Ctrl+C to exit</Text>
           </Box>
         </Box>
+      </Box>
+    );
+  }
+
+  // Startup resume in progress. Deliberately placed after the error branch
+  // above, so a failed resume still surfaces its error instead of sitting on
+  // this screen forever. Rendering *only* this (rather than the chat UI with
+  // a loading line inside it) is what keeps <Static> empty until the history
+  // lands - see isLoadingResume for why that matters.
+  if (isLoadingResume) {
+    return (
+      <Box flexDirection="column" marginBottom={1}>
+        <Text color={MANTU_THINKING_PINK}>
+          <ThinkingIcon /> Loading conversation
+          <Spinner type="simpleDots" />
+        </Text>
       </Box>
     );
   }

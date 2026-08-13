@@ -19,9 +19,11 @@ interface InputBoxProps {
 // ones came from the picker.
 const MENTION_TOKEN_RE = /@\S+/g;
 
-// Splits a line into plain-text runs and gold/dim/italic mention spans, so
+// Splits a line into plain-text runs and gold/bold/italic mention spans, so
 // an inserted "@file" reads as a distinct reference at a glance instead of
-// blending into the rest of the draft.
+// blending into the rest of the draft. Bold rather than dim - dimming
+// MANTU_GOLD washes it out to near-illegible against a dark terminal
+// background, defeating the point of highlighting it at all.
 function renderWithMentions(text: string, keyPrefix: string): React.ReactNode {
   if (!text.includes("@")) {
     return text;
@@ -35,7 +37,7 @@ function renderWithMentions(text: string, keyPrefix: string): React.ReactNode {
       parts.push(text.slice(lastIndex, index));
     }
     parts.push(
-      <Text key={`${keyPrefix}_mention_${matchCount++}`} color={MANTU_GOLD} dimColor italic>
+      <Text key={`${keyPrefix}_mention_${matchCount++}`} color={MANTU_GOLD} bold italic>
         {match[0]}
       </Text>
     );

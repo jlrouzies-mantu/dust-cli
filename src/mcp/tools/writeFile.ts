@@ -3,6 +3,11 @@ import path from "path";
 import { z } from "zod";
 
 import { normalizeError } from "../../utils/errors.js";
+import {
+  PLAN_MODE_TOOL_NOTICE,
+  isPlanModeActive,
+  planModeRefusal,
+} from "../../utils/planMode.js";
 import type { McpTool } from "../types/tools.js";
 
 export class WriteFileTool implements McpTool {
@@ -24,7 +29,8 @@ export class WriteFileTool implements McpTool {
     "2. `content` NEEDS TO contain the complete, final content of the file - this tool does not merge " +
     "or append, it writes the full file contents.\n\n" +
     "If the file already exists, prefer the edit_file tool for targeted changes; this tool will fully " +
-    "overwrite it. Parent directories are created automatically if they do not exist.";
+    "overwrite it. Parent directories are created automatically if they do not exist." +
+    PLAN_MODE_TOOL_NOTICE;
 
   inputSchema = z.object({
     path: z
@@ -54,6 +60,19 @@ export class WriteFileTool implements McpTool {
     content,
   }: z.infer<typeof this.inputSchema>) {
     try {
+      // Checked before anything else, including path validation: while
+      // planning, the answer is the same regardless of whether the arguments
+      // were well-formed, and a validation error would misleadingly suggest
+      // that fixing the path would let the write through.
+      if (isPlanModeActive()) {
+        return {
+          content: [
+            { type: "text" as const, text: planModeRefusal(this.name) },
+          ],
+          isError: true,
+        };
+      }
+
       if (!path.isAbsolute(filePath)) {
         throw new Error(`Path must be absolute: ${filePath}`);
       }

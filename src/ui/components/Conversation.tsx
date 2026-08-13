@@ -17,6 +17,11 @@ import type { TodoItem } from "../../mcp/tools/todoWrite.js";
 import {
   BUG_REPORT_YELLOW,
   CODE_BLOCK_BG,
+  LOOP_BODY_BG,
+  LOOP_BODY_FG,
+  LOOP_TITLE_BG,
+  LOOP_TITLE_FG,
+  MODE_PLAN_FG,
   MANTU_AGENT_ACCENT,
   MANTU_GOLD,
   MANTU_PURPLE,
@@ -39,9 +44,14 @@ import {
 import type { ContextUsage } from "../../utils/contextUsage.js";
 import type { CreditsUsage } from "../../utils/creditsInfo.js";
 import type { MarkdownSegment } from "../../utils/markdown.js";
+import { renderMarkdownSegments } from "../../utils/markdown.js";
 import { formatFileSize, isImageFile } from "../../utils/fileHandling.js";
+import type { ChatMode } from "../../utils/chatMode.js";
+import { chatModeColor, chatModeLabel } from "../../utils/chatMode.js";
 import { getGitBranch } from "../../utils/gitInfo.js";
 import { useTerminalSize } from "../../utils/hooks/use_terminal_size.js";
+import type { LoopState } from "../../utils/loopController.js";
+import { loopBlockTitle } from "../../utils/loopController.js";
 import { clearTerminal } from "../../utils/terminal.js";
 import { CLI_VERSION, UPSTREAM_CLI_VERSION } from "../../utils/version.js";
 import type { Command } from "../commands/types.js";
@@ -147,6 +157,15 @@ function renderCreditsDots(percentUsed: number): string {
   );
 }
 
+// Caps a file_change diff even in its permanent, Static-rendered form - a
+// newly created file has no real "diff" at all, just every line as a "+",
+// so an unbounded view here means a several-hundred-line file gets dumped
+// into the transcript wholesale. Static output doesn't cause the ephemeral
+// approval prompt's flicker problem (see DiffView's own comment on why that
+// one stays uncapped there), but "won't cause flicker" isn't the same as
+// "should show everything" - the file itself is right there on disk.
+const FILE_CHANGE_MAX_LINES = 30;
+
 export type ConversationItem = { key: string } & (
   | {
       type: "welcome_header";
@@ -203,6 +222,40 @@ export type ConversationItem = { key: string } & (
       todos: TodoItem[];
       index: number;
     }
+  | {
+      // The full plan, pushed the moment present_plan is called - before the
+      // user has even decided, and before the ephemeral approval selector
+      // opens. Immutable from here on: Static never re-renders an item once
+      // printed, which is exactly why this exists as its own item instead of
+      // showing the plan only in the (ephemeral) approval prompt's header.
+      //
+      // That used to be the only place the plan text appeared, and it broke:
+      // Ink's ephemeral region is erased and redrawn by moving the cursor up
+      // N lines and repainting, and that arithmetic desyncs once the region
+      // is taller than the terminal (a real plan easily is). The visible
+      // symptom was the plan appearing twice - the old ephemeral copy never
+      // fully erased, sitting above the new permanent one pushed on
+      // resolution. Printing it exactly once, immediately, and never as
+      // ephemeral content again is what actually fixes that, rather than
+      // just tuning how many lines the ephemeral copy was allowed to show.
+      type: "plan_proposed";
+      planMarkdown: string;
+    }
+  | {
+      // The user's decision on the plan proposed above. Deliberately carries
+      // no plan text - it's already permanent on screen from plan_proposed,
+      // and repeating it here is exactly what caused the duplicate-rendering
+      // bug this type replaces (see plan_proposed's comment).
+      type: "plan_decision";
+      // Where the plan was saved (null when the save failed, or when it was
+      // rejected and therefore never saved).
+      filePath: string | null;
+      // Which of the four decisions was taken, and the rejection comment when
+      // one was given - both worth keeping in scrollback, since "approved but
+      // told to wait" and "approved, go" read very differently later.
+      outcome: "approved-auto" | "approved-wait" | "rejected";
+      comment?: string;
+    }
   | ({
       // A file write/edit that was approved and applied. Pushed once
       // approval resolves (whether interactively or via auto-accept), so it
@@ -218,8 +271,18 @@ export type ConversationItem = { key: string } & (
 interface ConversationProps {
   conversationItems: ConversationItem[];
   isProcessingQuestion: boolean;
+  // True from the moment Esc/Ctrl+C requests a cancel until the turn
+  // actually ends - overrides the Thinking/tool-status line below with an
+  // immediate "Cancelling..." so the keypress doesn't look ignored during
+  // the round trip to the server.
+  isCancelling: boolean;
   actionStatus: string | null;
-  queuedMessages: { id: string; text: string; steered: boolean }[];
+  queuedMessages: {
+    id: string;
+    text: string;
+    steered: boolean;
+    loop?: boolean;
+  }[];
   thinkingPreview: string;
   streamingContentPreview: MarkdownSegment[];
   showExitHint: boolean;
@@ -238,7 +301,10 @@ interface ConversationProps {
   selectedCommandIndex: number;
   commandCursorPosition: number;
   commands?: Command[];
-  autoAcceptEdits: boolean;
+  chatMode: ChatMode;
+  claudeCodeMode: boolean;
+  // Non-null while a /loop is armed; drives the persistent Looping block.
+  loop: LoopState | null;
   inlineSelector?: {
     items: InlineSelectorItem[];
     query: string;
@@ -251,6 +317,7 @@ interface ConversationProps {
 const _Conversation: FC<ConversationProps> = ({
   conversationItems,
   isProcessingQuestion,
+  isCancelling,
   actionStatus,
   queuedMessages,
   thinkingPreview,
@@ -271,7 +338,9 @@ const _Conversation: FC<ConversationProps> = ({
   selectedCommandIndex,
   commandCursorPosition,
   commands = [],
-  autoAcceptEdits,
+  chatMode,
+  claudeCodeMode,
+  loop,
   inlineSelector,
 }: ConversationProps) => {
   // Computed once per mount (not per keystroke) — getGitBranch spawns a
@@ -298,6 +367,12 @@ const _Conversation: FC<ConversationProps> = ({
     const add = (plain: string, colored: string) =>
       segments.push({ plain, colored });
 
+    // Mode first, and unconditionally - it's the one field that changes what
+    // the agent is allowed to do, so it gets the most stable position (the
+    // segments after it come and go depending on what's available).
+    const modeLabel = chatModeLabel(chatMode);
+    add(modeLabel, chalk.hex(chatModeColor(chatMode))(modeLabel));
+
     if (workspaceName) {
       add(workspaceName, chalk.hex(STATUS_BAR_WORKSPACE)(workspaceName));
     }
@@ -306,8 +381,10 @@ const _Conversation: FC<ConversationProps> = ({
       add(gitBranch, chalk.hex(STATUS_BAR_BRANCH)(gitBranch));
     }
     if (conversationId) {
-      const shortId = conversationId.slice(0, 8);
-      add(shortId, chalk.dim(shortId));
+      // The full sId, not a truncated prefix - a shortened ID here doesn't
+      // match the one shown in the web app (or the one --conversationId
+      // expects), which made it look wrong/unusable for resuming.
+      add(conversationId, chalk.dim(conversationId));
     }
     if (contextUsage) {
       const used = formatCompactCount(contextUsage.contextUsage);
@@ -362,10 +439,20 @@ const _Conversation: FC<ConversationProps> = ({
       }
     }
 
-    // Greedily pack whole segments into lines that fit. -2 accounts for the
-    // container's paddingLeft plus a column of slack, so the terminal can't
-    // wrap a line on its own either.
-    const maxWidth = Math.max(20, (stdout?.columns || 80) - 2);
+    // Greedily pack whole segments into lines that fit. The budget is
+    // deliberately conservative - 1 column for the container's paddingLeft,
+    // plus 5 more of slack - rather than the exact terminal width: getting
+    // right up against the real edge is what triggers the wrap-ansi 24-bit
+    // colour bug this whole packing scheme exists to avoid in the first
+    // place (see the render site's comment). Ink's own truncate-end still
+    // has to measure a string that's already full of concatenated hex SGR
+    // codes (segments are pre-colored via chalk, not nested <Text>), and
+    // getting that measurement wrong by even a couple of columns is enough
+    // for the terminal itself to wrap the overflow - which is exactly what
+    // showed up as the credits segment tearing across two lines with the
+    // colour boundary in the wrong place. The extra slack costs an earlier
+    // line break sometimes; that's a fine trade against a broken one.
+    const maxWidth = Math.max(20, (stdout?.columns || 80) - 6);
     const lines: { plain: string; colored: string }[] = [];
     for (const segment of segments) {
       const current = lines[lines.length - 1];
@@ -384,6 +471,7 @@ const _Conversation: FC<ConversationProps> = ({
     }
     return lines.map((line) => line.colored);
   }, [
+    chatMode,
     workspaceName,
     displayPath,
     gitBranch,
@@ -415,7 +503,20 @@ const _Conversation: FC<ConversationProps> = ({
         </Box>
       )}
 
+      {/*
+        Both this streaming preview and the spinner block below are gated on
+        `!inlineSelector` too: while an inline selector prompt is open
+        (approving a tool call, a diff, or a plan), the turn is effectively
+        paused waiting on the user, so a ticking "Thinking…" spinner is both
+        inaccurate and - more importantly - the thing that forces a full
+        terminal repaint on every animation frame. That repaint is fine for a
+        few lines, but is exactly what made a tall prompt (a full plan, a
+        large diff) flicker badly enough that they used to be capped instead.
+        Freezing here removes the repeated re-render, which is what makes
+        showing a plan in full (see the "plan" mode header below) safe.
+      */}
       {isProcessingQuestion &&
+        !inlineSelector &&
         streamingContentPreview.map((segment, index) =>
           segment.type === "code" ? (
             <Box
@@ -437,9 +538,15 @@ const _Conversation: FC<ConversationProps> = ({
           )
         )}
 
-      {isProcessingQuestion && (
+      {isProcessingQuestion && !inlineSelector && (
         <Box marginTop={1}>
-          {actionStatus ? (
+          {isCancelling ? (
+            <Text color="red">
+              {" "}
+              ✗ Cancelling
+              <Spinner type="simpleDots" />
+            </Text>
+          ) : actionStatus ? (
             <Text color="yellow">
               {" "}
               <ThinkingIcon /> {actionStatus}
@@ -461,91 +568,120 @@ const _Conversation: FC<ConversationProps> = ({
         </Box>
       )}
 
-      {queuedMessages.length > 0 &&
-        (() => {
-          const terminalWidth = stdout?.columns || 80;
+      {(() => {
+        const terminalWidth = stdout?.columns || 80;
 
-          const renderQueueBlock = (
-            items: typeof queuedMessages,
-            title: string,
-            hint: string,
-            titleBg: string,
-            titleFg: string,
-            bodyBg: string,
-            bodyFg: string
-          ) => {
-            if (items.length === 0) {
-              return null;
-            }
-            const titleText = `${title} (${items.length}) — ${hint}`;
-            const itemTexts = items.map(
-              (item, index) =>
-                `${index + 1}. ${item.text.split("\n")[0]}${
-                  item.text.includes("\n") ? " …" : ""
-                }`
-            );
+        // Loop ticks are enqueued like any other message, but they're
+        // represented by the persistent Looping block below rather than the
+        // amber Queued one - showing the same prompt in both would read as
+        // two pending messages when there's only one.
+        const steeredMessages = queuedMessages.filter((m) => m.steered);
+        const loopMessages = queuedMessages.filter((m) => m.loop && !m.steered);
+        const plainQueued = queuedMessages.filter((m) => !m.steered && !m.loop);
 
-            // Every row is padded to one shared width so the background
-            // paints as a solid block: Ink's backgroundColor only fills
-            // behind actual characters, so a short row would otherwise
-            // leave a ragged edge (same reason code blocks need
-            // padCodeBlockToBlockWidth). Capped to the terminal width so a
-            // narrow window can't wrap a row and break the block.
-            const blockWidth = Math.min(
-              Math.max(titleText.length, ...itemTexts.map((t) => t.length)) + 2,
-              terminalWidth - 2
-            );
-            const padRow = (text: string) =>
-              ` ${text} `.padEnd(blockWidth).slice(0, blockWidth);
+        const renderBlock = (
+          key: string,
+          titleText: string,
+          rows: { id: string; text: string }[],
+          titleBg: string,
+          titleFg: string,
+          bodyBg: string,
+          bodyFg: string
+        ) => {
+          const rowTexts = rows.map(
+            (row) =>
+              `${row.text.split("\n")[0]}${row.text.includes("\n") ? " …" : ""}`
+          );
 
-            return (
-              <Box
-                key={title}
-                flexDirection="column"
-                marginTop={1}
-                marginLeft={1}
-              >
-                <Text backgroundColor={titleBg} color={titleFg} bold>
-                  {padRow(titleText)}
-                </Text>
-                {itemTexts.map((text, index) => (
-                  <Text
-                    key={items[index].id}
-                    backgroundColor={bodyBg}
-                    color={bodyFg}
-                  >
-                    {padRow(text)}
-                  </Text>
-                ))}
-              </Box>
-            );
-          };
+          // Every row is padded to one shared width so the background
+          // paints as a solid block: Ink's backgroundColor only fills
+          // behind actual characters, so a short row would otherwise
+          // leave a ragged edge (same reason code blocks need
+          // padCodeBlockToBlockWidth). Capped to the terminal width so a
+          // narrow window can't wrap a row and break the block.
+          const blockWidth = Math.min(
+            Math.max(titleText.length, ...rowTexts.map((t) => t.length)) + 2,
+            terminalWidth - 2
+          );
+          const padRow = (text: string) =>
+            ` ${text} `.padEnd(blockWidth).slice(0, blockWidth);
 
-          // Steered messages interrupt the current turn and run first, so
-          // show that block above the plain queue.
           return (
-            <>
-              {renderQueueBlock(
-                queuedMessages.filter((m) => m.steered),
-                "Steered",
-                "interrupting the current turn, sent next",
+            <Box key={key} flexDirection="column" marginTop={1} marginLeft={1}>
+              <Text backgroundColor={titleBg} color={titleFg} bold>
+                {padRow(titleText)}
+              </Text>
+              {rowTexts.map((text, index) => (
+                <Text
+                  key={rows[index].id}
+                  backgroundColor={bodyBg}
+                  color={bodyFg}
+                >
+                  {padRow(text)}
+                </Text>
+              ))}
+            </Box>
+          );
+        };
+
+        // Numbered rows, as the queue is ordered and the position matters.
+        const numbered = (items: typeof queuedMessages) =>
+          items.map((item, index) => ({
+            id: item.id,
+            text: `${index + 1}. ${item.text}`,
+          }));
+
+        return (
+          <>
+            {/* Steered messages interrupt the current turn and run first, so
+                this block sits above the plain queue. */}
+            {steeredMessages.length > 0 &&
+              renderBlock(
+                "steered",
+                `Steered (${steeredMessages.length}) — interrupting the current turn, sent next`,
+                numbered(steeredMessages),
                 STEERED_TITLE_BG,
                 STEERED_TITLE_FG,
                 STEERED_BODY_BG,
                 STEERED_BODY_FG
               )}
-              {renderQueueBlock(
-                queuedMessages.filter((m) => !m.steered),
-                "Queued",
-                "Up/Backspace to edit · Esc to cancel · Ctrl+S to steer",
+            {plainQueued.length > 0 &&
+              renderBlock(
+                "queued",
+                `Queued (${plainQueued.length}) — Up/Backspace to edit · Esc to cancel · Ctrl+S to steer`,
+                numbered(plainQueued),
                 QUEUED_TITLE_BG,
                 QUEUED_TITLE_FG,
                 QUEUED_BODY_BG,
                 QUEUED_BODY_FG
               )}
-            </>
-          );
-        })()}
+            {/* Persistent while a loop is armed - unlike the two above, it
+                isn't gated on anything being queued. A loop sends messages
+                and spends credits on its own, so it stays on screen for as
+                long as that's true. Rendered last so it keeps a fixed
+                position directly above the input as the blocks above it come
+                and go. */}
+            {loop &&
+              renderBlock(
+                "looping",
+                // terminalWidth - 4: the block is capped at terminalWidth - 2
+                // and padRow spends two of those on the surrounding spaces,
+                // so that's what a title can actually occupy without being
+                // sliced.
+                loopBlockTitle(
+                  loop,
+                  loopMessages.length > 0,
+                  terminalWidth - 4
+                ),
+                [{ id: `loop_prompt_${loop.id}`, text: loop.prompt }],
+                LOOP_TITLE_BG,
+                LOOP_TITLE_FG,
+                LOOP_BODY_BG,
+                LOOP_BODY_FG
+              )}
+          </>
+        );
+      })()}
 
       <InputBox
         userInput={showCommandSelector ? `/${commandQuery}` : userInput}
@@ -554,7 +690,7 @@ const _Conversation: FC<ConversationProps> = ({
         }
         isProcessingQuestion={isProcessingQuestion}
         mentionPrefix={mentionPrefix}
-        autoAcceptEdits={autoAcceptEdits}
+        claudeCodeMode={claudeCodeMode}
       />
       {showCommandSelector && (
         <CommandSelector
@@ -584,15 +720,28 @@ const _Conversation: FC<ConversationProps> = ({
         </Box>
       )}
       {!showCommandSelector && !inlineSelector && (
-        <Box marginTop={0} paddingLeft={1}>
-          <Text dimColor>
-            {isProcessingQuestion ? "Enter to queue" : "Enter to send"} ·
-            Ctrl/Shift+Enter for new line · ESC to{" "}
-            {isProcessingQuestion ? "interrupt" : "clear"}
-            {isProcessingQuestion && " · Ctrl+S to steer"}
-            {conversationId && " · Ctrl+G to open in browser"}
-          </Text>
-        </Box>
+        <>
+          <Box marginTop={0} paddingLeft={1}>
+            <Text dimColor>
+              {isProcessingQuestion ? "Enter to queue" : "Enter to send"} ·
+              Ctrl/Shift+Enter for new line · ESC to{" "}
+              {isProcessingQuestion ? "interrupt" : "clear"}
+              {isProcessingQuestion && " · Ctrl+S to steer"}
+              {conversationId && " · Ctrl+G to open in browser"}
+            </Text>
+          </Box>
+          {/*
+            A thin rule between the keyboard-shortcut hint and the status
+            bar below it - "how to use this box" and "what's going on"
+            were sitting flush against each other with nothing to tell
+            them apart at a glance.
+          */}
+          <Box paddingLeft={1}>
+            <Text dimColor>
+              {"─".repeat(Math.max(0, (stdout?.columns || 80) - 2))}
+            </Text>
+          </Box>
+        </>
       )}
       {/*
         The status bar is packed into lines by hand (see statusBarLines) and
@@ -690,7 +839,6 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
               {/* No folder path here - the status bar already shows it. */}
               <Text dimColor>
                 Dust CLI v{CLI_VERSION} (upstream v{UPSTREAM_CLI_VERSION})
-                {gitBranch && ` · branch: ${gitBranch}`}
               </Text>
               <Text dimColor>
                 Chatting with{" "}
@@ -802,6 +950,85 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
           )}
         </Box>
       );
+    case "plan_proposed": {
+      // Rendered through the same markdown pipeline as an agent answer, so a
+      // plan's headings, lists and code fences look like they do anywhere
+      // else - a plan is prose meant to be read, not a literal blob. Printed
+      // once, in full, the moment the plan is proposed - see the type's
+      // comment for why this must never be shown as ephemeral content again.
+      const segments = renderMarkdownSegments(item.planMarkdown);
+      return (
+        <Box
+          flexDirection="column"
+          alignSelf="flex-start"
+          marginLeft={2}
+          marginBottom={1}
+          paddingX={1}
+          borderStyle="round"
+          borderColor={MODE_PLAN_FG}
+        >
+          <Text bold color={MODE_PLAN_FG}>
+            ◇ Plan proposed — awaiting your decision
+          </Text>
+          {segments.map((segment, index) =>
+            segment.type === "code" ? (
+              <Box
+                key={index}
+                flexDirection="column"
+                alignSelf="flex-start"
+                marginY={1}
+                paddingX={1}
+                borderStyle="classic"
+                borderColor="gray"
+              >
+                <Text backgroundColor={CODE_BLOCK_BG}>{segment.content}</Text>
+              </Box>
+            ) : (
+              <Text key={index}>{segment.content}</Text>
+            )
+          )}
+        </Box>
+      );
+    }
+    case "plan_decision": {
+      const approved = item.outcome !== "rejected";
+      const accent = approved ? MODE_PLAN_FG : "gray";
+      return (
+        <Box
+          flexDirection="column"
+          alignSelf="flex-start"
+          marginLeft={2}
+          marginBottom={1}
+          paddingX={1}
+          borderStyle="round"
+          borderColor={accent}
+        >
+          <Box>
+            <Text bold color={accent}>
+              {item.outcome === "approved-auto"
+                ? "■ Plan approved — implementing in auto mode"
+                : item.outcome === "approved-wait"
+                  ? "■ Plan approved — awaiting your instructions"
+                  : "□ Plan rejected"}
+            </Text>
+            {/* The saved path is the point of showing it: the plan can be
+                reread, diffed or committed afterwards, which is only useful
+                if you know where it went. */}
+            {item.filePath ? (
+              <Text dimColor> · {item.filePath}</Text>
+            ) : (
+              <Text dimColor>
+                {" "}
+                · not saved{approved ? " (write failed)" : ""}
+              </Text>
+            )}
+          </Box>
+          {item.comment && (
+            <Text color={accent}>Your feedback: {item.comment}</Text>
+          )}
+        </Box>
+      );
+    }
     case "file_change":
       return (
         <Box
@@ -821,6 +1048,7 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
             originalContent={item.originalContent}
             updatedContent={item.updatedContent}
             filePath={item.filePath}
+            maxLines={FILE_CHANGE_MAX_LINES}
           />
         </Box>
       );

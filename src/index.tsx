@@ -124,6 +124,11 @@ const cli = meow({
       description:
         "Always accept edit operations without prompting for approval",
     },
+    plan: {
+      type: "boolean",
+      description:
+        "Start the chat in plan mode: the agent researches read-only and must get a plan approved before editing anything",
+    },
     noUpdateCheck: {
       type: "boolean",
       description: "Skip update check",
@@ -155,6 +160,21 @@ const cli = meow({
       shortFlag: "t",
       description:
         "Enable file system tools in non-interactive mode (requires OAuth). WARNING: automatically approves ALL tool executions without prompting.",
+    },
+    loop: {
+      type: "string",
+      description:
+        "Re-send --message on an interval (e.g. 5m, 30s, 2h). Requires --message. WARNING: each run spends credits.",
+    },
+    maxRuns: {
+      type: "number",
+      description:
+        "Maximum runs for --loop (default 50). Each run is a full agent turn.",
+    },
+    loopFreshConversation: {
+      type: "boolean",
+      description:
+        "Start each --loop run in a new conversation instead of continuing the same one",
     },
   },
 });

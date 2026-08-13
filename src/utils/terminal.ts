@@ -6,7 +6,20 @@ export function clearTerminal(): Promise<void> {
     // (their shell history, prior output, ...), not just this app's view.
     // Use clearTerminalAndScrollback() for the cases where that full wipe
     // is what's actually wanted.
-    process.stdout.write("\x1b[2J\x1b[H", () => {
+    //
+    // \x1b[0m goes first: \x1b[2J only erases visible *content*, it doesn't
+    // touch the terminal's active text attributes - whatever color/style
+    // was last set (e.g. the status bar's purple workspace segment) stays
+    // "on" straight through the clear. Since this write happens outside
+    // Ink's own render cycle, Ink's next frame has no idea the terminal's
+    // attribute state didn't actually reset along with the visible screen,
+    // and its diffing can skip re-emitting a color for a segment it thinks
+    // is unchanged - which is what let old colors bleed into unrelated
+    // status bar fields after a resume (branch/context rendering in
+    // whatever was last active instead of their own colors). Resetting
+    // attributes explicitly here closes that gap regardless of what Ink's
+    // diff decides to skip.
+    process.stdout.write("\x1b[0m\x1b[2J\x1b[H", () => {
       resolve();
     });
   });
@@ -25,7 +38,8 @@ export function clearTerminal(): Promise<void> {
  */
 export function clearTerminalAndScrollback(): Promise<void> {
   return new Promise((resolve) => {
-    process.stdout.write("\x1b[2J\x1b[3J\x1b[H", () => {
+    // \x1b[0m first - see clearTerminal() above for why.
+    process.stdout.write("\x1b[0m\x1b[2J\x1b[3J\x1b[H", () => {
       resolve();
     });
   });

@@ -1,6 +1,11 @@
 import { z } from "zod";
 
 import { executeCommand } from "../../utils/command.js";
+import {
+  PLAN_MODE_TOOL_NOTICE,
+  isPlanModeActive,
+  planModeRefusal,
+} from "../../utils/planMode.js";
 import type { McpTool } from "../types/tools.js";
 
 export class RunCommandTool implements McpTool {
@@ -10,7 +15,8 @@ export class RunCommandTool implements McpTool {
     "running on), NOT a hosted/sandboxed execution environment. Use this - never a hosted code interpreter or " +
     "isolated sandbox - whenever the user asks you to run a command, script, build, or test in their actual project. " +
     "Defaults to the CLI's current working directory when `cwd` is omitted. Returns structured output with exit " +
-    "code, stdout, stderr, and command info.";
+    "code, stdout, stderr, and command info." +
+    PLAN_MODE_TOOL_NOTICE;
 
   inputSchema = z.object({
     command: z
@@ -44,6 +50,20 @@ export class RunCommandTool implements McpTool {
     cwd,
     timeout = 30000,
   }: z.infer<typeof this.inputSchema>) {
+    // Blocked wholesale while planning, not filtered by command. There is no
+    // reliable way to tell a read-only invocation from a mutating one -
+    // `git log` is harmless, `git reset --hard` is not, and both arrive here
+    // as the same shape - and an allowlist would be a security boundary this
+    // code is not in a position to enforce (shell metacharacters, aliases,
+    // scripts that shell out further). Research is done with read_file,
+    // search_files and search_content instead; the refusal says so.
+    if (isPlanModeActive()) {
+      return {
+        content: [{ type: "text" as const, text: planModeRefusal(this.name) }],
+        isError: true,
+      };
+    }
+
     const cmdRes = await executeCommand(command, args, cwd, timeout, true);
 
     if (cmdRes.isErr()) {

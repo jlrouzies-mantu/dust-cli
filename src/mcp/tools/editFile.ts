@@ -2,6 +2,11 @@ import fs from "fs";
 import { z } from "zod";
 
 import { normalizeError } from "../../utils/errors.js";
+import {
+  PLAN_MODE_TOOL_NOTICE,
+  isPlanModeActive,
+  planModeRefusal,
+} from "../../utils/planMode.js";
 import type { McpTool } from "../types/tools.js";
 import { ReadFileTool } from "./readFile.js";
 
@@ -28,7 +33,8 @@ export class EditFileTool implements McpTool {
     "ESSENTIAL for `old_string`: Must provide unique identification for the specific instance requiring modification. " +
     "Include minimum 3 lines of surrounding context BEFORE and AFTER the target content, preserving exact spacing and formatting. Multiple matches or inexact matches will cause failure." +
     "**Batch replacements:** Define `expected_replacements` with the number of instances to modify. The tool will modify ALL instances matching `old_string` precisely. " +
-    "Verify the replacement count aligns with your intentions.";
+    "Verify the replacement count aligns with your intentions." +
+    PLAN_MODE_TOOL_NOTICE;
 
   inputSchema = z.object({
     path: z
@@ -76,6 +82,18 @@ export class EditFileTool implements McpTool {
     expected_replacements = 1,
   }: z.infer<typeof this.inputSchema>) {
     try {
+      // Checked first, before the file even has to exist - see writeFile.ts
+      // for why a validation error would be the wrong thing to report while
+      // planning.
+      if (isPlanModeActive()) {
+        return {
+          content: [
+            { type: "text" as const, text: planModeRefusal(this.name) },
+          ],
+          isError: true,
+        };
+      }
+
       // Validate file exists and is readable
       if (!fs.existsSync(filePath)) {
         throw new Error(`File not found: ${filePath}`);

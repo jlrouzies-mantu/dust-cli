@@ -6,12 +6,45 @@ export interface CommandContext {
   startNewConversation?: () => void;
   showHelp?: () => void;
   resumeConversation?: () => void;
+  toggleClaudeCodeMode?: () => void;
+  runLoopCommand?: (args: string) => void;
+  togglePlanMode?: () => void;
 }
 
 export interface Command {
   name: string;
   description: string;
-  execute: (context: CommandContext) => void | Promise<void>;
+  /**
+   * `args` is whatever followed the command name on the line: typing
+   * `/loop 5m check CI` calls `/loop`'s execute with `"5m check CI"`.
+   * Commands that take no arguments simply ignore it.
+   *
+   * Note there is no context parameter: every command closes over the
+   * context passed to createCommands below. It previously took one, but
+   * every implementation ignored it in favour of the closure, and the call
+   * site passed an incomplete object - a trap for the next person to add a
+   * command.
+   */
+  execute: (args?: string) => void | Promise<void>;
+  // Argument syntax, shown in the selector. Present only on commands that
+  // take arguments.
+  usage?: string;
+}
+
+/**
+ * Splits what the user typed after `/` into a command name and its
+ * arguments. `"loop 5m check CI"` -> `["loop", "5m check CI"]`.
+ *
+ * The command selector filters on the name alone, so the menu keeps showing
+ * `/loop` while arguments are still being typed instead of going empty on
+ * the first space.
+ */
+export function splitCommandQuery(query: string): [name: string, args: string] {
+  const firstSpace = query.search(/\s/);
+  if (firstSpace === -1) {
+    return [query, ""];
+  }
+  return [query.slice(0, firstSpace), query.slice(firstSpace + 1)];
 }
 
 export const createCommands = (context: CommandContext): Command[] => [
@@ -79,11 +112,40 @@ export const createCommands = (context: CommandContext): Command[] => [
     },
   },
   {
+    name: "loop",
+    description: "Re-send a prompt on an interval (/loop stop to cancel)",
+    usage: "<interval> [xN] <prompt>",
+    execute: (args) => {
+      if (context.runLoopCommand) {
+        context.runLoopCommand(args ?? "");
+      }
+    },
+  },
+  {
+    name: "claude-code-mode",
+    description: "Toggle priming the agent with your Claude Code memories",
+    execute: () => {
+      if (context.toggleClaudeCodeMode) {
+        context.toggleClaudeCodeMode();
+      }
+    },
+  },
+  {
     name: "auto",
-    description: "Toggle auto-approval of file edits on/off",
+    description: "Toggle auto-approval of file edits on/off (Shift+Tab cycles)",
     execute: () => {
       if (context.toggleAutoEdits) {
         context.toggleAutoEdits();
+      }
+    },
+  },
+  {
+    name: "plan",
+    description:
+      "Toggle plan mode - research only until you approve a plan (Shift+Tab cycles)",
+    execute: () => {
+      if (context.togglePlanMode) {
+        context.togglePlanMode();
       }
     },
   },

@@ -82,6 +82,18 @@ interface AppProps {
     withTools: {
       type: "boolean";
     };
+    plan: {
+      type: "boolean";
+    };
+    loop: {
+      type: "string";
+    };
+    maxRuns: {
+      type: "number";
+    };
+    loopFreshConversation: {
+      type: "boolean";
+    };
   }>;
 }
 
@@ -124,6 +136,34 @@ const App: FC<AppProps> = ({ cli }) => {
     return <Help />;
   }
 
+  // --loop only exists on the non-interactive path, which is selected by
+  // --message. Caught here rather than inside NonInteractiveChat because
+  // without --message that component never mounts: the flags would be
+  // silently ignored and an interactive chat would open instead, leaving the
+  // user to wonder why nothing looped. (Interactive looping is /loop.)
+  if (flags.loop !== undefined && !flags.message) {
+    return (
+      <Text color="red">
+        Error: --loop requires --message. Inside an interactive chat, use /loop
+        instead.
+      </Text>
+    );
+  }
+
+  // The mirror image of the check above: plan mode is interactive-only,
+  // because approving a plan needs someone to approve it. Rejected loudly
+  // rather than ignored - a user who passes --plan expecting nothing to be
+  // written would otherwise get a run that writes freely.
+  if (flags.plan && (flags.message || flags.messageId)) {
+    return (
+      <Text color="red">
+        Error: --plan cannot be used with --message. Plan mode needs an
+        interactive session, because approving a plan requires you to approve
+        it.
+      </Text>
+    );
+  }
+
   // Skip update checks for non-interactive chat mode.
   if (!flags.noUpdateCheck && !isNonInteractiveChat && !updateCheckComplete) {
     return <UpdateInfo onComplete={handleUpdateComplete} />;
@@ -157,6 +197,9 @@ const App: FC<AppProps> = ({ cli }) => {
             projectName={flags.projectName}
             projectId={flags.projectId}
             withTools={flags.withTools}
+            loop={flags.loop}
+            maxRuns={flags.maxRuns}
+            loopFreshConversation={flags.loopFreshConversation}
           />
         );
       }
@@ -167,6 +210,7 @@ const App: FC<AppProps> = ({ cli }) => {
           agentSearch={flags.agent}
           conversationId={effectiveConversationId}
           autoAcceptEditsFlag={flags.auto}
+          planModeFlag={flags.plan}
           projectName={flags.projectName}
           projectId={flags.projectId}
         />

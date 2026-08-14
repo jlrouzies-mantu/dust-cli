@@ -9,6 +9,7 @@ export interface CommandContext {
   toggleClaudeCodeMode?: () => void;
   runLoopCommand?: (args: string) => void;
   togglePlanMode?: () => void;
+  runTasksCommand?: () => void;
 }
 
 export interface Command {
@@ -146,6 +147,15 @@ export const createCommands = (context: CommandContext): Command[] => [
     execute: () => {
       if (context.togglePlanMode) {
         context.togglePlanMode();
+      }
+    },
+  },
+  {
+    name: "tasks",
+    description: "Show the current task list for this conversation",
+    execute: () => {
+      if (context.runTasksCommand) {
+        context.runTasksCommand();
       }
     },
   },

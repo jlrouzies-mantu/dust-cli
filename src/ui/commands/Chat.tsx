@@ -49,6 +49,11 @@ import {
   setPlanMode,
 } from "../../utils/planMode.js";
 import { saveApprovedPlan } from "../../utils/planStore.js";
+import {
+  formatTaskList,
+  loadTasks,
+  setActiveConversationId,
+} from "../../utils/taskStore.js";
 import type { LoopState } from "../../utils/loopController.js";
 import {
   describeLoop,
@@ -1088,6 +1093,32 @@ const CliChat: FC<CliChatProps> = ({
   }, []);
 
   /**
+   * Handles `/tasks`: reprints the current task list, read from the same
+   * persisted store todo_write/read_tasks use - so what you see here always
+   * matches exactly what the agent would see if it called read_tasks
+   * itself.
+   */
+  const runTasksCommand = useCallback(() => {
+    if (!currentConversationId) {
+      pushNoticeLines(
+        [
+          "Tasks: none yet.",
+          "  todo_write creates the list the first time the agent calls it.",
+        ],
+        "tasks_empty"
+      );
+      return;
+    }
+    void (async () => {
+      const tasks = await loadTasks(currentConversationId);
+      pushNoticeLines(
+        ["Tasks:", ...formatTaskList(tasks).split("\n")],
+        "tasks_command"
+      );
+    })();
+  }, [currentConversationId, pushNoticeLines]);
+
+  /**
    * Single entry point for every mode change (Shift+Tab, `/auto`, `/plan`).
    *
    * Deliberately writes nothing to the conversation: the status bar shows the
@@ -1530,7 +1561,7 @@ const CliChat: FC<CliChatProps> = ({
 
   const showHelp = useCallback(() => {
     const helpText =
-      "Commands: /help /switch /new /clear /resume /attach /clear-files /auto /plan /loop /claude-code-mode /exit\n" +
+      "Commands: /help /switch /new /clear /resume /attach /clear-files /auto /plan /loop /tasks /claude-code-mode /exit\n" +
       `Modes (Shift+Tab cycles, shown in the status bar): ${(
         ["normal", "auto", "plan"] as ChatMode[]
       )
@@ -1549,6 +1580,31 @@ const CliChat: FC<CliChatProps> = ({
       { key: `help_sep_${Date.now()}`, type: "separator" as const },
     ]);
   }, []);
+
+  /**
+   * Builds a todo_list conversation item from a conversation's persisted
+   * tasks, so switching to (or resuming) a conversation shows its task list
+   * exactly as if todo_write had just been called there - same rendering,
+   * same ref-driven key/index sequence the live todoListEmitter handler
+   * uses (see the effect above). Returns null when there's nothing to
+   * restore, so call sites can skip the append entirely.
+   */
+  const restoreTaskListItem = useCallback(
+    async (conversationId: string): Promise<ConversationItem | null> => {
+      const tasks = await loadTasks(conversationId);
+      if (tasks.length === 0) {
+        return null;
+      }
+      const index = todoListIndexRef.current++;
+      return {
+        key: `todo_list_${index}`,
+        type: "todo_list",
+        todos: tasks,
+        index,
+      };
+    },
+    []
+  );
 
   const handleConversationSelected = useCallback(
     async (convId: string) => {
@@ -1590,10 +1646,19 @@ const CliChat: FC<CliChatProps> = ({
       await clearTerminal();
       setConversationRenderKey((k) => k + 1);
       setConversationItems(items);
+      const taskItem = await restoreTaskListItem(convId);
+      if (taskItem) {
+        setConversationItems((prev) => [...prev, taskItem]);
+      }
       void getContextUsage(convId).then(setContextUsageIfPresent);
       void getConsumedCredits().then(setConsumedCreditsIfPresent);
     },
-    [selectedAgent, setContextUsageIfPresent, setConsumedCreditsIfPresent]
+    [
+      selectedAgent,
+      setContextUsageIfPresent,
+      setConsumedCreditsIfPresent,
+      restoreTaskListItem,
+    ]
   );
 
   const resumeConversation = useCallback(async () => {
@@ -1673,6 +1738,7 @@ const CliChat: FC<CliChatProps> = ({
     toggleClaudeCodeMode,
     runLoopCommand,
     togglePlanMode,
+    runTasksCommand,
   });
 
   // Clear the terminal (screen + scrollback) once, when the interactive
@@ -1871,6 +1937,10 @@ const CliChat: FC<CliChatProps> = ({
       // whole resumed history (welcome header first) from a clean slate.
       setConversationItems(items);
       setIsLoadingResume(false);
+      const taskItem = await restoreTaskListItem(conversationId);
+      if (taskItem) {
+        setConversationItems((prev) => [...prev, taskItem]);
+      }
       void getContextUsage(conversationId).then(setContextUsageIfPresent);
       void getConsumedCredits().then(setConsumedCreditsIfPresent);
     })();
@@ -1879,6 +1949,7 @@ const CliChat: FC<CliChatProps> = ({
     selectedAgent,
     setContextUsageIfPresent,
     setConsumedCreditsIfPresent,
+    restoreTaskListItem,
   ]);
 
   useEffect(() => {
@@ -1897,6 +1968,15 @@ const CliChat: FC<CliChatProps> = ({
   useEffect(() => {
     claudeCodeModeRef.current = claudeCodeMode;
   }, [claudeCodeMode]);
+
+  // Push the active conversation id across into the module-level flag
+  // todo_write/read_tasks read (see utils/taskStore.ts) - the same pattern
+  // as the chatMode effect above, and for the same reason: those tools
+  // execute inside the MCP transport layer, with no access to this
+  // component's state.
+  useEffect(() => {
+    setActiveConversationId(currentConversationId);
+  }, [currentConversationId]);
 
   // A loop tick must not fire while its predecessor is still unsent or still
   // running, so it needs to know both. Mirrored into a ref because the tick

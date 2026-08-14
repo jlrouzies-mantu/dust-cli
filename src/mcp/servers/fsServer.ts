@@ -6,9 +6,11 @@ import type { PlanDecision } from "../../utils/planMode.js";
 import { retryResult } from "../../utils/retry.js";
 import { CLI_VERSION } from "../../utils/version.js";
 import { EditFileTool } from "../tools/editFile.js";
+import { FetchUrlTool } from "../tools/fetchUrl.js";
 import { PresentPlanTool } from "../tools/presentPlan.js";
 import { ReadFileTool } from "../tools/readFile.js";
 import { ReadMemoryTool } from "../tools/readMemory.js";
+import { ReadTasksTool } from "../tools/readTasks.js";
 import { RunCommandTool } from "../tools/runCommand.js";
 import { SearchContentTool } from "../tools/searchContent.js";
 import { SearchFilesTool } from "../tools/searchFiles.js";
@@ -42,12 +44,14 @@ export const useFileSystemServer = async (
   }
 
   const readFileTool = new ReadFileTool();
+  const fetchUrlTool = new FetchUrlTool();
   const searchFilesTool = new SearchFilesTool();
   const searchContentTool = new SearchContentTool();
   const editFileTool = new EditFileTool();
   const writeFileTool = new WriteFileTool();
   const runCommandTool = new RunCommandTool();
   const todoWriteTool = new TodoWriteTool();
+  const readTasksTool = new ReadTasksTool();
   const readMemoryTool = new ReadMemoryTool();
   const writeMemoryTool = new WriteMemoryTool();
   const presentPlanTool = new PresentPlanTool();
@@ -74,12 +78,14 @@ export const useFileSystemServer = async (
   // themselves are inert until it goes looking for them.
   const tools = [
     readFileTool,
+    fetchUrlTool,
     searchFilesTool,
     searchContentTool,
     editFileTool,
     writeFileTool,
     runCommandTool,
     todoWriteTool,
+    readTasksTool,
     readMemoryTool,
     writeMemoryTool,
     // Registered unconditionally, like the memory tools: MCP advertises its

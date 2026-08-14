@@ -3,16 +3,16 @@ $ErrorActionPreference = "Stop"
 # ============================================================
 # Mantu fork of Dust CLI - automated installer
 #
-# Bootstraps NVM for Windows, installs the required Node.js
-# version, then downloads a prebuilt release of this fork
-# (jlrouzies-mantu/dust-cli, built by CI on a matching Windows
-# runner - see .github/workflows/release.yml) and links it so the
-# `dustm` command is available globally - deliberately not named
-# `dust`, so it can coexist with the official Dust CLI on the same
-# machine if needed. Safe to re-run - NVM and Node.js are skipped if
-# already installed, and it always re-downloads the latest release,
-# which is how you pick up updates. No npm install/build happens on
-# your machine.
+# Bootstraps NVM for Windows (reusing an existing nvm-windows install and
+# its symlink if one is already on this machine, rather than installing a
+# second copy or overwriting it), installs the required Node.js version,
+# then downloads a prebuilt release of this fork (jlrouzies-mantu/dust-cli,
+# built by CI on a matching Windows runner - see .github/workflows/release.yml)
+# and links it so the `dustm` command is available globally - deliberately
+# not named `dust`, so it can coexist with the official Dust CLI on the
+# same machine if needed. Safe to re-run - NVM and Node.js are skipped if
+# already installed, and it always re-downloads the latest release, which
+# is how you pick up updates. No npm install/build happens on your machine.
 #
 # Usage:
 #   irm "https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/Install-DustCLI.ps1?nocache=$((Get-Date).Ticks)" | iex
@@ -269,21 +269,56 @@ try {
 
     Write-Header "Step 1/7 - Preparing NVM directory"
 
-    Write-Step "Checking NVM directory: $NvmRoot"
+    # Don't assume this machine has no NVM yet - a user reported already
+    # having nvm-windows installed at their own location (e.g.
+    # %LOCALAPPDATA%\nvm), and this script used to only ever check its own
+    # hardcoded $NvmRoot, so it would silently bootstrap a second copy and
+    # overwrite NVM_HOME/NVM_SYMLINK/PATH to point at it - hijacking the
+    # existing install's symlink out from under it. Check PATH, a
+    # persisted NVM_HOME, and nvm-windows' own installer default location
+    # (in that order) before deciding there's nothing to reuse.
+    function Find-ExistingNvmHome {
+        $onPath = Get-Command nvm.exe -ErrorAction SilentlyContinue
+        if ($onPath) { return Split-Path $onPath.Source -Parent }
 
-    if (-not (Test-Path $NvmRoot)) {
-        New-Item -ItemType Directory -Path $NvmRoot -Force | Out-Null
-        Write-Success "Created NVM directory."
+        foreach ($scope in @("User", "Machine")) {
+            $candidateHome = [Environment]::GetEnvironmentVariable("NVM_HOME", $scope)
+            if ($candidateHome -and (Test-Path (Join-Path $candidateHome "nvm.exe"))) { return $candidateHome }
+        }
+
+        $defaultHome = Join-Path $env:LOCALAPPDATA "nvm"
+        if (Test-Path (Join-Path $defaultHome "nvm.exe")) { return $defaultHome }
+
+        return $null
+    }
+
+    $existingNvmHome = Find-ExistingNvmHome
+    $UseExistingNvm = [bool]$existingNvmHome
+
+    if ($UseExistingNvm) {
+        $NvmRoot = $existingNvmHome
+        Write-Info "Found an existing nvm-windows install at $NvmRoot - reusing it instead of installing a separate copy."
     }
     else {
-        Write-Info "NVM directory already exists."
+        Write-Step "Checking NVM directory: $NvmRoot"
+
+        if (-not (Test-Path $NvmRoot)) {
+            New-Item -ItemType Directory -Path $NvmRoot -Force | Out-Null
+            Write-Success "Created NVM directory."
+        }
+        else {
+            Write-Info "NVM directory already exists."
+        }
     }
 
     Write-Header "Step 2/7 - Installing NVM for Windows"
 
     $nvmExe = Join-Path $NvmRoot "nvm.exe"
 
-    if (Test-Path $nvmExe) {
+    if ($UseExistingNvm) {
+        Write-Info "Using existing nvm.exe at $nvmExe - skipping download."
+    }
+    elseif (Test-Path $nvmExe) {
         Write-Info "nvm-windows already installed at $nvmExe - skipping download."
     }
     else {
@@ -300,7 +335,33 @@ try {
         } | Out-Null
     }
 
-    $NodeJsSymlink = Join-Path $NvmRoot "nodejs"
+    if ($UseExistingNvm) {
+        # Respect whatever symlink location the existing install already
+        # uses - overwriting NVM_SYMLINK to our own path would silently
+        # redirect where an existing nvm-windows setup (and anything
+        # relying on it) points 'node'/'npm' globally.
+        $NodeJsSymlink = $null
+        foreach ($scope in @("User", "Machine")) {
+            $sym = [Environment]::GetEnvironmentVariable("NVM_SYMLINK", $scope)
+            if ($sym) { $NodeJsSymlink = $sym; break }
+        }
+        if (-not $NodeJsSymlink) {
+            $settingsFile = Join-Path $NvmRoot "settings.txt"
+            if (Test-Path $settingsFile) {
+                $pathLine = Get-Content $settingsFile | Where-Object { $_ -match '^\s*path:\s*(.+)$' } | Select-Object -First 1
+                if ($pathLine -and ($pathLine -match '^\s*path:\s*(.+)$')) {
+                    $NodeJsSymlink = $Matches[1].Trim()
+                }
+            }
+        }
+        if (-not $NodeJsSymlink) {
+            $NodeJsSymlink = "C:\Program Files\nodejs" # nvm-windows' own installer default
+        }
+        Write-Info "Using existing NVM_SYMLINK: $NodeJsSymlink"
+    }
+    else {
+        $NodeJsSymlink = Join-Path $NvmRoot "nodejs"
+    }
 
     # SetEnvironmentVariable(...,"User") is idempotent, but re-running it
     # (plus rewriting settings.txt) every time this script runs is pure
@@ -318,7 +379,14 @@ try {
     $envVarsAlreadyConfigured = ([Environment]::GetEnvironmentVariable("NVM_HOME", "User") -eq $NvmRoot) -and
                                 ([Environment]::GetEnvironmentVariable("NVM_SYMLINK", "User") -eq $NodeJsSymlink)
 
-    if ($pathAlreadyConfigured -and $envVarsAlreadyConfigured) {
+    if ($UseExistingNvm) {
+        # Nothing to persist - we're pointing at the user's pre-existing
+        # nvm-windows install, so NVM_HOME/NVM_SYMLINK/PATH are already
+        # however they set them up. Touching them here would be the exact
+        # hijack this reuse path exists to avoid.
+        Write-Info "Reusing existing NVM_HOME/NVM_SYMLINK/PATH configuration - not modifying it."
+    }
+    elseif ($pathAlreadyConfigured -and $envVarsAlreadyConfigured) {
         Write-Info "NVM environment variables and PATH already configured - skipping."
     }
     else {

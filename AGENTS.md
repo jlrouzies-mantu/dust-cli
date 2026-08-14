@@ -110,7 +110,27 @@ last-synced commit (procedure step 3 above):
 - `src/utils/markdown.ts` - markdown rendering fixes
 - `src/utils/gitInfo.ts`, `src/utils/creditsInfo.ts`, `src/utils/contextUsage.ts` - status bar data sources
 - `src/ui/components/ThinkingIcon.tsx` - transient pulsing "Thinking" indicator
-- `src/mcp/tools/todoWrite.ts` - `todo_write` tool (`--with-tools` mode)
+- `src/mcp/tools/todoWrite.ts` - `todo_write` tool (`--with-tools` mode); the
+  `TodoItem` type here is a re-export of `Task` from `taskStore.ts` (see
+  below), kept under this name only so Chat.tsx/Conversation.tsx's existing
+  imports didn't need to change
+- `src/utils/taskStore.ts`, `src/mcp/tools/readTasks.ts` - persistence,
+  dependency validation and `read_tasks` for the task list (see README's
+  "Tasks" section). Persisted tasks are keyed by conversation id, read from a
+  module-level singleton (`getActiveConversationId`) for the same reason
+  `planMode.ts` is one - `todo_write`/`read_tasks` execute inside the MCP
+  transport layer with no access to React state. **Two call sites keep that
+  singleton current, not one**: `Chat.tsx`'s effect for the interactive path,
+  and `chat/nonInteractive.ts`'s `sendNonInteractiveMessage` (right where
+  `conversation.sId` becomes known, before streaming starts) for the
+  headless/`--loop` path - missing the second one means `todo_write` silently
+  stops persisting anything in non-interactive mode, which is exactly the bug
+  a live test caught during this feature's own development. If a third
+  surface ever calls into these tools, it needs the same wiring. Also: inside
+  `todo_write`, `saveTasks` is `await`ed, not fire-and-forget like
+  `transcriptStore`'s writes - the task list is what `read_tasks` and a later
+  `--resume` actually rely on being current, not a best-effort crash net, so
+  "persisted" has to mean persisted by the time the tool call returns.
 - `src/utils/chatMode.ts`, `src/utils/planMode.ts`, `src/utils/planStore.ts`,
   `src/mcp/tools/presentPlan.ts` - plan mode and the Shift+Tab mode cycle (see
   README). Two rules to preserve here: the permission mode is **one tri-state**,
@@ -118,11 +138,24 @@ last-synced commit (procedure step 3 above):
   `planMode.ts` is a module-level singleton **on purpose** - the tools that
   respect it run in the MCP transport layer and cannot read React state, the
   same boundary that makes `todoListEmitter` an emitter. Also: only user
-  approval clears plan mode. If you add a writing tool, gate it in its
+  approval clears plan mode. If you add a **writing** tool, gate it in its
   `execute` and add it to `PLAN_MODE_BLOCKED_TOOLS`, or plan mode silently
   stops being a guarantee - and append `PLAN_MODE_TOOL_NOTICE` to its
   `description` too, or an agent that ignores the per-turn preamble has one
-  more tool it wasn't warned away from.
+  more tool it wasn't warned away from. If you add a **read-only** tool
+  instead, add it to `PLAN_MODE_ALLOWED_TOOLS` so the preamble/refusal text
+  actually mentions it - `read_tasks` shipped without this for a full phase
+  before it was caught, so this list drifting out of sync is a real, repeated
+  failure mode, not a hypothetical one.
+- `src/utils/urlFetch.ts`, `src/mcp/tools/fetchUrl.ts` - `fetch_url` tool (see
+  README's "Fetching a URL" section). The SSRF guarding in `urlFetch.ts`
+  (scheme check, DNS-resolved-address check, re-checked after a redirect) is
+  explicitly **defense-in-depth, not a hard guarantee** - it has a
+  DNS-rebinding gap that would need hooking into the socket layer to close,
+  which is more than this tool's threat model (a locally-run, single-user
+  CLI) warrants. Don't strengthen the wording elsewhere to imply it's
+  airtight. Read-only, so it's in `PLAN_MODE_ALLOWED_TOOLS`, not
+  `PLAN_MODE_BLOCKED_TOOLS`.
 - `src/utils/loopController.ts` - `/loop` and `--loop` interval parsing and
   caps (see README). Pure and unit-tested; keep the limits (30s floor, run
   ceiling, unit-required parsing) here rather than inlining them at call

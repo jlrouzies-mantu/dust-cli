@@ -30,6 +30,8 @@
   - [In-Chat Commands](#in-chat-commands)
   - [Modes](#modes)
   - [Loops](#loops)
+  - [Tasks](#tasks)
+  - [Fetching a URL](#fetching-a-url)
   - [Claude Code mode](#claude-code-mode)
   - [Headless Authentication](#headless-authentication)
 - [Development](#development)
@@ -49,7 +51,7 @@
 | Transient "Thinking…" status | `◊` icon pulsing between brand colors instead of a permanent scrollback dump |
 | Persistent, colorized status bar | Workspace, agent, folder, branch, tokens, credits — see [Status bar](#status-bar) |
 | Ctrl+Enter / Shift+Enter | Multi-line input |
-| `todo_write` tool | Claude-Code-style task checklist (`--with-tools` only) |
+| `todo_write` tool | Claude-Code-style task checklist (`--with-tools` only), now with stable ids, `dependsOn` gating, and persistence across `--resume` — see [Tasks](#tasks) |
 | Dust directive handling | Web-only directives (e.g. `:preview_file{...}`) shown as readable placeholders; citation refs (`:cite[...]`), which the web app turns into clickable footnotes but carry no information without that link data, are stripped instead of leaking mid-sentence |
 | Clipboard image paste | Attach a screenshot straight from the clipboard via Ctrl+V or `/attach` — Windows tested, macOS untested — see [In-Chat Commands](#in-chat-commands) |
 | Paste compaction | Large multi-line pastes collapse to a `[Pasted N lines of text]` placeholder while composing, instead of dumping the raw text inline; the full content is what's shown in the transcript and sent once you hit Enter - the placeholder never lands in permanent scrollback |
@@ -69,6 +71,7 @@
 | Immediate "Cancelling…" feedback | Esc/Ctrl+C now shows a red `✗ Cancelling` status the instant it's pressed, instead of leaving "Thinking…" up for the couple of seconds `cancelMessageGeneration` takes to actually confirm the cancel server-side |
 | Mid-turn context/credit refresh | The status bar's usage numbers now update after every completed tool call, and every ~20s during a long stretch of plain-text generation — previously they only refreshed once the whole turn finished, so a long task showed no movement in the meantime |
 | Clean exit from `dustm login` | Prints "Push 'Enter' to exit, and use 'dustm' to start a chat." and actually exits on Enter — it used to just sit there with no indication the process was done, other than Ctrl+C |
+| `fetch_url` tool | Fetches a specific URL the agent already has (a GitHub raw file, an API endpoint, a doc page) — complements the agent's own server-side web search, which finds pages but can't open one. HTML is reduced to text, JSON is pretty-printed, private/internal addresses are refused — see [Fetching a URL](#fetching-a-url) |
 | LaTeX math rendering | `$...$` / `$$...$$` spans (Greek letters, `\frac`, `\sqrt`, accents, sub/superscripts) converted to readable Unicode before markdown ever sees them, since a terminal can't typeset real math |
 | Crash recovery | Falls back to fetching the conversation from the server instead of showing a fatal error |
 | Auto-retry on API errors | Up to 5x with backoff on transient failures; skipped for non-idempotent calls |
@@ -230,6 +233,7 @@ Context-window usage and consumed credits come from endpoints the Dust web dashb
 - **`/auto`** — toggle auto-approval of file edits (or `Shift+Tab`)
 - **`/plan`** — toggle plan mode (or `Shift+Tab`) — see [Modes](#modes)
 - **`/loop <interval> [xN] <prompt>`** — re-send a prompt on an interval; `/loop stop` cancels, `/loop` alone shows status — see [Loops](#loops)
+- **`/tasks`** — show the current task list for this conversation — see [Tasks](#tasks)
 
 ### Modes
 
@@ -334,6 +338,44 @@ dustm chat -a MyAgent -m "check CI and fix any failures" --loop 10m --maxRuns 6
 Runs strictly sequentially — the next iteration starts only after the previous answer arrives, then waits out the interval, so a slow turn delays the schedule instead of stacking requests. One JSON object is printed per run, so output stays parseable line by line.
 
 Every run continues the **same conversation** by default, so the agent accumulates context across iterations (that's what lets "fix what's broken" converge instead of restarting from nothing). Pass `--loopFreshConversation` for independent runs. A failed run stops the loop with exit 1 rather than hammering a broken endpoint; a cancelled one exits 2.
+
+### Tasks
+
+The agent's task checklist (`todo_write` — same idea as Claude Code's TodoWrite) now **persists for the conversation** instead of only living in memory for the session: it's written to `~/.dust-cli/tasks/<conversationId>.json` and restored automatically on `--resume` or `/resume`, so a checklist you were partway through survives quitting and coming back.
+
+Each task carries a short, stable **id** the agent assigns and reuses across calls (e.g. `install-deps`), plus an optional **`dependsOn`** listing the ids of tasks that must be `completed` first. Trying to move a task to `in_progress` while a dependency isn't done yet — or that names a dependency id not in the same submission — is refused outright, with nothing changed:
+
+```
+[ ] install-deps: Install npm dependencies
+[~] build: Compile the project (depends on: install-deps)
+[x] lint: Run eslint
+```
+
+`/tasks` reprints the current list at any time, read from the same persisted store the agent itself reads from — a new **`read_tasks`** tool lets the agent check status or find unblocked work without rewriting the list (`todo_write` always replaces the whole thing, so reading it that way would mean resubmitting every task just to look).
+
+### Fetching a URL
+
+The Dust agent's built-in web search finds pages, but has no way to open a specific one — a search result, a link you pasted, a raw file in a GitHub repo. `fetch_url` fills that gap: it fetches a URL over HTTP(S) and returns the content as text.
+
+```
+> Use fetch_url to check what's in the README of octocat/Hello-World
+< URL: https://raw.githubusercontent.com/octocat/Hello-World/master/README
+  Status: 200
+  Content-Type: text/plain; charset=utf-8
+
+  Hello World!
+```
+
+A few things worth knowing about how it handles content:
+
+- **HTML is reduced to visible text** — script/style contents, comments and tags are stripped, entities are decoded, and block elements (paragraphs, headings, list items) become line breaks. It is *not* a reader mode: it doesn't find "the main content" or strip navigation, and a page whose real content only appears after client-side JavaScript runs will come back sparse or empty — there's no browser behind this, just a fetch. Prefer a plain-text or API alternative when one exists: for a file in a GitHub repo, `raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>` rather than the `github.com` page; for repository metadata, issues, or search, the `api.github.com` REST API (returned as pretty-printed JSON) rather than scraping the website. The tool's own description tells the agent this.
+- **Binary content is refused** — images, PDFs, archives and the like come back as a plain refusal message rather than unreadable bytes dumped into the conversation.
+- **Responses are capped at 40,000 characters**, truncated with a note past that — a tool result is part of the context window, and an unbounded fetch of an arbitrary page could spend a large chunk of it on one call.
+- **GET only**, `http://`/`https://` only — there's no way to specify another method or scheme.
+
+**Private and internal network addresses are refused.** A URL is exactly the kind of input a page's own content could try to redirect the agent toward — a prompt injection asking it to also "check" a link into a router's admin panel, or a cloud metadata endpoint (`169.254.169.254`) that hands out cloud credentials to anything that asks. Every request is checked before it's made: only `http`/`https` schemes, and every address a hostname resolves to (not just the first) is checked against the private/loopback/link-local/multicast ranges — a redirect is re-checked against where it actually lands, too, so a safe-looking link can't quietly forward the request somewhere private. This is deliberately **defense-in-depth, not a hard guarantee** — it doesn't close a DNS-rebinding race (the address changing between the check and the connection a moment later), which would need hooking into the socket layer itself. That's more machinery than a locally-run, single-user CLI tool needs; the same reasoning that keeps `run_command` unfiltered rather than trying to classify commands as safe or not.
+
+Available whenever file system tools are (`--with-tools`), and — since it's read-only — still usable in [plan mode](#modes) alongside `read_file`/`search_files`/`search_content`/`read_tasks`.
 
 ### Claude Code mode
 

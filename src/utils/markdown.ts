@@ -1,7 +1,67 @@
 import chalk from "chalk";
+import Table from "cli-table3";
 import type { Token, Tokens } from "marked";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
+
+// cli-table3 (used by marked-terminal to render tables) sizes every column
+// to fit its content, with no awareness of the terminal's actual width. A
+// table wider than the terminal comes out as physical lines longer than
+// the terminal's column count, which the terminal (or Ink's own wrapping)
+// then hard-wraps at an arbitrary column - slicing box-drawing borders and
+// cell content apart mid-line instead of leaving a readable table. Handing
+// cli-table3 explicit column widths (plus wordWrap) makes it wrap long
+// cell content *inside* its own column instead, so every physical line it
+// emits already fits the terminal and nothing downstream needs to re-wrap
+// it.
+//
+// The margin below accounts for the marginLeft={2} box every rendered
+// text segment is wrapped in (see Conversation.tsx's "agent_message_text_
+// segment" case) plus a small safety buffer.
+const TABLE_WIDTH_MARGIN = 4;
+const MIN_TABLE_COL_WIDTH = 6;
+
+// cli-table3's own border/padding overhead per column: one "│" between
+// columns (plus one more for the outer left/right edge) and a 1-char pad
+// on each side of every cell - see cli-table3's defaultOptions().
+function tableBorderOverhead(columnCount: number): number {
+  return 3 * columnCount + 1;
+}
+
+// Returns per-column widths that fit the terminal, or undefined when the
+// table's natural (unconstrained) width already fits - in which case
+// cli-table3's own auto-sizing is left alone rather than risking a subtly
+// different layout for tables that were already rendering fine.
+function computeTableColWidths(naturalWidths: number[]): number[] | undefined {
+  const terminalWidth = process.stdout.columns || 80;
+  const available =
+    terminalWidth -
+    TABLE_WIDTH_MARGIN -
+    tableBorderOverhead(naturalWidths.length);
+  const naturalTotal = naturalWidths.reduce((sum, w) => sum + w, 0);
+
+  if (available <= 0 || naturalTotal <= available) {
+    return undefined;
+  }
+
+  return naturalWidths.map((w) =>
+    Math.max(MIN_TABLE_COL_WIDTH, Math.floor((w / naturalTotal) * available))
+  );
+}
+
+// marked HTML-escapes raw "&"/"<"/etc. in inline text; marked-terminal's
+// own table renderer unescapes them back for table bodies (see comment on
+// the table() override below) - kept for parity since our override can't
+// reach marked-terminal's internal transform pipeline that normally does
+// this.
+function unescapeHtmlEntities(html: string): string {
+  return html
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
 
 let configured = false;
 
@@ -49,6 +109,44 @@ function ensureConfigured(): void {
           return this.parser.parseInline(token.tokens);
         }
         return token.text;
+      },
+      // Overrides marked-terminal's own table() so wide tables get
+      // terminal-aware column widths instead of unconstrained auto-sizing
+      // (see computeTableColWidths above). marked-terminal's own table()
+      // runs as a method on its internal Renderer instance (`this.transform`
+      // etc.), reached through a small dispatcher marked-terminal installs
+      // for every renderer key - stacking a second marked.use({renderer})
+      // call on top, as the heading/text overrides above already do,
+      // replaces that dispatcher entry entirely, so `this` here is marked's
+      // own renderer instance and none of marked-terminal's Renderer-only
+      // members (like `.transform`) are reachable. unescapeHtmlEntities
+      // below covers the one part of that (HTML entity unescaping) actually
+      // worth keeping for table cells.
+      table(token: Tokens.Table) {
+        const header = token.header.map((cell) =>
+          this.parser.parseInline(cell.tokens)
+        );
+        const rows = token.rows.map((row) =>
+          row.map((cell) =>
+            unescapeHtmlEntities(this.parser.parseInline(cell.tokens))
+          )
+        );
+
+        const naturalWidths = header.map((h, i) =>
+          Math.max(
+            stripAnsi(h).length,
+            ...rows.map((row) => stripAnsi(row[i] ?? "").length)
+          )
+        );
+        const colWidths = computeTableColWidths(naturalWidths);
+
+        const table = new Table({
+          head: header,
+          ...(colWidths ? { colWidths, wordWrap: true } : {}),
+        });
+        rows.forEach((row) => table.push(row));
+
+        return `${table.toString()}\n\n`;
       },
     },
   });
@@ -415,6 +513,59 @@ function humanizeLatexMath(text: string): string {
     });
 }
 
+// Agents sometimes emit a "grid table" - a |---|---| divider line between
+// *every* row instead of just once after the header, as if imitating an
+// RST/ASCII-art grid table. marked's table tokenizer only expects one
+// divider row right after the header; any extra one is read as literal
+// data instead of a separator, so it renders as a real row whose every
+// cell is just "---", visually slicing the table apart with garbage rule
+// lines. Drop every divider row after the first one in each table block
+// before markdown ever sees it, so the block re-collapses to a normal
+// table. Left untouched inside fenced code blocks, where a table might
+// appear as a literal example rather than something meant to render.
+const TABLE_ROW = /\|/;
+const TABLE_DELIMITER_ROW = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$/;
+const FENCE = /^\s*(```|~~~)/;
+
+function stripRedundantTableDelimiters(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let inFence = false;
+  let inTable = false;
+  let seenDelimiter = false;
+
+  for (const line of lines) {
+    if (FENCE.test(line)) {
+      inFence = !inFence;
+      inTable = false;
+      seenDelimiter = false;
+      out.push(line);
+      continue;
+    }
+    if (inFence || !TABLE_ROW.test(line) || line.trim().length === 0) {
+      inTable = false;
+      seenDelimiter = false;
+      out.push(line);
+      continue;
+    }
+    if (!inTable) {
+      inTable = true;
+      seenDelimiter = false;
+      out.push(line);
+      continue;
+    }
+    if (TABLE_DELIMITER_ROW.test(line)) {
+      if (seenDelimiter) {
+        continue;
+      }
+      seenDelimiter = true;
+    }
+    out.push(line);
+  }
+
+  return out.join("\n");
+}
+
 // Strips SGR color/style escape sequences (the only kind cli-highlight /
 // marked-terminal emit) so line width can be measured on visible
 // characters only, not the ANSI bytes.
@@ -449,7 +600,11 @@ export function renderMarkdownSegments(text: string): MarkdownSegment[] {
   }
   ensureConfigured();
   try {
-    const tokens = marked.lexer(humanizeDustDirectives(humanizeLatexMath(text)));
+    const tokens = marked.lexer(
+      stripRedundantTableDelimiters(
+        humanizeDustDirectives(humanizeLatexMath(text))
+      )
+    );
     const segments: MarkdownSegment[] = [];
     let textGroup: Token[] = [];
 

@@ -21,6 +21,13 @@ import {
 // exactly this reason - importing ThinkingIcon here would drag in all of
 // Ink and defeat the point). Redrawn in place with a carriage return, so no
 // newline is emitted until the animation stops.
+// -m/--message runs non-interactively and its output can be piped/parsed
+// by the caller - the pulsing "Starting dustm..." line (and the logger
+// init below) is interactive-only chrome that shouldn't appear in that
+// path.
+const isNonInteractiveMessage =
+  process.argv.includes("-m") || process.argv.includes("--message");
+
 const isInteractiveStdout = Boolean(process.stdout.isTTY);
 let pulseFrame = 0;
 const writeStartupLine = () => {
@@ -31,21 +38,24 @@ const writeStartupLine = () => {
     `\r${color}${PULSE_ICON}${ANSI_RESET} Starting dustm...`
   );
 };
-writeStartupLine();
+if (!isNonInteractiveMessage) {
+  writeStartupLine();
+}
 // Only animate on a real terminal: with output piped or redirected, \r
 // rewrites would pile up as repeated junk in the captured text.
-const pulseTimer = isInteractiveStdout
-  ? setInterval(() => {
-      pulseFrame++;
-      writeStartupLine();
-    }, PULSE_INTERVAL_MS)
-  : null;
+const pulseTimer =
+  isInteractiveStdout && !isNonInteractiveMessage
+    ? setInterval(() => {
+        pulseFrame++;
+        writeStartupLine();
+      }, PULSE_INTERVAL_MS)
+    : null;
 // Don't let this timer hold the event loop open on its own.
 pulseTimer?.unref();
 
 import { initLogger, registerInkCleanup } from "./utils/logger.js";
 
-if (!process.argv.includes("-m") && !process.argv.includes("--message")) {
+if (!isNonInteractiveMessage) {
   initLogger();
 }
 
@@ -63,7 +73,9 @@ const [{ render }, { default: meow }, { createElement }, { default: App }] =
 if (pulseTimer) {
   clearInterval(pulseTimer);
 }
-process.stdout.write("\n");
+if (!isNonInteractiveMessage) {
+  process.stdout.write("\n");
+}
 
 const cli = meow({
   importMeta: import.meta,

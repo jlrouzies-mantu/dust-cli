@@ -26,6 +26,7 @@ import {
   MANTU_GOLD,
   MANTU_PURPLE,
   MANTU_THINKING_PINK,
+  MANTU_THINKING_PINK_FADED,
   MANTU_USER_ACCENT,
   QUEUED_BODY_BG,
   QUEUED_BODY_FG,
@@ -283,8 +284,8 @@ interface ConversationProps {
     steered: boolean;
     loop?: boolean;
   }[];
-  thinkingPreview: string;
   streamingContentPreview: MarkdownSegment[];
+  thinkingContentPreview: string;
   showExitHint: boolean;
   transientHint: string | null;
   retryStatus: string | null;
@@ -320,8 +321,8 @@ const _Conversation: FC<ConversationProps> = ({
   isCancelling,
   actionStatus,
   queuedMessages,
-  thinkingPreview,
   streamingContentPreview,
+  thinkingContentPreview,
   showExitHint,
   transientHint,
   retryStatus,
@@ -515,6 +516,23 @@ const _Conversation: FC<ConversationProps> = ({
         Freezing here removes the repeated re-render, which is what makes
         showing a plan in full (see the "plan" mode header below) safe.
       */}
+      {/*
+        The reasoning preview only while there's no answer text yet - once
+        content tokens start arriving the chain-of-thought is done, and the
+        streaming answer preview below takes over the same slot instead of
+        stacking both.
+      */}
+      {isProcessingQuestion &&
+        !inlineSelector &&
+        streamingContentPreview.length === 0 &&
+        thinkingContentPreview && (
+          <Box marginLeft={2}>
+            <Text color={MANTU_THINKING_PINK_FADED} italic>
+              {thinkingContentPreview}
+            </Text>
+          </Box>
+        )}
+
       {isProcessingQuestion &&
         !inlineSelector &&
         streamingContentPreview.map((segment, index) =>
@@ -557,12 +575,6 @@ const _Conversation: FC<ConversationProps> = ({
               {" "}
               <ThinkingIcon /> Thinking
               <Spinner type="simpleDots" />
-              {thinkingPreview && (
-                <Text dimColor italic>
-                  {" "}
-                  · {thinkingPreview}
-                </Text>
-              )}
             </Text>
           )}
         </Box>

@@ -430,10 +430,21 @@ const CliChat: FC<CliChatProps> = ({
     Boolean(conversationId)
   );
   const [actionStatus, setActionStatus] = useState<string | null>(null);
-  const [thinkingPreview, setThinkingPreview] = useState("");
   const [streamingContentPreview, setStreamingContentPreview] = useState<
     MarkdownSegment[]
   >([]);
+  // Live preview of the agent's in-progress chain-of-thought, shown above
+  // the "Thinking…" status line (see thinkingContentPreview usage in
+  // Conversation.tsx) - same truncate-to-tail treatment as
+  // streamingContentPreview below, kept in step with the latest streamed
+  // reasoning tokens rather than freezing on whatever the first line was.
+  // Kept as plain text rather than run through renderMarkdownSegments: that
+  // pipeline bakes its own chalk color/reset codes into the string (e.g.
+  // marked-terminal's paragraph renderer wraps every paragraph in
+  // chalk.reset), which would immediately cancel out the faded-pink/italic
+  // styling Conversation.tsx applies around it - reasoning text doesn't
+  // need markdown rendering anyway.
+  const [thinkingContentPreview, setThinkingContentPreview] = useState("");
   const [showExitHint, setShowExitHint] = useState(false);
   // Surfaces retryResult()'s retry attempts (API/MCP calls) in the UI -
   // otherwise they only show up in the debug log, indistinguishable from
@@ -2173,8 +2184,8 @@ const CliChat: FC<CliChatProps> = ({
       });
 
       setIsProcessingQuestion(true);
-      setThinkingPreview("");
       setStreamingContentPreview([]);
+      setThinkingContentPreview("");
       const controller = new AbortController();
       setAbortController(controller);
       agentMessageIdRef.current = null;
@@ -2209,11 +2220,9 @@ const CliChat: FC<CliChatProps> = ({
       // partial markdown is shown separately via the transient
       // streamingContentPreview state instead (see the interval below).
       //
-      // Chain-of-thought is intentionally not included here either: it's
-      // shown as a transient "Thinking…" status (see thinkingPreview
-      // state) rather than being permanently written to scrollback,
-      // matching how Claude Code/Cursor/Kimi Code hide raw reasoning by
-      // default.
+      // Chain-of-thought is intentionally not included here either: raw
+      // reasoning is never written to scrollback, matching how Claude
+      // Code/Cursor/Kimi Code hide it by default.
       const pushFinalContentToConversationItems = () => {
         const segments = renderMarkdownSegments(contentRef.current || " ");
 
@@ -2254,20 +2263,6 @@ const CliChat: FC<CliChatProps> = ({
             },
           ];
         });
-      };
-
-      // Live, transient preview of the current chain-of-thought (last
-      // non-empty line, truncated), shown only in the "Thinking…" status
-      // line — never written into permanent scrollback.
-      const updateThinkingPreview = () => {
-        const lines = chainOfThoughtRef.current
-          .split("\n")
-          .map((l) => l.trim())
-          .filter((l) => l.length > 0);
-        const lastLine = lines[lines.length - 1] ?? "";
-        setThinkingPreview(
-          lastLine.length > 100 ? `${lastLine.slice(0, 100)}...` : lastLine
-        );
       };
 
       // Before surfacing a fatal error from the stream below, check whether
@@ -2502,11 +2497,13 @@ const CliChat: FC<CliChatProps> = ({
 
         let usageRefreshTickCount = 0;
         updateIntervalRef.current = setInterval(() => {
-          updateThinkingPreview();
           setStreamingContentPreview(
             renderMarkdownSegments(
               truncateForStreamingPreview(contentRef.current)
             )
+          );
+          setThinkingContentPreview(
+            truncateForStreamingPreview(chainOfThoughtRef.current)
           );
           // A long stretch of plain-text generation (no tool calls to
           // trigger the refresh above) would otherwise leave the status
@@ -2546,9 +2543,9 @@ const CliChat: FC<CliChatProps> = ({
             }
             setActionStatus(null);
             setError(null);
-            chainOfThoughtRef.current = "";
-            setThinkingPreview("");
             setStreamingContentPreview([]);
+            setThinkingContentPreview("");
+            chainOfThoughtRef.current = "";
             // A steer sets pendingSteerContextRef just before cancelling
             // (and it isn't consumed until the redirect message is
             // actually submitted, which happens after this turn ends), so
@@ -2571,6 +2568,8 @@ const CliChat: FC<CliChatProps> = ({
             setActionStatus(null);
             setError(null);
             setStreamingContentPreview([]);
+            setThinkingContentPreview("");
+            chainOfThoughtRef.current = "";
             pushFinalContentToConversationItems();
             void getContextUsage(conversation.sId).then(
               setContextUsageIfPresent
@@ -2581,8 +2580,6 @@ const CliChat: FC<CliChatProps> = ({
               text: contentRef.current,
               messageId: event.message.sId,
             });
-            chainOfThoughtRef.current = "";
-            setThinkingPreview("");
             contentRef.current = "";
             break;
           } else if (event.type === "tool_params") {
@@ -2627,9 +2624,9 @@ const CliChat: FC<CliChatProps> = ({
 
           appendCancellationMarker(pendingSteerContextRef.current !== null);
 
-          chainOfThoughtRef.current = "";
-          setThinkingPreview("");
           setStreamingContentPreview([]);
+          setThinkingContentPreview("");
+          chainOfThoughtRef.current = "";
           contentRef.current = "";
 
           setIsProcessingQuestion(false);
@@ -2644,9 +2641,9 @@ const CliChat: FC<CliChatProps> = ({
           }
           setActionStatus(null);
           setError(null);
-          chainOfThoughtRef.current = "";
-          setThinkingPreview("");
           setStreamingContentPreview([]);
+          setThinkingContentPreview("");
+          chainOfThoughtRef.current = "";
           contentRef.current = recoveredText;
           pushFinalContentToConversationItems();
           refreshUsageStats();
@@ -4006,8 +4003,8 @@ const CliChat: FC<CliChatProps> = ({
         isCancelling={isCancelling}
         actionStatus={actionStatus}
         queuedMessages={messageQueue}
-        thinkingPreview={thinkingPreview}
         streamingContentPreview={streamingContentPreview}
+        thinkingContentPreview={thinkingContentPreview}
         showExitHint={showExitHint}
         retryStatus={retryStatus}
         transientHint={transientHint}

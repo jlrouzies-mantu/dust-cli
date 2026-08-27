@@ -83,6 +83,16 @@ export const MANTU_AGENT_ACCENT = "#CC7DE0";
 // MANTU_AGENT_ACCENT so it doesn't compete with it.
 export const MANTU_THINKING_PINK = "#C97B94";
 
+// Faded companion to MANTU_THINKING_PINK for the live chain-of-thought
+// preview shown above the "Thinking…" line: same hue, so it still reads as
+// the same "thinking" state, but pulled toward the background so raw
+// reasoning text stays visually secondary to the status line below it.
+export const MANTU_THINKING_PINK_FADED = lerpColor(
+  MANTU_THINKING_PINK,
+  "#2A2A2A",
+  0.55
+);
+
 // Dark gray instead of pure black - a solid black fill is indistinguishable
 // from a terminal's own black background (e.g. default PowerShell 7), so
 // code blocks need a shade that actually reads as "a different surface".

@@ -29,6 +29,7 @@ import {
   MANTU_THINKING_PINK,
   MANTU_THINKING_PINK_FADED,
   MANTU_USER_ACCENT,
+  PICKER_PURPLE,
   QUEUED_BODY_BG,
   QUEUED_BODY_FG,
   QUEUED_TITLE_BG,
@@ -291,6 +292,9 @@ interface ConversationProps {
   transientHint: string | null;
   retryStatus: string | null;
   workspaceName: string | null;
+  // Compact "<model> · <effort>" while /model or /effort is overriding the
+  // agent's configuration; null when neither is.
+  modelStatus: string | null;
   consumedCredits: CreditsUsage | null;
   contextUsage: ContextUsage | null;
   userInput: string;
@@ -333,6 +337,7 @@ const _Conversation: FC<ConversationProps> = ({
   transientHint,
   retryStatus,
   workspaceName,
+  modelStatus,
   consumedCredits,
   contextUsage,
   userInput,
@@ -382,6 +387,15 @@ const _Conversation: FC<ConversationProps> = ({
 
     if (workspaceName) {
       add(workspaceName, chalk.hex(STATUS_BAR_WORKSPACE)(workspaceName));
+    }
+    // Only shown while /model or /effort is overriding the agent's own
+    // configuration. Deliberately absent otherwise rather than printing the
+    // agent's default: the public agent config carries no reasoning effort,
+    // so the CLI cannot state the real default without guessing at half of
+    // it. Sits early, next to the mode, since like the mode it changes how
+    // the agent behaves rather than just describing where you are.
+    if (modelStatus) {
+      add(modelStatus, chalk.hex(PICKER_PURPLE)(modelStatus));
     }
     add(displayPath, chalk.hex(MANTU_GOLD)(displayPath));
     if (gitBranch) {
@@ -480,6 +494,7 @@ const _Conversation: FC<ConversationProps> = ({
   }, [
     chatMode,
     workspaceName,
+    modelStatus,
     displayPath,
     gitBranch,
     conversationId,

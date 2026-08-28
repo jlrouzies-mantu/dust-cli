@@ -230,6 +230,27 @@ last-synced commit (procedure step 3 above):
     **not** read - globbing that tree would advertise skills from plugins
     the user may never have enabled. Documented as a known limitation, not
     a bug to fix reflexively.
+- `src/utils/modelSelection.ts` - `/model` and `/effort` (see README's
+  "Model and effort"). These send the public API's per-message
+  `modelSelection` field, which is a **sibling of `content`/`mentions`/
+  `context` on the post body**, not nested inside `context` - easy to get
+  wrong, and both send sites (`createConversation` and `postUserMessage` in
+  `Chat.tsx`) need it or the override silently applies to only some
+  messages. Three things to preserve:
+  - `providerId` and `modelId` are **both mandatory** whenever
+    `modelSelection` is present, so an effort-only override has to re-send
+    the agent's own model alongside it (`buildModelSelection` does this).
+    There is no way to send an effort by itself.
+  - `MODEL_CATALOG` is a convenience for the picker, **not** an
+    authoritative list: the API's `modelId` widens to `string`, no endpoint
+    lists a workspace's available models, and new ones ship regularly. Keep
+    `/model <id>` accepting ids outside the catalogue via
+    `inferProviderId`, and don't add validation that would reject an
+    unknown-but-valid model - the server is the only thing that can
+    actually know.
+  - The reasoning-effort levels are `high`/`medium`/**`light`**/`none` -
+    "light", not "low". A wrong value is a server-side 400, not a type
+    error, since these are compared as plain strings.
 - `src/types/marked-terminal.d.ts` - type shim
 - Everything under `.github/`, `scripts/`, `img/`, plus `AGENTS.md` and
   `README.md` themselves

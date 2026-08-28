@@ -7,6 +7,7 @@ import type {
 
 import { getDustClient } from "../../../utils/dustClient.js";
 import { normalizeError } from "../../../utils/errors.js";
+import { setActiveConversationId } from "../../../utils/taskStore.js";
 import { appendTranscriptEntry } from "../../../utils/transcriptStore.js";
 
 type AgentConfiguration =
@@ -285,6 +286,15 @@ export async function sendNonInteractiveMessage(
 
       userMessageId = messageId;
     }
+
+    // Set before streaming begins, whichever branch above resolved
+    // `conversation` - todo_write/read_tasks (see utils/taskStore.ts) read
+    // this to know which conversation to persist/load against, and the
+    // interactive Chat.tsx path sets the same singleton from a React effect.
+    // The non-interactive path has no such render cycle, so it has to be set
+    // imperatively, exactly once, right here - the same call this function
+    // makes on every --loop iteration, each with its own conversation.sId.
+    setActiveConversationId(conversation.sId);
 
     await appendTranscriptEntry(conversation.sId, {
       role: "user",

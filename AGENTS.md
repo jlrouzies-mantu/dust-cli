@@ -110,7 +110,27 @@ last-synced commit (procedure step 3 above):
 - `src/utils/markdown.ts` - markdown rendering fixes
 - `src/utils/gitInfo.ts`, `src/utils/creditsInfo.ts`, `src/utils/contextUsage.ts` - status bar data sources
 - `src/ui/components/ThinkingIcon.tsx` - transient pulsing "Thinking" indicator
-- `src/mcp/tools/todoWrite.ts` - `todo_write` tool (`--with-tools` mode)
+- `src/mcp/tools/todoWrite.ts` - `todo_write` tool (`--with-tools` mode); the
+  `TodoItem` type here is a re-export of `Task` from `taskStore.ts` (see
+  below), kept under this name only so Chat.tsx/Conversation.tsx's existing
+  imports didn't need to change
+- `src/utils/taskStore.ts`, `src/mcp/tools/readTasks.ts` - persistence,
+  dependency validation and `read_tasks` for the task list (see README's
+  "Tasks" section). Persisted tasks are keyed by conversation id, read from a
+  module-level singleton (`getActiveConversationId`) for the same reason
+  `planMode.ts` is one - `todo_write`/`read_tasks` execute inside the MCP
+  transport layer with no access to React state. **Two call sites keep that
+  singleton current, not one**: `Chat.tsx`'s effect for the interactive path,
+  and `chat/nonInteractive.ts`'s `sendNonInteractiveMessage` (right where
+  `conversation.sId` becomes known, before streaming starts) for the
+  headless/`--loop` path - missing the second one means `todo_write` silently
+  stops persisting anything in non-interactive mode, which is exactly the bug
+  a live test caught during this feature's own development. If a third
+  surface ever calls into these tools, it needs the same wiring. Also: inside
+  `todo_write`, `saveTasks` is `await`ed, not fire-and-forget like
+  `transcriptStore`'s writes - the task list is what `read_tasks` and a later
+  `--resume` actually rely on being current, not a best-effort crash net, so
+  "persisted" has to mean persisted by the time the tool call returns.
 - `src/utils/chatMode.ts`, `src/utils/planMode.ts`, `src/utils/planStore.ts`,
   `src/mcp/tools/presentPlan.ts` - plan mode and the Shift+Tab mode cycle (see
   README). Two rules to preserve here: the permission mode is **one tri-state**,
@@ -118,11 +138,24 @@ last-synced commit (procedure step 3 above):
   `planMode.ts` is a module-level singleton **on purpose** - the tools that
   respect it run in the MCP transport layer and cannot read React state, the
   same boundary that makes `todoListEmitter` an emitter. Also: only user
-  approval clears plan mode. If you add a writing tool, gate it in its
+  approval clears plan mode. If you add a **writing** tool, gate it in its
   `execute` and add it to `PLAN_MODE_BLOCKED_TOOLS`, or plan mode silently
   stops being a guarantee - and append `PLAN_MODE_TOOL_NOTICE` to its
   `description` too, or an agent that ignores the per-turn preamble has one
-  more tool it wasn't warned away from.
+  more tool it wasn't warned away from. If you add a **read-only** tool
+  instead, add it to `PLAN_MODE_ALLOWED_TOOLS` so the preamble/refusal text
+  actually mentions it - `read_tasks` shipped without this for a full phase
+  before it was caught, so this list drifting out of sync is a real, repeated
+  failure mode, not a hypothetical one.
+- `src/utils/urlFetch.ts`, `src/mcp/tools/fetchUrl.ts` - `fetch_url` tool (see
+  README's "Fetching a URL" section). The SSRF guarding in `urlFetch.ts`
+  (scheme check, DNS-resolved-address check, re-checked after a redirect) is
+  explicitly **defense-in-depth, not a hard guarantee** - it has a
+  DNS-rebinding gap that would need hooking into the socket layer to close,
+  which is more than this tool's threat model (a locally-run, single-user
+  CLI) warrants. Don't strengthen the wording elsewhere to imply it's
+  airtight. Read-only, so it's in `PLAN_MODE_ALLOWED_TOOLS`, not
+  `PLAN_MODE_BLOCKED_TOOLS`.
 - `src/utils/loopController.ts` - `/loop` and `--loop` interval parsing and
   caps (see README). Pure and unit-tested; keep the limits (30s floor, run
   ceiling, unit-required parsing) here rather than inlining them at call
@@ -139,6 +172,64 @@ last-synced commit (procedure step 3 above):
   path (`projects/<encoded-cwd>/memory/`) is reverse-engineered, while
   `CLAUDE.md` and `.claude/rules/` are documented Claude Code features. Treat
   the former as liable to move without notice.
+- `src/utils/skillStore.ts`, `src/mcp/tools/readSkill.ts` - local
+  `SKILL.md` skills (see README's "Skills" section), the client-side
+  alternative to Dust's admin-locked server-side agent skills. Several rules
+  here, each with a real incident or design reason behind it:
+  - `read_skill({ names })` must never build a filesystem path from an
+    agent-supplied name - `resolveSkill` only looks names up against an
+    already-loaded in-memory list, so traversal is impossible by
+    construction rather than by validating a slug pattern. Don't "simplify"
+    this into a `path.join(dir, agentInput)` for consistency with another
+    tool; that would reintroduce exactly what this avoids.
+  - `getDustmOutboundSkillDir()` (the exact path `skill:init` installs
+    into, `~/.claude/skills/dustm/`) must stay excluded from discovery,
+    unconditionally. That installed skill's body is instructions to run
+    `dustm chat -a <agent> -m "<message>"` - discovering it with
+    `/claude-code-mode` on would hand a Dust agent (which has
+    `run_command`) literal instructions to invoke itself. `SkillInit.tsx`
+    imports `DUSTM_OUTBOUND_SKILL_NAME` from `skillStore.ts` rather than
+    each defining its own copy, so the two can't drift apart.
+  - `areClaudeSkillsEnabled()` is a module-level singleton for the same
+    reason `planMode.ts` is one: `read_skill` executes in the MCP transport
+    layer with no access to React state. It's set from exactly one place,
+    `Chat.tsx`'s existing `claudeCodeMode` effect - non-interactive (`-m`)
+    mode has no `/claude-code-mode` toggle to sync from, so it correctly
+    stays `false` there by construction. If skills ever need injecting in
+    non-interactive mode too (deliberately out of scope for now - see the
+    plan this was built from), that's a **second** call site the singleton
+    needs wiring at, the same shape of bug `taskStore.ts`'s
+    `setActiveConversationId` shipped with once (see above).
+  - `read_skill` is read-only and belongs in `planMode.ts`'s
+    `PLAN_MODE_ALLOWED_TOOLS` - keep it there if that list is ever touched;
+    `read_tasks` shipping without this for a full phase is the reason this
+    is called out explicitly (see the plan-mode bullet above).
+  - The `/skills` picker's on/off state persists to
+    `~/.dust-cli/skills-state.json`, which records the **disabled** set, not
+    the enabled one - so a newly authored skill is on by default instead of
+    silently doing nothing until someone opens a picker they didn't know
+    about. Keep that polarity if the file is ever extended. A disabled
+    skill is out of scope *everywhere*: excluded from the catalogue and
+    refused by `read_skill`. Don't "helpfully" let the agent load one by
+    name - that turns a user's explicit choice into a display filter. This
+    is also the one place skills state is written deliberately rather than
+    best-effort: `saveDisabledSkillNames` returns a result the caller
+    surfaces, because silently failing to persist a choice the user just
+    made in a picker is worse than saying so.
+  - Skill bodies are **never** auto-inlined into the injected block
+    regardless of size, unlike `claudeMemory.ts`'s small-memory-set inline
+    path. This is deliberate, not a missing optimization: a memory is
+    background fact that's almost always relevant, but a skill is a
+    conditional procedure whose `description` says *when* to use it -
+    inlining a body unconditionally defeats that. Only the catalogue
+    (names + descriptions) is auto-injected; a body reaches the agent only
+    via `read_skill` or an explicit `/skills <name>`.
+  - This only discovers hand-authored `~/.claude/skills/<name>/SKILL.md`
+    files. Claude Code's plugin-installed skills live under a completely
+    different tree (`~/.claude/plugins/marketplaces/.../skills/`) and are
+    **not** read - globbing that tree would advertise skills from plugins
+    the user may never have enabled. Documented as a known limitation, not
+    a bug to fix reflexively.
 - `src/types/marked-terminal.d.ts` - type shim
 - Everything under `.github/`, `scripts/`, `img/`, plus `AGENTS.md` and
   `README.md` themselves

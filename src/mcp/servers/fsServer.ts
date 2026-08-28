@@ -6,9 +6,12 @@ import type { PlanDecision } from "../../utils/planMode.js";
 import { retryResult } from "../../utils/retry.js";
 import { CLI_VERSION } from "../../utils/version.js";
 import { EditFileTool } from "../tools/editFile.js";
+import { FetchUrlTool } from "../tools/fetchUrl.js";
 import { PresentPlanTool } from "../tools/presentPlan.js";
 import { ReadFileTool } from "../tools/readFile.js";
 import { ReadMemoryTool } from "../tools/readMemory.js";
+import { ReadSkillTool } from "../tools/readSkill.js";
+import { ReadTasksTool } from "../tools/readTasks.js";
 import { RunCommandTool } from "../tools/runCommand.js";
 import { SearchContentTool } from "../tools/searchContent.js";
 import { SearchFilesTool } from "../tools/searchFiles.js";
@@ -42,14 +45,17 @@ export const useFileSystemServer = async (
   }
 
   const readFileTool = new ReadFileTool();
+  const fetchUrlTool = new FetchUrlTool();
   const searchFilesTool = new SearchFilesTool();
   const searchContentTool = new SearchContentTool();
   const editFileTool = new EditFileTool();
   const writeFileTool = new WriteFileTool();
   const runCommandTool = new RunCommandTool();
   const todoWriteTool = new TodoWriteTool();
+  const readTasksTool = new ReadTasksTool();
   const readMemoryTool = new ReadMemoryTool();
   const writeMemoryTool = new WriteMemoryTool();
+  const readSkillTool = new ReadSkillTool();
   const presentPlanTool = new PresentPlanTool();
 
   if (planApprovalCallback) {
@@ -66,22 +72,28 @@ export const useFileSystemServer = async (
     writeMemoryTool.setDiffApprovalCallback(diffApprovalCallback);
   }
 
-  // The memory tools are registered unconditionally, not gated on
+  // The memory and skill tools are registered unconditionally, not gated on
   // /claude-code-mode: MCP tools are advertised once, when the server
   // connects at chat startup, so a mode toggled on later in the session
   // could not add them. What the mode actually changes is whether the agent
-  // is *told* about the user's memories (the priming block) - the tools
-  // themselves are inert until it goes looking for them.
+  // is *told* about the user's memories/Claude skills (the priming block /
+  // skill catalogue) - the tools themselves are inert until it goes looking
+  // for them. read_skill still finds dustm-directory skills (~/.dust-cli/
+  // skills, ./.dust/skills) regardless of the mode; only the Claude-sourced
+  // ones are gated.
   const tools = [
     readFileTool,
+    fetchUrlTool,
     searchFilesTool,
     searchContentTool,
     editFileTool,
     writeFileTool,
     runCommandTool,
     todoWriteTool,
+    readTasksTool,
     readMemoryTool,
     writeMemoryTool,
+    readSkillTool,
     // Registered unconditionally, like the memory tools: MCP advertises its
     // tool list once at connect time, so a mode toggled on later in the
     // session could not add it. It reports plan mode being off rather than

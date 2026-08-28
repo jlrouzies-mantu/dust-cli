@@ -37,6 +37,9 @@ export const PLAN_MODE_ALLOWED_TOOLS = [
   "search_files",
   "search_content",
   "read_memory",
+  "read_tasks",
+  "fetch_url",
+  "read_skill",
 ] as const;
 
 /**

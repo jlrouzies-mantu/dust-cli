@@ -3,8 +3,15 @@ import Spinner from "ink-spinner";
 import type { FC } from "react";
 import React, { useEffect, useState } from "react";
 
-import pkg from "../../../package.json" with { type: "json" };
 import { checkForUpdates } from "../../utils/updateChecker.js";
+
+// This fork isn't published to npm - re-running the same install one-liner
+// from the README re-downloads and re-links the latest GitHub release,
+// which is how a user actually updates it.
+const REINSTALL_COMMAND =
+  process.platform === "win32"
+    ? 'irm "https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/Install-DustCLI.ps1?nocache=$((Get-Date).Ticks)" | iex'
+    : 'curl -fsSL "https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/install-dustcli.sh?nocache=$(date +%s)" | bash';
 
 interface UpdateInfoProps {
   onComplete: () => void;
@@ -78,7 +85,7 @@ const UpdateInfo: FC<UpdateInfoProps> = ({ onComplete }) => {
 
         <Box paddingX={2} paddingY={1} borderStyle="single" borderColor="green">
           <Text color="green" bold>
-            npm install -g {pkg.name}@latest
+            {REINSTALL_COMMAND}
           </Text>
         </Box>
 

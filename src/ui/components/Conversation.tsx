@@ -25,7 +25,9 @@ import {
   MANTU_AGENT_ACCENT,
   MANTU_GOLD,
   MANTU_PURPLE,
+  HINT_ORANGE_FADED,
   MANTU_THINKING_PINK,
+  MANTU_THINKING_PINK_FADED,
   MANTU_USER_ACCENT,
   QUEUED_BODY_BG,
   QUEUED_BODY_FG,
@@ -283,8 +285,8 @@ interface ConversationProps {
     steered: boolean;
     loop?: boolean;
   }[];
-  thinkingPreview: string;
   streamingContentPreview: MarkdownSegment[];
+  thinkingContentPreview: string;
   showExitHint: boolean;
   transientHint: string | null;
   retryStatus: string | null;
@@ -311,6 +313,11 @@ interface ConversationProps {
     selectedIndex: number;
     prompt?: string;
     header?: React.ReactNode;
+    // Checklist modes (currently /skills): draws [x]/[ ] boxes and shows
+    // the toggle key hint. `footerNote` is an advisory rendered under the
+    // list in faded orange italic.
+    multiSelect?: boolean;
+    footerNote?: string;
   } | null;
 }
 
@@ -320,8 +327,8 @@ const _Conversation: FC<ConversationProps> = ({
   isCancelling,
   actionStatus,
   queuedMessages,
-  thinkingPreview,
   streamingContentPreview,
+  thinkingContentPreview,
   showExitHint,
   transientHint,
   retryStatus,
@@ -515,6 +522,23 @@ const _Conversation: FC<ConversationProps> = ({
         Freezing here removes the repeated re-render, which is what makes
         showing a plan in full (see the "plan" mode header below) safe.
       */}
+      {/*
+        The reasoning preview only while there's no answer text yet - once
+        content tokens start arriving the chain-of-thought is done, and the
+        streaming answer preview below takes over the same slot instead of
+        stacking both.
+      */}
+      {isProcessingQuestion &&
+        !inlineSelector &&
+        streamingContentPreview.length === 0 &&
+        thinkingContentPreview && (
+          <Box marginLeft={2}>
+            <Text color={MANTU_THINKING_PINK_FADED} italic>
+              {thinkingContentPreview}
+            </Text>
+          </Box>
+        )}
+
       {isProcessingQuestion &&
         !inlineSelector &&
         streamingContentPreview.map((segment, index) =>
@@ -557,12 +581,6 @@ const _Conversation: FC<ConversationProps> = ({
               {" "}
               <ThinkingIcon /> Thinking
               <Spinner type="simpleDots" />
-              {thinkingPreview && (
-                <Text dimColor italic>
-                  {" "}
-                  · {thinkingPreview}
-                </Text>
-              )}
             </Text>
           )}
         </Box>
@@ -707,6 +725,21 @@ const _Conversation: FC<ConversationProps> = ({
           selectedIndex={inlineSelector.selectedIndex}
           prompt={inlineSelector.prompt}
           header={inlineSelector.header}
+          multiSelect={inlineSelector.multiSelect}
+          footer={
+            inlineSelector.multiSelect ? (
+              <>
+                <Text dimColor>
+                  Space toggles · Enter saves · Esc cancels
+                </Text>
+                {inlineSelector.footerNote && (
+                  <Text color={HINT_ORANGE_FADED} italic>
+                    {inlineSelector.footerNote}
+                  </Text>
+                )}
+              </>
+            ) : undefined
+          }
         />
       )}
       {showExitHint && (

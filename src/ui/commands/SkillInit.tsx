@@ -6,7 +6,13 @@ import path from "path";
 import type { FC } from "react";
 import React, { useCallback, useState } from "react";
 
-const SKILL_NAME = "dustm";
+import { DUSTM_OUTBOUND_SKILL_NAME } from "../../utils/skillStore.js";
+
+// Local skills discovery (src/utils/skillStore.ts) excludes this exact
+// installed skill by path - its body is instructions to invoke dustm
+// itself, which must never be offered to a Dust agent as an available
+// skill. Both sides import the same constant so they can't drift apart.
+const SKILL_NAME = DUSTM_OUTBOUND_SKILL_NAME;
 
 const SKILL_CONTENT = `---
 name: ${SKILL_NAME}

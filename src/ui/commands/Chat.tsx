@@ -49,6 +49,21 @@ import {
   setPlanMode,
 } from "../../utils/planMode.js";
 import { saveApprovedPlan } from "../../utils/planStore.js";
+import type { Skill } from "../../utils/skillStore.js";
+import {
+  buildSkillCatalogue,
+  buildSkillsBlock,
+  loadSkills,
+  resolveSkill,
+  saveDisabledSkillNames,
+  setClaudeSkillsEnabled,
+  summarizeSkills,
+} from "../../utils/skillStore.js";
+import {
+  formatTaskList,
+  loadTasks,
+  setActiveConversationId,
+} from "../../utils/taskStore.js";
 import type { LoopState } from "../../utils/loopController.js";
 import {
   describeLoop,
@@ -295,6 +310,22 @@ const CliChat: FC<CliChatProps> = ({
   const pendingClaudePrimingRef = useRef(false);
   const claudeCodeModeRef = useRef(false);
 
+  // Local skills (see skillStore.ts). Unlike Claude priming, the catalogue
+  // is re-read from disk and re-rendered on every send, then only actually
+  // injected when it differs from the last one sent - `lastSentSkillCatalogueRef`
+  // holds that comparison value. This makes toggling /claude-code-mode,
+  // editing a SKILL.md, or adding a new skill mid-conversation all "just
+  // work" without any explicit invalidation call, at the cost of a small
+  // disk read on every send (see the injection site below).
+  // `skillRevisionRef` counts how many times the catalogue has actually
+  // been (re-)sent this conversation, so a resend past the first can tell
+  // the agent it supersedes an earlier one. `pendingForcedSkillsRef` holds
+  // skills queued by /skills <name>, consumed - like the priming latch -
+  // only after the API accepts the message.
+  const lastSentSkillCatalogueRef = useRef<string | null>(null);
+  const skillRevisionRef = useRef(0);
+  const pendingForcedSkillsRef = useRef<Skill[]>([]);
+
   // /loop: re-sends one prompt on an interval. `loopRef` mirrors the state
   // for the interval callback (a setInterval closure would otherwise capture
   // the value from the render that armed it), and `loopBusyRef` mirrors
@@ -365,11 +396,17 @@ const CliChat: FC<CliChatProps> = ({
       | "approval"
       | "diff"
       | "plan"
-      | "mention";
+      | "mention"
+      | "skills";
     items: InlineSelectorItem[];
     query: string;
     selectedIndex: number;
     currentPath?: string;
+    // "skills" mode only: the picker is a checklist, so it needs somewhere
+    // to hold the in-progress checked set (Space toggles, Enter commits,
+    // Esc discards) and the advisory line rendered under the list.
+    checkedIds?: Set<string>;
+    footerNote?: string;
     // Position in `userInput` where the "@" that opened this selector sits -
     // mention mode never edits `userInput` while it's open (typing goes into
     // `query`, same as the other filterable modes), so this is where the
@@ -425,10 +462,21 @@ const CliChat: FC<CliChatProps> = ({
     Boolean(conversationId)
   );
   const [actionStatus, setActionStatus] = useState<string | null>(null);
-  const [thinkingPreview, setThinkingPreview] = useState("");
   const [streamingContentPreview, setStreamingContentPreview] = useState<
     MarkdownSegment[]
   >([]);
+  // Live preview of the agent's in-progress chain-of-thought, shown above
+  // the "Thinking…" status line (see thinkingContentPreview usage in
+  // Conversation.tsx) - same truncate-to-tail treatment as
+  // streamingContentPreview below, kept in step with the latest streamed
+  // reasoning tokens rather than freezing on whatever the first line was.
+  // Kept as plain text rather than run through renderMarkdownSegments: that
+  // pipeline bakes its own chalk color/reset codes into the string (e.g.
+  // marked-terminal's paragraph renderer wraps every paragraph in
+  // chalk.reset), which would immediately cancel out the faded-pink/italic
+  // styling Conversation.tsx applies around it - reasoning text doesn't
+  // need markdown rendering anyway.
+  const [thinkingContentPreview, setThinkingContentPreview] = useState("");
   const [showExitHint, setShowExitHint] = useState(false);
   // Surfaces retryResult()'s retry attempts (API/MCP calls) in the UI -
   // otherwise they only show up in the debug log, indistinguishable from
@@ -1088,6 +1136,138 @@ const CliChat: FC<CliChatProps> = ({
   }, []);
 
   /**
+   * Handles `/tasks`: reprints the current task list, read from the same
+   * persisted store todo_write/read_tasks use - so what you see here always
+   * matches exactly what the agent would see if it called read_tasks
+   * itself.
+   */
+  const runTasksCommand = useCallback(() => {
+    if (!currentConversationId) {
+      pushNoticeLines(
+        [
+          "Tasks: none yet.",
+          "  todo_write creates the list the first time the agent calls it.",
+        ],
+        "tasks_empty"
+      );
+      return;
+    }
+    void (async () => {
+      const tasks = await loadTasks(currentConversationId);
+      pushNoticeLines(
+        ["Tasks:", ...formatTaskList(tasks).split("\n")],
+        "tasks_command"
+      );
+    })();
+  }, [currentConversationId, pushNoticeLines]);
+
+  /**
+   * Handles `/skills`: with no argument, opens a checklist of every
+   * discovered skill so the user can switch individual ones on and off
+   * (Space toggles, Enter saves, Esc discards); with one, resolves that
+   * skill and queues it to be forced into the next message in full (see
+   * the injection site in handleSubmitQuestion for how the queue is
+   * consumed).
+   *
+   * One command rather than separate list/force commands - see the comment
+   * on CommandContext.runSkillsCommand for why.
+   */
+  const runSkillsCommand = useCallback(
+    (args?: string) => {
+      const query = args?.trim();
+
+      void (async () => {
+        const set = await loadSkills({
+          includeClaudeSkills: claudeCodeModeRef.current,
+        });
+
+        if (!query) {
+          if (set.skills.length === 0) {
+            pushNoticeLines(
+              ["Skills:", ...summarizeSkills(set)],
+              "skills_empty"
+            );
+            return;
+          }
+
+          setInlineSelector({
+            mode: "skills",
+            items: set.skills.map((skill) => ({
+              id: skill.name,
+              label: skill.name,
+              description: skill.description ?? undefined,
+              checked: skill.enabled,
+            })),
+            query: "",
+            selectedIndex: 0,
+            checkedIds: new Set(
+              set.skills.filter((s) => s.enabled).map((s) => s.name)
+            ),
+            // Shown whenever the mode is off, since that's exactly when
+            // this list is missing a category of skills the user may have.
+            // Deliberately not conditional on Claude skills actually
+            // existing on disk: checking would mean scanning the very
+            // directories the mode gates off.
+            footerNote: claudeCodeModeRef.current
+              ? undefined
+              : "To get .claude skills, enable /claude-code-mode first.",
+          });
+          return;
+        }
+
+        const lookup = resolveSkill(set, query);
+        if (lookup.kind === "not-found") {
+          const available = set.skills.map((s) => s.name);
+          pushNoticeLines(
+            [
+              `No skill named "${query}".`,
+              ...(available.length > 0
+                ? [`Available: ${available.join(", ")}`]
+                : ["No skills found - run /skills to see what was searched."]),
+            ],
+            "skills_not_found"
+          );
+          return;
+        }
+        if (lookup.kind === "ambiguous") {
+          pushNoticeLines(
+            [
+              `"${query}" matches more than one skill - be more specific:`,
+              ...lookup.candidates.map((c) => `  ${c.name} (${c.source})`),
+            ],
+            "skills_ambiguous"
+          );
+          return;
+        }
+
+        const skill = lookup.skill;
+        // Dedupe by name so repeating /skills <name> before sending doesn't
+        // queue the same body twice.
+        pendingForcedSkillsRef.current = [
+          ...pendingForcedSkillsRef.current.filter((s) => s.name !== skill.name),
+          skill,
+        ];
+
+        const queued = pendingForcedSkillsRef.current;
+        pushNoticeLines(
+          queued.length === 1
+            ? [
+                `${skill.name} will be sent in full with your next message.`,
+                `  ${skill.filePath} · ${formatFileSize(skill.body.length)}`,
+              ]
+            : [
+                `Forcing ${queued.length} skills into your next message: ${queued
+                  .map((s) => s.name)
+                  .join(", ")}`,
+              ],
+          "skills_forced"
+        );
+      })();
+    },
+    [pushNoticeLines]
+  );
+
+  /**
    * Single entry point for every mode change (Shift+Tab, `/auto`, `/plan`).
    *
    * Deliberately writes nothing to the conversation: the status bar shows the
@@ -1522,6 +1702,17 @@ const CliChat: FC<CliChatProps> = ({
       pendingClaudePrimingRef.current = true;
     }
 
+    // Same idea for skills: a fresh conversation has no history, so the
+    // catalogue-freshness comparison must start over (else the new
+    // conversation's first message would wrongly think the catalogue was
+    // already sent and skip it). A forced /skills <name>, unlike priming,
+    // is dropped rather than re-armed - it was a one-off act for the
+    // message the user was about to write in the conversation just
+    // discarded, not a standing mode to carry forward.
+    lastSentSkillCatalogueRef.current = null;
+    skillRevisionRef.current = 0;
+    pendingForcedSkillsRef.current = [];
+
     // A loop is stopped rather than carried across: its prompt was written
     // for the conversation being discarded, and leaving it armed would have
     // it fire into the blank one without the user asking.
@@ -1530,7 +1721,7 @@ const CliChat: FC<CliChatProps> = ({
 
   const showHelp = useCallback(() => {
     const helpText =
-      "Commands: /help /switch /new /clear /resume /attach /clear-files /auto /plan /loop /claude-code-mode /exit\n" +
+      "Commands: /help /switch /new /clear /resume /attach /clear-files /auto /plan /loop /tasks /skills /claude-code-mode /exit\n" +
       `Modes (Shift+Tab cycles, shown in the status bar): ${(
         ["normal", "auto", "plan"] as ChatMode[]
       )
@@ -1549,6 +1740,31 @@ const CliChat: FC<CliChatProps> = ({
       { key: `help_sep_${Date.now()}`, type: "separator" as const },
     ]);
   }, []);
+
+  /**
+   * Builds a todo_list conversation item from a conversation's persisted
+   * tasks, so switching to (or resuming) a conversation shows its task list
+   * exactly as if todo_write had just been called there - same rendering,
+   * same ref-driven key/index sequence the live todoListEmitter handler
+   * uses (see the effect above). Returns null when there's nothing to
+   * restore, so call sites can skip the append entirely.
+   */
+  const restoreTaskListItem = useCallback(
+    async (conversationId: string): Promise<ConversationItem | null> => {
+      const tasks = await loadTasks(conversationId);
+      if (tasks.length === 0) {
+        return null;
+      }
+      const index = todoListIndexRef.current++;
+      return {
+        key: `todo_list_${index}`,
+        type: "todo_list",
+        todos: tasks,
+        index,
+      };
+    },
+    []
+  );
 
   const handleConversationSelected = useCallback(
     async (convId: string) => {
@@ -1590,10 +1806,19 @@ const CliChat: FC<CliChatProps> = ({
       await clearTerminal();
       setConversationRenderKey((k) => k + 1);
       setConversationItems(items);
+      const taskItem = await restoreTaskListItem(convId);
+      if (taskItem) {
+        setConversationItems((prev) => [...prev, taskItem]);
+      }
       void getContextUsage(convId).then(setContextUsageIfPresent);
       void getConsumedCredits().then(setConsumedCreditsIfPresent);
     },
-    [selectedAgent, setContextUsageIfPresent, setConsumedCreditsIfPresent]
+    [
+      selectedAgent,
+      setContextUsageIfPresent,
+      setConsumedCreditsIfPresent,
+      restoreTaskListItem,
+    ]
   );
 
   const resumeConversation = useCallback(async () => {
@@ -1673,6 +1898,8 @@ const CliChat: FC<CliChatProps> = ({
     toggleClaudeCodeMode,
     runLoopCommand,
     togglePlanMode,
+    runTasksCommand,
+    runSkillsCommand,
   });
 
   // Clear the terminal (screen + scrollback) once, when the interactive
@@ -1871,6 +2098,10 @@ const CliChat: FC<CliChatProps> = ({
       // whole resumed history (welcome header first) from a clean slate.
       setConversationItems(items);
       setIsLoadingResume(false);
+      const taskItem = await restoreTaskListItem(conversationId);
+      if (taskItem) {
+        setConversationItems((prev) => [...prev, taskItem]);
+      }
       void getContextUsage(conversationId).then(setContextUsageIfPresent);
       void getConsumedCredits().then(setConsumedCreditsIfPresent);
     })();
@@ -1879,6 +2110,7 @@ const CliChat: FC<CliChatProps> = ({
     selectedAgent,
     setContextUsageIfPresent,
     setConsumedCreditsIfPresent,
+    restoreTaskListItem,
   ]);
 
   useEffect(() => {
@@ -1896,7 +2128,20 @@ const CliChat: FC<CliChatProps> = ({
 
   useEffect(() => {
     claudeCodeModeRef.current = claudeCodeMode;
+    // read_skill (src/mcp/tools/readSkill.ts) executes in the MCP transport
+    // layer and can't see this React state directly - same boundary as
+    // planMode.ts, bridged the same way.
+    setClaudeSkillsEnabled(claudeCodeMode);
   }, [claudeCodeMode]);
+
+  // Push the active conversation id across into the module-level flag
+  // todo_write/read_tasks read (see utils/taskStore.ts) - the same pattern
+  // as the chatMode effect above, and for the same reason: those tools
+  // execute inside the MCP transport layer, with no access to this
+  // component's state.
+  useEffect(() => {
+    setActiveConversationId(currentConversationId);
+  }, [currentConversationId]);
 
   // A loop tick must not fire while its predecessor is still unsent or still
   // running, so it needs to know both. Mirrored into a ref because the tick
@@ -2027,6 +2272,55 @@ const CliChat: FC<CliChatProps> = ({
         fullQuestionText = `${planModePreamble()}\n\n${fullQuestionText}\n\n${planModeReminder()}`;
       }
 
+      // Local skills (see skillStore.ts and lastSentSkillCatalogueRef
+      // above). Unlike Claude priming below, this is not a once-per-
+      // conversation latch: the catalogue is re-read from disk and
+      // re-rendered on every send, and only actually injected when it
+      // differs from the last one that was sent. That makes toggling
+      // /claude-code-mode, editing/adding a SKILL.md, or this being the
+      // first message all "just work" with no explicit invalidation call -
+      // a boolean latch would need separate handling for each. The result
+      // is committed to the refs only after the API accepts the message
+      // (see pendingClaudePrimingRef's identical discipline below), so a
+      // failed send doesn't desync the comparison or lose a forced skill.
+      //
+      // Gated on the fs MCP server actually being attached: without it,
+      // read_skill isn't callable (API-key auth refuses the server outright
+      // - fsServer.ts - and even under OAuth it registers asynchronously),
+      // so a catalogue promising a tool the agent can't reach would be
+      // actively misleading. A forced /skills <name> body still goes in
+      // either way, since it needs no tool - just the text.
+      const forcedSkillsThisTurn = pendingForcedSkillsRef.current;
+      let skillsBlockIncluded = false;
+      let freshSkillCatalogue: string | null | undefined; // undefined = not computed this turn
+      if (fileSystemServerId) {
+        const skillSet = await loadSkills({
+          includeClaudeSkills: claudeCodeModeRef.current,
+        });
+        freshSkillCatalogue = buildSkillCatalogue(skillSet);
+        const catalogueChanged =
+          freshSkillCatalogue !== lastSentSkillCatalogueRef.current;
+        const block = buildSkillsBlock({
+          catalogue: catalogueChanged ? freshSkillCatalogue : null,
+          inlined: forcedSkillsThisTurn,
+          revision: skillRevisionRef.current + 1,
+        });
+        if (block) {
+          fullQuestionText = `${block}\n\n${fullQuestionText}`;
+          skillsBlockIncluded = true;
+        }
+      } else if (forcedSkillsThisTurn.length > 0) {
+        const block = buildSkillsBlock({
+          catalogue: null,
+          inlined: forcedSkillsThisTurn,
+          revision: skillRevisionRef.current + 1,
+        });
+        if (block) {
+          fullQuestionText = `${block}\n\n${fullQuestionText}`;
+          skillsBlockIncluded = true;
+        }
+      }
+
       // Claude Code mode's one-time priming (see toggleClaudeCodeMode).
       // Applied after any steer wrapping so the memories sit above the whole
       // prompt. The latch is only cleared once the message has actually been
@@ -2093,8 +2387,8 @@ const CliChat: FC<CliChatProps> = ({
       });
 
       setIsProcessingQuestion(true);
-      setThinkingPreview("");
       setStreamingContentPreview([]);
+      setThinkingContentPreview("");
       const controller = new AbortController();
       setAbortController(controller);
       agentMessageIdRef.current = null;
@@ -2129,11 +2423,9 @@ const CliChat: FC<CliChatProps> = ({
       // partial markdown is shown separately via the transient
       // streamingContentPreview state instead (see the interval below).
       //
-      // Chain-of-thought is intentionally not included here either: it's
-      // shown as a transient "Thinking…" status (see thinkingPreview
-      // state) rather than being permanently written to scrollback,
-      // matching how Claude Code/Cursor/Kimi Code hide raw reasoning by
-      // default.
+      // Chain-of-thought is intentionally not included here either: raw
+      // reasoning is never written to scrollback, matching how Claude
+      // Code/Cursor/Kimi Code hide it by default.
       const pushFinalContentToConversationItems = () => {
         const segments = renderMarkdownSegments(contentRef.current || " ");
 
@@ -2174,20 +2466,6 @@ const CliChat: FC<CliChatProps> = ({
             },
           ];
         });
-      };
-
-      // Live, transient preview of the current chain-of-thought (last
-      // non-empty line, truncated), shown only in the "Thinking…" status
-      // line — never written into permanent scrollback.
-      const updateThinkingPreview = () => {
-        const lines = chainOfThoughtRef.current
-          .split("\n")
-          .map((l) => l.trim())
-          .filter((l) => l.length > 0);
-        const lastLine = lines[lines.length - 1] ?? "";
-        setThinkingPreview(
-          lastLine.length > 100 ? `${lastLine.slice(0, 100)}...` : lastLine
-        );
       };
 
       // Before surfacing a fatal error from the stream below, check whether
@@ -2382,6 +2660,19 @@ const CliChat: FC<CliChatProps> = ({
           pendingClaudePrimingRef.current = false;
         }
 
+        // Same discipline for skills: the message is on the server now, so
+        // the freshness-comparison baseline and forced-skill queue can be
+        // committed. Committing earlier (at the injection site above) would
+        // desync the comparison on a failed send - the next attempt would
+        // wrongly believe an unsent catalogue had already gone out.
+        if (skillsBlockIncluded) {
+          skillRevisionRef.current += 1;
+        }
+        if (freshSkillCatalogue !== undefined) {
+          lastSentSkillCatalogueRef.current = freshSkillCatalogue;
+        }
+        pendingForcedSkillsRef.current = [];
+
         // Crash-safety net: record the user's side of the exchange before
         // waiting on the agent's (potentially long-running, potentially
         // failing) stream below.
@@ -2422,11 +2713,13 @@ const CliChat: FC<CliChatProps> = ({
 
         let usageRefreshTickCount = 0;
         updateIntervalRef.current = setInterval(() => {
-          updateThinkingPreview();
           setStreamingContentPreview(
             renderMarkdownSegments(
               truncateForStreamingPreview(contentRef.current)
             )
+          );
+          setThinkingContentPreview(
+            truncateForStreamingPreview(chainOfThoughtRef.current)
           );
           // A long stretch of plain-text generation (no tool calls to
           // trigger the refresh above) would otherwise leave the status
@@ -2466,9 +2759,9 @@ const CliChat: FC<CliChatProps> = ({
             }
             setActionStatus(null);
             setError(null);
-            chainOfThoughtRef.current = "";
-            setThinkingPreview("");
             setStreamingContentPreview([]);
+            setThinkingContentPreview("");
+            chainOfThoughtRef.current = "";
             // A steer sets pendingSteerContextRef just before cancelling
             // (and it isn't consumed until the redirect message is
             // actually submitted, which happens after this turn ends), so
@@ -2491,6 +2784,8 @@ const CliChat: FC<CliChatProps> = ({
             setActionStatus(null);
             setError(null);
             setStreamingContentPreview([]);
+            setThinkingContentPreview("");
+            chainOfThoughtRef.current = "";
             pushFinalContentToConversationItems();
             void getContextUsage(conversation.sId).then(
               setContextUsageIfPresent
@@ -2501,8 +2796,6 @@ const CliChat: FC<CliChatProps> = ({
               text: contentRef.current,
               messageId: event.message.sId,
             });
-            chainOfThoughtRef.current = "";
-            setThinkingPreview("");
             contentRef.current = "";
             break;
           } else if (event.type === "tool_params") {
@@ -2547,9 +2840,9 @@ const CliChat: FC<CliChatProps> = ({
 
           appendCancellationMarker(pendingSteerContextRef.current !== null);
 
-          chainOfThoughtRef.current = "";
-          setThinkingPreview("");
           setStreamingContentPreview([]);
+          setThinkingContentPreview("");
+          chainOfThoughtRef.current = "";
           contentRef.current = "";
 
           setIsProcessingQuestion(false);
@@ -2564,9 +2857,9 @@ const CliChat: FC<CliChatProps> = ({
           }
           setActionStatus(null);
           setError(null);
-          chainOfThoughtRef.current = "";
-          setThinkingPreview("");
           setStreamingContentPreview([]);
+          setThinkingContentPreview("");
+          chainOfThoughtRef.current = "";
           contentRef.current = recoveredText;
           pushFinalContentToConversationItems();
           refreshUsageStats();
@@ -2866,10 +3159,15 @@ const CliChat: FC<CliChatProps> = ({
         return;
       }
 
+      // Fixed modes don't filter as you type. "skills" is one of them so
+      // Space can mean "toggle this row" instead of being swallowed into a
+      // search query - skill names never contain a space, so there is
+      // nothing to filter for that a plain up/down doesn't reach faster.
       const isFixedMode =
         inlineSelector.mode === "approval" ||
         inlineSelector.mode === "diff" ||
-        inlineSelector.mode === "plan";
+        inlineSelector.mode === "plan" ||
+        inlineSelector.mode === "skills";
       const filtered = isFixedMode
         ? inlineSelector.items
         : inlineSelector.items.filter((item) =>
@@ -2904,7 +3202,75 @@ const CliChat: FC<CliChatProps> = ({
         return;
       }
 
+      // Space toggles the highlighted row in the skills checklist. Checked
+      // early, before the generic character handling below, and only for
+      // this mode - everywhere else a space is either filter text or
+      // nothing.
+      if (inlineSelector.mode === "skills" && input === " ") {
+        const target = filtered[inlineSelector.selectedIndex];
+        if (target) {
+          setInlineSelector((prev) => {
+            if (!prev) {
+              return prev;
+            }
+            const next = new Set(prev.checkedIds ?? []);
+            if (next.has(target.id)) {
+              next.delete(target.id);
+            } else {
+              next.add(target.id);
+            }
+            return {
+              ...prev,
+              checkedIds: next,
+              items: prev.items.map((item) =>
+                item.id === target.id
+                  ? { ...item, checked: next.has(item.id) }
+                  : item
+              ),
+            };
+          });
+        }
+        return;
+      }
+
       if (key.return) {
+        // The skills checklist commits the whole set at once rather than
+        // acting on the highlighted row, so it's handled before the
+        // per-row dispatch below - and works even on an empty filter.
+        if (inlineSelector.mode === "skills") {
+          const checked = inlineSelector.checkedIds ?? new Set<string>();
+          const disabled = new Set(
+            inlineSelector.items
+              .map((item) => item.id)
+              .filter((id) => !checked.has(id))
+          );
+          setInlineSelector(null);
+          void (async () => {
+            const result = await saveDisabledSkillNames(disabled);
+            if (!result.ok) {
+              pushNoticeLines(
+                [
+                  `Could not save which skills are enabled: ${result.error}`,
+                  "  The change applies to this session only.",
+                ],
+                "skills_save_failed"
+              );
+              return;
+            }
+            const enabledCount = checked.size;
+            pushNoticeLines(
+              [
+                `Skills: ${enabledCount} of ${inlineSelector.items.length} enabled.`,
+                ...(disabled.size > 0
+                  ? [`  Off: ${[...disabled].sort().join(", ")}`]
+                  : []),
+              ],
+              "skills_saved"
+            );
+          })();
+          return;
+        }
+
         if (
           filtered.length > 0 &&
           inlineSelector.selectedIndex < filtered.length
@@ -3926,8 +4292,8 @@ const CliChat: FC<CliChatProps> = ({
         isCancelling={isCancelling}
         actionStatus={actionStatus}
         queuedMessages={messageQueue}
-        thinkingPreview={thinkingPreview}
         streamingContentPreview={streamingContentPreview}
+        thinkingContentPreview={thinkingContentPreview}
         showExitHint={showExitHint}
         retryStatus={retryStatus}
         transientHint={transientHint}
@@ -3986,11 +4352,15 @@ const CliChat: FC<CliChatProps> = ({
                         ? "Select a file to mention:"
                         : inlineSelector.mode === "conversation"
                         ? "Select a conversation:"
-                        : inlineSelector.mode === "approval" ||
-                            inlineSelector.mode === "diff" ||
-                            inlineSelector.mode === "plan"
-                          ? "Use Up/Down to navigate, Enter to confirm, Esc to reject:"
-                          : undefined,
+                        : inlineSelector.mode === "skills"
+                          ? "Skills sent to the agent:"
+                          : inlineSelector.mode === "approval" ||
+                              inlineSelector.mode === "diff" ||
+                              inlineSelector.mode === "plan"
+                            ? "Use Up/Down to navigate, Enter to confirm, Esc to reject:"
+                            : undefined,
+                multiSelect: inlineSelector.mode === "skills",
+                footerNote: inlineSelector.footerNote,
                 header:
                   inlineSelector.mode === "approval" &&
                   pendingApproval &&

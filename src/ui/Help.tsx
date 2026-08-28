@@ -32,8 +32,10 @@ const Help: FC = () => {
       </Box>
       <Box marginLeft={2}>
         <Text>
-          <Text bold>skill:init</Text> Install the dustm skill for coding
-          CLIs (Claude Code, Codex)
+          <Text bold>skill:init</Text> Install the dustm skill{" "}
+          <Text dimColor>into</Text> other coding CLIs (Claude Code, Codex),
+          so they can call Dust - outbound, unrelated to /skills inside a
+          chat
         </Text>
       </Box>
       <Box marginLeft={2}>

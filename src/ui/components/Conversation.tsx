@@ -25,6 +25,7 @@ import {
   MANTU_AGENT_ACCENT,
   MANTU_GOLD,
   MANTU_PURPLE,
+  HINT_ORANGE_FADED,
   MANTU_THINKING_PINK,
   MANTU_THINKING_PINK_FADED,
   MANTU_USER_ACCENT,
@@ -312,6 +313,11 @@ interface ConversationProps {
     selectedIndex: number;
     prompt?: string;
     header?: React.ReactNode;
+    // Checklist modes (currently /skills): draws [x]/[ ] boxes and shows
+    // the toggle key hint. `footerNote` is an advisory rendered under the
+    // list in faded orange italic.
+    multiSelect?: boolean;
+    footerNote?: string;
   } | null;
 }
 
@@ -719,6 +725,21 @@ const _Conversation: FC<ConversationProps> = ({
           selectedIndex={inlineSelector.selectedIndex}
           prompt={inlineSelector.prompt}
           header={inlineSelector.header}
+          multiSelect={inlineSelector.multiSelect}
+          footer={
+            inlineSelector.multiSelect ? (
+              <>
+                <Text dimColor>
+                  Space toggles · Enter saves · Esc cancels
+                </Text>
+                {inlineSelector.footerNote && (
+                  <Text color={HINT_ORANGE_FADED} italic>
+                    {inlineSelector.footerNote}
+                  </Text>
+                )}
+              </>
+            ) : undefined
+          }
         />
       )}
       {showExitHint && (

@@ -10,6 +10,13 @@ export interface CommandContext {
   runLoopCommand?: (args: string) => void;
   togglePlanMode?: () => void;
   runTasksCommand?: () => void;
+  // args present -> force that skill's body into the next message; absent
+  // -> list what's on disk. One command, not two ("/skills"/"/skill"),
+  // because the command dispatcher prefix-matches with no exact-match
+  // preference (see Chat.tsx's command filtering) - two names where one is
+  // a prefix of the other would silently run whichever is declared first
+  // and drop the argument.
+  runSkillsCommand?: (args?: string) => void;
 }
 
 export interface Command {
@@ -156,6 +163,17 @@ export const createCommands = (context: CommandContext): Command[] => [
     execute: () => {
       if (context.runTasksCommand) {
         context.runTasksCommand();
+      }
+    },
+  },
+  {
+    name: "skills",
+    description:
+      "List local skills, or force one into your next message (/skills <name>)",
+    usage: "[name]",
+    execute: (args) => {
+      if (context.runSkillsCommand) {
+        context.runSkillsCommand(args);
       }
     },
   },

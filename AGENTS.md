@@ -172,6 +172,64 @@ last-synced commit (procedure step 3 above):
   path (`projects/<encoded-cwd>/memory/`) is reverse-engineered, while
   `CLAUDE.md` and `.claude/rules/` are documented Claude Code features. Treat
   the former as liable to move without notice.
+- `src/utils/skillStore.ts`, `src/mcp/tools/readSkill.ts` - local
+  `SKILL.md` skills (see README's "Skills" section), the client-side
+  alternative to Dust's admin-locked server-side agent skills. Several rules
+  here, each with a real incident or design reason behind it:
+  - `read_skill({ names })` must never build a filesystem path from an
+    agent-supplied name - `resolveSkill` only looks names up against an
+    already-loaded in-memory list, so traversal is impossible by
+    construction rather than by validating a slug pattern. Don't "simplify"
+    this into a `path.join(dir, agentInput)` for consistency with another
+    tool; that would reintroduce exactly what this avoids.
+  - `getDustmOutboundSkillDir()` (the exact path `skill:init` installs
+    into, `~/.claude/skills/dustm/`) must stay excluded from discovery,
+    unconditionally. That installed skill's body is instructions to run
+    `dustm chat -a <agent> -m "<message>"` - discovering it with
+    `/claude-code-mode` on would hand a Dust agent (which has
+    `run_command`) literal instructions to invoke itself. `SkillInit.tsx`
+    imports `DUSTM_OUTBOUND_SKILL_NAME` from `skillStore.ts` rather than
+    each defining its own copy, so the two can't drift apart.
+  - `areClaudeSkillsEnabled()` is a module-level singleton for the same
+    reason `planMode.ts` is one: `read_skill` executes in the MCP transport
+    layer with no access to React state. It's set from exactly one place,
+    `Chat.tsx`'s existing `claudeCodeMode` effect - non-interactive (`-m`)
+    mode has no `/claude-code-mode` toggle to sync from, so it correctly
+    stays `false` there by construction. If skills ever need injecting in
+    non-interactive mode too (deliberately out of scope for now - see the
+    plan this was built from), that's a **second** call site the singleton
+    needs wiring at, the same shape of bug `taskStore.ts`'s
+    `setActiveConversationId` shipped with once (see above).
+  - `read_skill` is read-only and belongs in `planMode.ts`'s
+    `PLAN_MODE_ALLOWED_TOOLS` - keep it there if that list is ever touched;
+    `read_tasks` shipping without this for a full phase is the reason this
+    is called out explicitly (see the plan-mode bullet above).
+  - The `/skills` picker's on/off state persists to
+    `~/.dust-cli/skills-state.json`, which records the **disabled** set, not
+    the enabled one - so a newly authored skill is on by default instead of
+    silently doing nothing until someone opens a picker they didn't know
+    about. Keep that polarity if the file is ever extended. A disabled
+    skill is out of scope *everywhere*: excluded from the catalogue and
+    refused by `read_skill`. Don't "helpfully" let the agent load one by
+    name - that turns a user's explicit choice into a display filter. This
+    is also the one place skills state is written deliberately rather than
+    best-effort: `saveDisabledSkillNames` returns a result the caller
+    surfaces, because silently failing to persist a choice the user just
+    made in a picker is worse than saying so.
+  - Skill bodies are **never** auto-inlined into the injected block
+    regardless of size, unlike `claudeMemory.ts`'s small-memory-set inline
+    path. This is deliberate, not a missing optimization: a memory is
+    background fact that's almost always relevant, but a skill is a
+    conditional procedure whose `description` says *when* to use it -
+    inlining a body unconditionally defeats that. Only the catalogue
+    (names + descriptions) is auto-injected; a body reaches the agent only
+    via `read_skill` or an explicit `/skills <name>`.
+  - This only discovers hand-authored `~/.claude/skills/<name>/SKILL.md`
+    files. Claude Code's plugin-installed skills live under a completely
+    different tree (`~/.claude/plugins/marketplaces/.../skills/`) and are
+    **not** read - globbing that tree would advertise skills from plugins
+    the user may never have enabled. Documented as a known limitation, not
+    a bug to fix reflexively.
 - `src/types/marked-terminal.d.ts` - type shim
 - Everything under `.github/`, `scripts/`, `img/`, plus `AGENTS.md` and
   `README.md` themselves

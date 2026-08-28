@@ -47,6 +47,19 @@ export function getGlobalMemoryDir(): string {
   return path.join(getClaudeHome(), "memory");
 }
 
+// Claude Code's hand-authored skill layout: <skillsDir>/<name>/SKILL.md.
+// Read by src/utils/skillStore.ts, gated on /claude-code-mode - see that
+// file for why (and for what this deliberately does NOT read: Claude
+// Code's plugin-marketplace skills live under a different tree entirely,
+// ~/.claude/plugins/marketplaces/.../skills/, and are out of scope here).
+export function getClaudeSkillsDir(): string {
+  return path.join(getClaudeHome(), "skills");
+}
+
+export function getClaudeProjectSkillsDir(cwd: string = process.cwd()): string {
+  return path.join(cwd, ".claude", "skills");
+}
+
 // Where a memory can be written. "project" scopes it to the current working
 // directory's Claude Code project; "global" is user-level, carried across
 // every project.
@@ -206,12 +219,20 @@ function truncate(content: string): {
  *
  * Deliberately not a general YAML parser: everything this fork reads out of
  * frontmatter is a handful of known scalars (a memory's `name`,
- * `description` and nested `metadata.type`; a rule's `paths`), and pulling
- * in a YAML dependency for that isn't worth it. Anything else in the block
- * is ignored, and a file with no frontmatter at all still parses - it just
- * reports an empty block and keeps its whole content as the body.
+ * `description` and nested `metadata.type`; a rule's `paths`; a skill's
+ * `name`, `description` and `disable-model-invocation` - see
+ * skillStore.ts), and pulling in a YAML dependency for that isn't worth it.
+ * Anything else in the block is ignored, and a file with no frontmatter at
+ * all still parses - it just reports an empty block and keeps its whole
+ * content as the body.
+ *
+ * `scalar()` matches `key: value` at any indentation (needed for
+ * `metadata.type`'s nested form), so a caller reading a top-level-only key
+ * from a file that could plausibly nest the same key name under something
+ * else should be aware a nested match would win. None of this fork's
+ * current callers have that shape.
  */
-function splitFrontmatter(raw: string): {
+export function splitFrontmatter(raw: string): {
   body: string;
   scalar: (key: string) => string | null;
   hasFrontmatter: boolean;

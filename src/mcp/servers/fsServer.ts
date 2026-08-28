@@ -10,6 +10,7 @@ import { FetchUrlTool } from "../tools/fetchUrl.js";
 import { PresentPlanTool } from "../tools/presentPlan.js";
 import { ReadFileTool } from "../tools/readFile.js";
 import { ReadMemoryTool } from "../tools/readMemory.js";
+import { ReadSkillTool } from "../tools/readSkill.js";
 import { ReadTasksTool } from "../tools/readTasks.js";
 import { RunCommandTool } from "../tools/runCommand.js";
 import { SearchContentTool } from "../tools/searchContent.js";
@@ -54,6 +55,7 @@ export const useFileSystemServer = async (
   const readTasksTool = new ReadTasksTool();
   const readMemoryTool = new ReadMemoryTool();
   const writeMemoryTool = new WriteMemoryTool();
+  const readSkillTool = new ReadSkillTool();
   const presentPlanTool = new PresentPlanTool();
 
   if (planApprovalCallback) {
@@ -70,12 +72,15 @@ export const useFileSystemServer = async (
     writeMemoryTool.setDiffApprovalCallback(diffApprovalCallback);
   }
 
-  // The memory tools are registered unconditionally, not gated on
+  // The memory and skill tools are registered unconditionally, not gated on
   // /claude-code-mode: MCP tools are advertised once, when the server
   // connects at chat startup, so a mode toggled on later in the session
   // could not add them. What the mode actually changes is whether the agent
-  // is *told* about the user's memories (the priming block) - the tools
-  // themselves are inert until it goes looking for them.
+  // is *told* about the user's memories/Claude skills (the priming block /
+  // skill catalogue) - the tools themselves are inert until it goes looking
+  // for them. read_skill still finds dustm-directory skills (~/.dust-cli/
+  // skills, ./.dust/skills) regardless of the mode; only the Claude-sourced
+  // ones are gated.
   const tools = [
     readFileTool,
     fetchUrlTool,
@@ -88,6 +93,7 @@ export const useFileSystemServer = async (
     readTasksTool,
     readMemoryTool,
     writeMemoryTool,
+    readSkillTool,
     // Registered unconditionally, like the memory tools: MCP advertises its
     // tool list once at connect time, so a mode toggled on later in the
     // session could not add it. It reports plan mode being off rather than

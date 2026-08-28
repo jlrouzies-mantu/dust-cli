@@ -93,6 +93,21 @@ export const MANTU_THINKING_PINK_FADED = lerpColor(
   0.55
 );
 
+// The accent for checklist pickers (/skills) - used for both the checked
+// dot and the highlighted row, deliberately the same value for both.
+// Softened a step off MANTU_PURPLE so a column of dots reads as quiet
+// state rather than a column of brand-colored alerts, while staying
+// unmistakably purple. Two near-but-not-equal purples adjacent on the same
+// row would read as an accident rather than a design.
+export const PICKER_PURPLE = lerpColor(MANTU_PURPLE, "#2A2A2A", 0.2);
+
+// Faded orange for advisory hints inside a picker - "you could see more
+// here if you turned something on". Muted well below the status bar's
+// #FF7F00 warning orange on purpose: this is an aside about an option the
+// user hasn't taken, not a problem with what they're doing, so it must
+// read as quieter than the list it sits under.
+export const HINT_ORANGE_FADED = lerpColor("#FF7F00", "#2A2A2A", 0.45);
+
 // Dark gray instead of pure black - a solid black fill is indistinguishable
 // from a terminal's own black background (e.g. default PowerShell 7), so
 // code blocks need a shade that actually reads as "a different surface".

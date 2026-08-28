@@ -31,6 +31,7 @@
   - [Modes](#modes)
   - [Loops](#loops)
   - [Tasks](#tasks)
+  - [Skills](#skills)
   - [Fetching a URL](#fetching-a-url)
   - [Claude Code mode](#claude-code-mode)
   - [Headless Authentication](#headless-authentication)
@@ -48,7 +49,7 @@
 | Feature | Notes |
 |---|---|
 | Markdown rendering | Syntax-highlighted code fences, boxed on their own |
-| Transient "Thinking…" status | `◊` icon pulsing between brand colors instead of a permanent scrollback dump |
+| Transient "Thinking…" status | `◊` icon pulsing between brand colors instead of a permanent scrollback dump, with a live preview of the agent's current reasoning above it (faded pink italic, kept up to date with the latest streamed tokens) that hands over to the answer preview once the reply starts and never lands in scrollback |
 | Persistent, colorized status bar | Workspace, agent, folder, branch, tokens, credits — see [Status bar](#status-bar) |
 | Ctrl+Enter / Shift+Enter | Multi-line input |
 | `todo_write` tool | Claude-Code-style task checklist (`--with-tools` only), now with stable ids, `dependsOn` gating, and persistence across `--resume` — see [Tasks](#tasks) |
@@ -66,6 +67,8 @@
 | Plan mode + Shift+Tab modes | `/plan` (or `--plan`) makes the agent research read-only and get a plan approved before it edits anything. Shift+Tab cycles **normal → auto-edit → plan**, always shown in the status bar, replacing the undocumented binary auto-accept toggle it used to be. Approved plans render as a bordered, markdown-styled document naming the file they were saved to — see [Modes](#modes) |
 | `/loop` and `--loop` | Re-send a prompt on an interval, so unattended work ("check CI and fix what's broken") can keep going without you retyping it. Interactive in the chat, or headless for CI — see [Loops](#loops) |
 | `/claude-code-mode` | Primes the Dust agent with the memories Claude Code keeps for this folder, plus the repo's own `CLAUDE.md`/`AGENTS.md` — so a Dust agent starts with the same background your coding CLI has. Comes with `read_memory`/`write_memory` tools so the agent can maintain those memories too — see [Claude Code mode](#claude-code-mode) |
+| Local skills | Dust's own agent skills are configured server-side and locked to workspace admins — this is the client-side alternative: hand-authored `SKILL.md` files the agent discovers, gets a cheap catalogue of, and pulls in full on demand via a `read_skill` tool. `/skills` opens a checklist to switch them on and off — see [Skills](#skills) |
+| Update check against this fork's releases | This fork isn't on npm, so the upstream update notifier had nothing to check and was stubbed out entirely. It now checks this repo's own GitHub releases and shows the actual reinstall one-liner instead of an `npm install -g` command that was never going to work — network failures and blocked endpoints just mean "no update", never a startup error |
 | `@` file mentions | Type `@` to fuzzy-search the current folder and insert `@relative/path` at the cursor, rendered in dim gold italic so it's easy to pick out from the rest of the draft — same fuzzy-picker UI as `/attach` |
 | Resume command on exit | A second Ctrl+C prints `dustm --agent <name> --conversationId <id>` right before exiting, so a reflexive double-press to interrupt a runaway turn doesn't cost you the conversation |
 | Immediate "Cancelling…" feedback | Esc/Ctrl+C now shows a red `✗ Cancelling` status the instant it's pressed, instead of leaving "Thinking…" up for the couple of seconds `cancelMessageGeneration` takes to actually confirm the cancel server-side |
@@ -97,6 +100,9 @@
 | `End` (and `Home`) did nothing in the input box | Ink's parser recognizes these keys internally but the `key` object handed to `useInput` has no `.home`/`.end` field at all — both arrived as a complete no-op. Now detected from the raw escape sequence directly, the same way Delete is already disambiguated from Backspace |
 | Conversation ID in the status bar didn't match the one shown in the web app (or work with `--conversationId`) | It was truncated to 8 characters; now shown in full |
 | Creating a file dumped its entire contents into the chat, unbounded | A new file has no real diff — every line is a `+` — and the permanent transcript view of `write_file`/`edit_file` changes had no line cap, unlike every other place this CLI shows tool output. Now capped at 30 lines with a "N more lines not shown" note, same as the ephemeral approval preview |
+| Wide tables rendered as shredded box-drawing characters across several lines | `cli-table3` sizes columns purely by content, with no idea how wide the terminal is. Any table wider than the terminal produced physical lines longer than the terminal's column count, which then hard-wrapped at an arbitrary column — slicing borders and cell text apart mid-row. Columns are now given explicit widths when the natural layout would overflow, so long cells wrap *inside* their own column and every emitted line already fits |
+| Tables with a divider between every row rendered with garbage `---` rows | Agents sometimes emit "grid tables" — a `\|---\|---\|` line between *every* row, not just after the header. `marked` only treats the first one as a separator; each extra one parsed as a literal data row whose cells were all `---`, slicing the table apart. Redundant divider rows are now stripped before markdown ever sees them (left alone inside fenced code blocks, where such a table may be a deliberate example) |
+| `-m`/`--message` polluted its own machine-readable output | The pulsing "Starting dustm..." line, its trailing newline, and the logger init were printed unconditionally — including in the non-interactive path whose stdout callers parse as JSON. They're now interactive-only |
 
 ---
 
@@ -177,7 +183,7 @@ When no command is given, `chat` is used by default.
 | `login` | Authenticate with your Dust account (`--force` to re-authenticate) |
 | `status` | Check your current authentication status |
 | `logout` | Log out |
-| `skill:init` | Install the dustm skill for coding CLIs (Claude Code, Codex) |
+| `skill:init` | Install the dustm skill *into* other coding CLIs (Claude Code, Codex), so they can call Dust — outbound, unrelated to `/skills` inside a chat (see [Skills](#skills)) |
 | `chat` | Chat with a Dust agent (default command) |
 | &nbsp;&nbsp;`--loop <interval>` | Re-send `--message` on an interval (requires `--message`) — see [Loops](#loops) |
 | &nbsp;&nbsp;`--maxRuns <n>` | Cap on `--loop` runs (default 50) |
@@ -234,6 +240,8 @@ Context-window usage and consumed credits come from endpoints the Dust web dashb
 - **`/plan`** — toggle plan mode (or `Shift+Tab`) — see [Modes](#modes)
 - **`/loop <interval> [xN] <prompt>`** — re-send a prompt on an interval; `/loop stop` cancels, `/loop` alone shows status — see [Loops](#loops)
 - **`/tasks`** — show the current task list for this conversation — see [Tasks](#tasks)
+- **`/skills`** — open a checklist to switch local skills on/off, or `/skills <name>` to force one into your next message — see [Skills](#skills)
+- **`/claude-code-mode`** — prime the agent with your Claude Code memories for this folder — see [Claude Code mode](#claude-code-mode)
 
 ### Modes
 
@@ -293,7 +301,6 @@ Approved plans are written to `~/.dust-cli/plans/<conversationId>-<n>.md` so the
 In a non-interactive run there's no one to approve anything, so `present_plan` refuses and says why instead of silently switching plan mode off — which would hand the agent exactly the write access you withheld. `--plan` with `--message` is rejected as a usage error for the same reason.
 
 **You won't be asked to approve blocked tools.** Dust has its own server-side tool-approval prompt that fires *before* a tool runs and knows nothing about plan mode — so without special handling, planning meant being asked to approve a write that this CLI was then guaranteed to refuse, which reads as plan mode not working. While planning, that prompt is skipped for the three blocked tools and the call goes straight through to the refusal, whose message explains plan mode and points at `present_plan`. (Rejecting it instead would abort with a bare "rejected by user" and teach the agent nothing.)
-- **`/claude-code-mode`** — prime the agent with your Claude Code memories for this folder — see [Claude Code mode](#claude-code-mode)
 
 ### Loops
 
@@ -352,6 +359,60 @@ Each task carries a short, stable **id** the agent assigns and reuses across cal
 ```
 
 `/tasks` reprints the current list at any time, read from the same persisted store the agent itself reads from — a new **`read_tasks`** tool lets the agent check status or find unblocked work without rewriting the list (`todo_write` always replaces the whole thing, so reading it that way would mean resubmitting every task just to look).
+
+### Skills
+
+Dust's own agent skills are configured server-side and locked to workspace admins — an end user can't create one. Local skills are the client-side alternative: a **`SKILL.md`** file you author yourself, discovered on disk and made available to the agent.
+
+A skill is a small markdown file with frontmatter:
+
+```markdown
+---
+name: release-checklist
+description: Steps to cut and verify a release. Use when asked to release, tag, or publish.
+---
+
+1. Run the test suite.
+2. Bump the version with `npm --no-git-tag-version version <x.y.z>`.
+3. ...
+```
+
+`description` is what the agent sees before deciding to use the skill, so say *when* to reach for it, not just what it is. `name` is optional — the directory name is what actually identifies the skill (what you type in `/skills <name>`); if they disagree, the directory name wins and `/skills` says so.
+
+Skills are read from four places:
+
+| Directory | Scope | Read when |
+|---|---|---|
+| `./.dust/skills/<name>/SKILL.md` | this project | always |
+| `~/.dust-cli/skills/<name>/SKILL.md` | every project | always |
+| `./.claude/skills/<name>/SKILL.md` | this project | `/claude-code-mode` is on |
+| `~/.claude/skills/<name>/SKILL.md` | every project | `/claude-code-mode` is on |
+
+The last two exist so a skill you already hand-authored for Claude Code is picked up here too, without duplicating it. They're gated on the mode because they're a *borrowing* — a skill you deliberately put in one of dustm's own directories always wins a name collision with one borrowed from Claude Code. Note this only reads skills you wrote by hand into `~/.claude/skills/`; skills that came from a Claude Code *plugin* live in a different location entirely and aren't discovered here.
+
+**The agent never gets a skill's full body unless it asks for it, or you force one.** Every message carries only a cheap catalogue — each skill's name and description, nothing else — and the agent loads a body on demand with a `read_skill` tool, the same progressive-disclosure shape `/claude-code-mode`'s memories use. Unlike memories, skill bodies are never inlined regardless of how small they are: a memory is background fact that's almost always relevant, but a skill is a *conditional* procedure, and inlining it defeats the point of the description saying when to use it. The catalogue itself is re-read from disk and re-sent only when it actually changes (a skill added, edited, or `/claude-code-mode` toggled), so none of that needs a `/new` to take effect.
+
+**`/skills`** opens a checklist under the prompt, so you can switch individual skills on and off:
+
+```
+ Skills sent to the agent:
+
+   ● csharp-dotnet   Conventions for writing C# and .NET code (modern C# 12+/.…
+   ● javascript-esm  Conventions for modern ES module JavaScript (.mjs / type:…
+ > ○ powershell      Conventions for writing PowerShell scripts and functions …
+   ● tsql            Conventions for writing T-SQL against SQL Server / Azure …
+
+ Space toggles · Enter saves · Esc cancels
+ To get .claude skills, enable /claude-code-mode first.
+```
+
+A filled purple `●` is on, a dim `○` is off. Descriptions line up in their own column and truncate rather than wrap, so the list stays readable however long they get.
+
+Up/Down moves, **Space** toggles, **Enter** saves, **Esc** discards. A skill switched off is out of scope entirely — it's absent from the catalogue *and* `read_skill` refuses to load it, so the toggle actually means something rather than being a display filter.
+
+The choice persists to `~/.dust-cli/skills-state.json` and survives restarts. That file records only what you've turned **off**, so a skill you add later is on by default — you don't have to open the picker to start using something you just wrote.
+
+Force a skill's full body into your very next message with **`/skills <name>`** — useful when you know exactly which one applies and don't want to wait on the agent to ask for it.
 
 ### Fetching a URL
 

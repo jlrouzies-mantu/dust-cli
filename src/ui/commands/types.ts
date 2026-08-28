@@ -17,6 +17,10 @@ export interface CommandContext {
   // a prefix of the other would silently run whichever is declared first
   // and drop the argument.
   runSkillsCommand?: (args?: string) => void;
+  // args present -> set directly by id/level ("default" clears); absent ->
+  // open a picker.
+  runModelCommand?: (args?: string) => void;
+  runEffortCommand?: (args?: string) => void;
 }
 
 export interface Command {
@@ -174,6 +178,28 @@ export const createCommands = (context: CommandContext): Command[] => [
     execute: (args) => {
       if (context.runSkillsCommand) {
         context.runSkillsCommand(args);
+      }
+    },
+  },
+  {
+    name: "model",
+    description:
+      "Override the model for this conversation (/model default to clear)",
+    usage: "[model-id]",
+    execute: (args) => {
+      if (context.runModelCommand) {
+        context.runModelCommand(args);
+      }
+    },
+  },
+  {
+    name: "effort",
+    description:
+      "Override the reasoning effort (high/medium/light/none, or default)",
+    usage: "[level]",
+    execute: (args) => {
+      if (context.runEffortCommand) {
+        context.runEffortCommand(args);
       }
     },
   },

@@ -49,6 +49,18 @@ import {
   setPlanMode,
 } from "../../utils/planMode.js";
 import { saveApprovedPlan } from "../../utils/planStore.js";
+import type {
+  ModelOverride,
+  ReasoningEffort,
+} from "../../utils/modelSelection.js";
+import {
+  MODEL_CATALOG,
+  REASONING_EFFORTS,
+  buildModelSelection,
+  describeModelStatus,
+  modelCandidates,
+  resolveModel,
+} from "../../utils/modelSelection.js";
 import type { Skill } from "../../utils/skillStore.js";
 import {
   buildSkillCatalogue,
@@ -170,6 +182,23 @@ function getLastConversationItem<T extends ConversationItem>(
 // spinner, which doesn't cause this complaint) keeps each one small enough
 // to not fight your own scrolling. The full untruncated content still
 // lands in scrollback normally once the message finishes.
+// Heading shown above each kind of inline selector. A lookup rather than
+// the nested ternary chain this used to be: one line per mode, and adding
+// a mode can't accidentally re-nest the branches around it. Modes with no
+// entry (currently none) simply render no heading.
+const SELECTOR_PROMPTS: Record<string, string | undefined> = {
+  agent: "Select an agent:",
+  file: "Select a file:",
+  mention: "Select a file to mention:",
+  conversation: "Select a conversation:",
+  model: "Model for this conversation:",
+  effort: "Reasoning effort for this conversation:",
+  skills: "Skills sent to the agent:",
+  approval: "Use Up/Down to navigate, Enter to confirm, Esc to reject:",
+  diff: "Use Up/Down to navigate, Enter to confirm, Esc to reject:",
+  plan: "Use Up/Down to navigate, Enter to confirm, Esc to reject:",
+};
+
 const STREAMING_PREVIEW_MAX_LINES = 6;
 function truncateForStreamingPreview(text: string): string {
   const maxLines = STREAMING_PREVIEW_MAX_LINES;
@@ -326,6 +355,23 @@ const CliChat: FC<CliChatProps> = ({
   const skillRevisionRef = useRef(0);
   const pendingForcedSkillsRef = useRef<Skill[]>([]);
 
+  // /model and /effort: client-side overrides of the agent's server-side
+  // model and reasoning effort, sent as `modelSelection` on every outgoing
+  // message while set (see buildModelSelection). null means "don't send
+  // one", which leaves the agent's own configuration in force - the right
+  // default, and the only state in which this CLI is certain what model is
+  // being used. Mirrored into refs because handleSubmitQuestion reads them
+  // and shouldn't be rebuilt on every change, the same pattern chatModeRef
+  // and claudeCodeModeRef use.
+  const [modelOverride, setModelOverride] = useState<ModelOverride | null>(
+    null
+  );
+  const [effortOverride, setEffortOverride] = useState<ReasoningEffort | null>(
+    null
+  );
+  const modelOverrideRef = useRef<ModelOverride | null>(null);
+  const effortOverrideRef = useRef<ReasoningEffort | null>(null);
+
   // /loop: re-sends one prompt on an interval. `loopRef` mirrors the state
   // for the interval callback (a setInterval closure would otherwise capture
   // the value from the render that armed it), and `loopBusyRef` mirrors
@@ -397,7 +443,9 @@ const CliChat: FC<CliChatProps> = ({
       | "diff"
       | "plan"
       | "mention"
-      | "skills";
+      | "skills"
+      | "model"
+      | "effort";
     items: InlineSelectorItem[];
     query: string;
     selectedIndex: number;
@@ -1268,6 +1316,202 @@ const CliChat: FC<CliChatProps> = ({
   );
 
   /**
+   * Commits a model override and reports it. Shared by `/model <id>` and
+   * the picker so both paths produce identical state and wording.
+   *
+   * The notice spells out that this is client-side and per-conversation:
+   * it changes what this CLI sends on each message, never the agent's
+   * saved configuration, and someone else talking to the same agent is
+   * unaffected.
+   */
+  const applyModelOverride = useCallback(
+    (choice: ModelOverride) => {
+      setModelOverride(choice);
+      modelOverrideRef.current = choice;
+      pushNoticeLines(
+        [
+          `Model: ${choice.label} (${choice.providerId})`,
+          "  Sent with each message from now on - this overrides the agent's own",
+          "  model for you only, and doesn't change its saved configuration.",
+          "  /model default to go back.",
+        ],
+        "model_set"
+      );
+    },
+    [pushNoticeLines]
+  );
+
+  const applyEffortOverride = useCallback(
+    (effort: ReasoningEffort | null) => {
+      setEffortOverride(effort);
+      effortOverrideRef.current = effort;
+      if (!effort) {
+        pushNoticeLines(
+          ["Effort: back to the agent's own configuration."],
+          "effort_default"
+        );
+        return;
+      }
+      // An effort override has to name a model too (the API requires
+      // providerId+modelId whenever modelSelection is present), so warn if
+      // there's nothing to attach it to - otherwise it would silently do
+      // nothing. See buildModelSelection.
+      const haveModel =
+        modelOverrideRef.current !== null || Boolean(selectedAgent?.model);
+      pushNoticeLines(
+        haveModel
+          ? [
+              `Effort: ${effort}`,
+              "  Sent with each message from now on. /effort default to go back.",
+            ]
+          : [
+              `Effort: ${effort} - not sent yet.`,
+              "  The API requires a model alongside an effort, and this agent's own",
+              "  model isn't known yet. Set one with /model, or wait for the agent",
+              "  list to finish loading.",
+            ],
+        "effort_set"
+      );
+    },
+    [pushNoticeLines, selectedAgent]
+  );
+
+  /**
+   * Handles `/model`: no argument opens a picker, an argument sets the
+   * model directly (accepting ids not in MODEL_CATALOG, since the API's
+   * modelId is an open string and new models ship regularly), and
+   * "default"/"reset"/"clear" drops back to the agent's own configuration.
+   */
+  const runModelCommand = useCallback(
+    (args?: string) => {
+      const query = args?.trim();
+
+      if (!query) {
+        const currentId = modelOverrideRef.current?.modelId;
+        const agentModelId = selectedAgent?.model?.modelId;
+        setInlineSelector({
+          mode: "model",
+          items: [
+            {
+              id: "__default__",
+              label: "default",
+              description: agentModelId
+                ? `the agent's own model (${agentModelId})`
+                : "the agent's own model",
+            },
+            ...MODEL_CATALOG.map((m) => ({
+              id: m.modelId,
+              label: m.label,
+              description: [
+                m.providerId,
+                m.note,
+                m.modelId === currentId ? "current" : null,
+              ]
+                .filter(Boolean)
+                .join(" · "),
+            })),
+          ],
+          query: "",
+          selectedIndex: 0,
+        });
+        return;
+      }
+
+      if (["default", "reset", "clear", "none"].includes(query.toLowerCase())) {
+        setModelOverride(null);
+        modelOverrideRef.current = null;
+        pushNoticeLines(
+          [
+            "Model: back to the agent's own configuration.",
+            ...(selectedAgent?.model?.modelId
+              ? [`  ${selectedAgent.model.modelId}`]
+              : []),
+          ],
+          "model_default"
+        );
+        return;
+      }
+
+      const resolved = resolveModel(query);
+      if (!resolved) {
+        const candidates = modelCandidates(query);
+        pushNoticeLines(
+          candidates.length > 1
+            ? [
+                `"${query}" matches more than one model - be more specific:`,
+                ...candidates.map((c) => `  ${c.label} (${c.providerId})`),
+              ]
+            : [
+                `Unknown model "${query}".`,
+                "  Run /model with no argument to pick from the list, or pass a full",
+                "  model id (claude-*, gpt-*, o*, gemini-*, grok-*, mistral-*,",
+                "  deepseek-*, accounts/fireworks/models/*).",
+              ],
+          "model_unknown"
+        );
+        return;
+      }
+
+      applyModelOverride(resolved);
+    },
+    [pushNoticeLines, selectedAgent, applyModelOverride]
+  );
+
+  /**
+   * Handles `/effort`: same shape as /model. Note the API's levels are
+   * high/medium/light/none - "light", not "low".
+   */
+  const runEffortCommand = useCallback(
+    (args?: string) => {
+      const query = args?.trim().toLowerCase();
+
+      if (!query) {
+        setInlineSelector({
+          mode: "effort",
+          items: [
+            {
+              id: "__default__",
+              label: "default",
+              description: "the agent's own reasoning effort",
+            },
+            ...REASONING_EFFORTS.map((e) => ({
+              id: e.id,
+              label: e.label,
+              description:
+                e.id === effortOverrideRef.current
+                  ? `${e.description} · current`
+                  : e.description,
+            })),
+          ],
+          query: "",
+          selectedIndex: 0,
+        });
+        return;
+      }
+
+      if (["default", "reset", "clear"].includes(query)) {
+        applyEffortOverride(null);
+        return;
+      }
+
+      const match = REASONING_EFFORTS.find((e) => e.id === query);
+      if (!match) {
+        pushNoticeLines(
+          [
+            `Unknown effort "${query}".`,
+            `  Use one of: ${REASONING_EFFORTS.map((e) => e.id).join(", ")}, or default.`,
+          ],
+          "effort_unknown"
+        );
+        return;
+      }
+
+      applyEffortOverride(match.id);
+    },
+    [pushNoticeLines, applyEffortOverride]
+  );
+
+  /**
    * Single entry point for every mode change (Shift+Tab, `/auto`, `/plan`).
    *
    * Deliberately writes nothing to the conversation: the status bar shows the
@@ -1721,7 +1965,7 @@ const CliChat: FC<CliChatProps> = ({
 
   const showHelp = useCallback(() => {
     const helpText =
-      "Commands: /help /switch /new /clear /resume /attach /clear-files /auto /plan /loop /tasks /skills /claude-code-mode /exit\n" +
+      "Commands: /help /switch /new /clear /resume /attach /clear-files /auto /plan /loop /tasks /skills /model /effort /claude-code-mode /exit\n" +
       `Modes (Shift+Tab cycles, shown in the status bar): ${(
         ["normal", "auto", "plan"] as ChatMode[]
       )
@@ -1900,6 +2144,8 @@ const CliChat: FC<CliChatProps> = ({
     togglePlanMode,
     runTasksCommand,
     runSkillsCommand,
+    runModelCommand,
+    runEffortCommand,
   });
 
   // Clear the terminal (screen + scrollback) once, when the interactive
@@ -2133,6 +2379,14 @@ const CliChat: FC<CliChatProps> = ({
     // planMode.ts, bridged the same way.
     setClaudeSkillsEnabled(claudeCodeMode);
   }, [claudeCodeMode]);
+
+  useEffect(() => {
+    modelOverrideRef.current = modelOverride;
+  }, [modelOverride]);
+
+  useEffect(() => {
+    effortOverrideRef.current = effortOverride;
+  }, [effortOverride]);
 
   // Push the active conversation id across into the module-level flag
   // todo_write/read_tasks read (see utils/taskStore.ts) - the same pattern
@@ -2553,6 +2807,22 @@ const CliChat: FC<CliChatProps> = ({
           }
         }
 
+        // /model and /effort. Undefined unless something is actually
+        // overridden, in which case the field is omitted entirely and the
+        // server applies the agent's own configuration. An effort-only
+        // override still has to carry a model, so it falls back to the
+        // agent's own - see buildModelSelection.
+        const modelSelection = buildModelSelection(
+          modelOverrideRef.current,
+          effortOverrideRef.current,
+          selectedAgent.model
+            ? {
+                modelId: selectedAgent.model.modelId,
+                providerId: selectedAgent.model.providerId,
+              }
+            : null
+        );
+
         if (!currentConversationId) {
           // For new conversation, pass contentFragments (from uploaded files)
           const contentFragments = attachedFiles.map((file) => ({
@@ -2584,6 +2854,7 @@ const CliChat: FC<CliChatProps> = ({
                   ? [fileSystemServerId]
                   : null,
               },
+              ...(modelSelection ? { modelSelection } : {}),
             },
             contentFragments,
             spaceId: resolvedSpaceId,
@@ -2623,6 +2894,7 @@ const CliChat: FC<CliChatProps> = ({
                 email: me.email,
                 origin: "cli",
               },
+              ...(modelSelection ? { modelSelection } : {}),
             },
           });
 
@@ -3175,9 +3447,6 @@ const CliChat: FC<CliChatProps> = ({
               .toLowerCase()
               .includes(inlineSelector.query.toLowerCase())
           );
-      const maxVisible = 10;
-      const visibleCount = Math.min(filtered.length, maxVisible);
-
       if (key.upArrow) {
         setInlineSelector((prev) =>
           prev
@@ -3188,12 +3457,19 @@ const CliChat: FC<CliChatProps> = ({
       }
 
       if (key.downArrow) {
+        // Clamped to the whole filtered list, not to how many rows happen
+        // to be on screen: InlineSelector scrolls its window to follow the
+        // selection, so every item is reachable with the arrow keys. This
+        // used to clamp to the visible count, which made anything past the
+        // 10th item unreachable unless you typed a filter - fine for the
+        // short menus this started with, wrong for the ~27-entry /model
+        // list.
         setInlineSelector((prev) =>
           prev
             ? {
                 ...prev,
                 selectedIndex: Math.min(
-                  visibleCount - 1,
+                  filtered.length - 1,
                   prev.selectedIndex + 1
                 ),
               }
@@ -3299,6 +3575,19 @@ const CliChat: FC<CliChatProps> = ({
             const agent = (allAgents || []).find((a) => a.sId === selected.id);
             if (agent) {
               setSelectedAgent(agent);
+              // A model override is a deviation from *the previous agent's*
+              // default, so carrying it across would silently impose the old
+              // agent's model on the new one - most likely not what was
+              // meant, and invisible unless the status bar happens to be
+              // read. Effort is dropped with it, since it can only be sent
+              // alongside a model.
+              const hadOverride =
+                modelOverrideRef.current !== null ||
+                effortOverrideRef.current !== null;
+              setModelOverride(null);
+              modelOverrideRef.current = null;
+              setEffortOverride(null);
+              effortOverrideRef.current = null;
               setConversationItems((prev) => [
                 ...prev,
                 {
@@ -3307,6 +3596,16 @@ const CliChat: FC<CliChatProps> = ({
                   text: `Switched to @${agent.name}`,
                   index: 0,
                 },
+                ...(hadOverride
+                  ? [
+                      {
+                        key: `switch_model_reset_${Date.now()}`,
+                        type: "agent_message_content_line" as const,
+                        text: "  /model and /effort reset to this agent's own configuration.",
+                        index: 0,
+                      },
+                    ]
+                  : []),
                 { key: `switch_sep_${Date.now()}`, type: "separator" },
               ]);
             }
@@ -3372,6 +3671,30 @@ const CliChat: FC<CliChatProps> = ({
           } else if (inlineSelector.mode === "conversation") {
             void handleConversationSelected(selected.id);
             setInlineSelector(null);
+          } else if (inlineSelector.mode === "model") {
+            setInlineSelector(null);
+            if (selected.id === "__default__") {
+              setModelOverride(null);
+              modelOverrideRef.current = null;
+              pushNoticeLines(
+                ["Model: back to the agent's own configuration."],
+                "model_default"
+              );
+            } else {
+              const choice = MODEL_CATALOG.find(
+                (m) => m.modelId === selected.id
+              );
+              if (choice) {
+                applyModelOverride(choice);
+              }
+            }
+          } else if (inlineSelector.mode === "effort") {
+            setInlineSelector(null);
+            applyEffortOverride(
+              selected.id === "__default__"
+                ? null
+                : (selected.id as ReasoningEffort)
+            );
           }
         }
         return;
@@ -4298,6 +4621,16 @@ const CliChat: FC<CliChatProps> = ({
         retryStatus={retryStatus}
         transientHint={transientHint}
         workspaceName={workspaceName}
+        modelStatus={describeModelStatus(
+          modelOverride,
+          effortOverride,
+          selectedAgent?.model
+            ? {
+                modelId: selectedAgent.model.modelId,
+                providerId: selectedAgent.model.providerId,
+              }
+            : null
+        )}
         consumedCredits={consumedCredits}
         contextUsage={contextUsage}
         userInput={inlineSelector ? inlineSelector.query : userInput}
@@ -4343,22 +4676,7 @@ const CliChat: FC<CliChatProps> = ({
                 items: inlineSelector.items,
                 query: inlineSelector.query,
                 selectedIndex: inlineSelector.selectedIndex,
-                prompt:
-                  inlineSelector.mode === "agent"
-                    ? "Select an agent:"
-                    : inlineSelector.mode === "file"
-                      ? "Select a file:"
-                      : inlineSelector.mode === "mention"
-                        ? "Select a file to mention:"
-                        : inlineSelector.mode === "conversation"
-                        ? "Select a conversation:"
-                        : inlineSelector.mode === "skills"
-                          ? "Skills sent to the agent:"
-                          : inlineSelector.mode === "approval" ||
-                              inlineSelector.mode === "diff" ||
-                              inlineSelector.mode === "plan"
-                            ? "Use Up/Down to navigate, Enter to confirm, Esc to reject:"
-                            : undefined,
+                prompt: SELECTOR_PROMPTS[inlineSelector.mode],
                 multiSelect: inlineSelector.mode === "skills",
                 footerNote: inlineSelector.footerNote,
                 header:

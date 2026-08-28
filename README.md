@@ -32,6 +32,7 @@
   - [Loops](#loops)
   - [Tasks](#tasks)
   - [Skills](#skills)
+  - [Model and effort](#model-and-effort)
   - [Fetching a URL](#fetching-a-url)
   - [Claude Code mode](#claude-code-mode)
   - [Headless Authentication](#headless-authentication)
@@ -68,6 +69,7 @@
 | `/loop` and `--loop` | Re-send a prompt on an interval, so unattended work ("check CI and fix what's broken") can keep going without you retyping it. Interactive in the chat, or headless for CI — see [Loops](#loops) |
 | `/claude-code-mode` | Primes the Dust agent with the memories Claude Code keeps for this folder, plus the repo's own `CLAUDE.md`/`AGENTS.md` — so a Dust agent starts with the same background your coding CLI has. Comes with `read_memory`/`write_memory` tools so the agent can maintain those memories too — see [Claude Code mode](#claude-code-mode) |
 | Local skills | Dust's own agent skills are configured server-side and locked to workspace admins — this is the client-side alternative: hand-authored `SKILL.md` files the agent discovers, gets a cheap catalogue of, and pulls in full on demand via a `read_skill` tool. `/skills` opens a checklist to switch them on and off — see [Skills](#skills) |
+| `/model` and `/effort` | Override the agent's server-side model and reasoning effort for your conversation, via the API's per-message `modelSelection`. The web app exposes these; the CLI had no equivalent, so you were stuck with whatever the agent was configured with — see [Model and effort](#model-and-effort) |
 | Update check against this fork's releases | This fork isn't on npm, so the upstream update notifier had nothing to check and was stubbed out entirely. It now checks this repo's own GitHub releases and shows the actual reinstall one-liner instead of an `npm install -g` command that was never going to work — network failures and blocked endpoints just mean "no update", never a startup error |
 | `@` file mentions | Type `@` to fuzzy-search the current folder and insert `@relative/path` at the cursor, rendered in dim gold italic so it's easy to pick out from the rest of the draft — same fuzzy-picker UI as `/attach` |
 | Resume command on exit | A second Ctrl+C prints `dustm --agent <name> --conversationId <id>` right before exiting, so a reflexive double-press to interrupt a runaway turn doesn't cost you the conversation |
@@ -241,6 +243,8 @@ Context-window usage and consumed credits come from endpoints the Dust web dashb
 - **`/loop <interval> [xN] <prompt>`** — re-send a prompt on an interval; `/loop stop` cancels, `/loop` alone shows status — see [Loops](#loops)
 - **`/tasks`** — show the current task list for this conversation — see [Tasks](#tasks)
 - **`/skills`** — open a checklist to switch local skills on/off, or `/skills <name>` to force one into your next message — see [Skills](#skills)
+- **`/model`** — override the model for this conversation (`/model default` to clear) — see [Model and effort](#model-and-effort)
+- **`/effort`** — override the reasoning effort: `high`, `medium`, `light`, `none` (`/effort default` to clear)
 - **`/claude-code-mode`** — prime the agent with your Claude Code memories for this folder — see [Claude Code mode](#claude-code-mode)
 
 ### Modes
@@ -413,6 +417,38 @@ Up/Down moves, **Space** toggles, **Enter** saves, **Esc** discards. A skill swi
 The choice persists to `~/.dust-cli/skills-state.json` and survives restarts. That file records only what you've turned **off**, so a skill you add later is on by default — you don't have to open the picker to start using something you just wrote.
 
 Force a skill's full body into your very next message with **`/skills <name>`** — useful when you know exactly which one applies and don't want to wait on the agent to ask for it.
+
+### Model and effort
+
+A Dust agent is configured server-side with a model, and that's what every message uses by default. **`/model` and `/effort` override it for your conversation only** — they change what this CLI sends per message, never the agent's saved configuration, so nobody else talking to the same agent is affected.
+
+```
+/model                      # pick from a list
+/model claude-opus-5        # set directly
+/model opus-5               # partial match works
+/model default              # back to the agent's own model
+
+/effort high                # high · medium · light · none
+/effort default             # back to the agent's own effort
+```
+
+**The model in use is always in the status bar** — the agent's own in neutral grey, or your override in purple, so a deviation reads as one at a glance:
+
+```
+□ normal · gpt-5.6-luna · my-workspace · ~/src/repo · main · …        (agent's own)
+□ normal · claude-opus-5 · high · my-workspace · ~/src/repo · main …  (overridden)
+```
+
+Effort only appears once you've overridden it. The public agent API exposes each agent's `modelId` but **not** its reasoning effort, so there's no default to show and inventing one would be worse than silence.
+
+Notes worth knowing:
+
+- **The picker scrolls.** Arrow through the whole list without typing — it shows ten rows at a time with `↑ N above` / `↓ N below`, and long descriptions truncate rather than wrapping. Typing still filters if you'd rather jump.
+- **The picker's list isn't exhaustive.** There's no API that lists the models a workspace can use, so the list is a hand-maintained convenience. `/model <id>` accepts anything, including models released after this list was written — the provider is inferred from the id's prefix (`claude-*`, `gpt-*`/`o*`, `gemini-*`, `grok-*`, `mistral-*`, `deepseek-*`, `accounts/fireworks/models/*`). An id whose provider can't be inferred is refused rather than guessed at, and a model your workspace isn't entitled to is rejected by the server.
+- **`auto`, `auto_fast` and `auto_complex`** are in the list too — Dust picks the concrete model per message.
+- **An effort override always carries a model.** The API requires `providerId` and `modelId` whenever a selection is present, so `/effort` on its own re-sends the agent's own model with your chosen effort. If the agent list hasn't loaded yet there's no model to attach it to, and `/effort` says so rather than silently doing nothing.
+- **`/switch` resets both.** An override is a deviation from *that* agent's default, so carrying it to a different agent would silently impose the old one's model. The switch notice says when it reset something.
+- **It's per-session, not persisted** — a fresh `dustm` starts on the agent's own configuration again.
 
 ### Fetching a URL
 

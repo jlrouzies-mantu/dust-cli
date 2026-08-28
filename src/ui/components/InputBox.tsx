@@ -1,3 +1,4 @@
+import chalk from "chalk";
 import { Box, Text } from "ink";
 import React from "react";
 
@@ -19,34 +20,32 @@ interface InputBoxProps {
 // ones came from the picker.
 const MENTION_TOKEN_RE = /@\S+/g;
 
-// Splits a line into plain-text runs and gold/bold/italic mention spans, so
-// an inserted "@file" reads as a distinct reference at a glance instead of
-// blending into the rest of the draft. Bold rather than dim - dimming
-// MANTU_GOLD washes it out to near-illegible against a dark terminal
-// background, defeating the point of highlighting it at all.
-function renderWithMentions(text: string, keyPrefix: string): React.ReactNode {
+// Colours "@file" mention tokens gold/bold/italic so an inserted reference
+// reads as distinct at a glance instead of blending into the draft. Bold
+// rather than dim - dimming MANTU_GOLD washes it out to near-illegible
+// against a dark terminal background, defeating the point of highlighting
+// it at all.
+//
+// Returns a pre-coloured *string* rather than React nodes: see the comment
+// on the render below for why nothing here may be a nested <Text>.
+function colorMentions(text: string): string {
   if (!text.includes("@")) {
     return text;
   }
-  const parts: React.ReactNode[] = [];
+  let out = "";
   let lastIndex = 0;
-  let matchCount = 0;
   for (const match of text.matchAll(MENTION_TOKEN_RE)) {
     const index = match.index ?? 0;
     if (index > lastIndex) {
-      parts.push(text.slice(lastIndex, index));
+      out += text.slice(lastIndex, index);
     }
-    parts.push(
-      <Text key={`${keyPrefix}_mention_${matchCount++}`} color={MANTU_GOLD} bold italic>
-        {match[0]}
-      </Text>
-    );
+    out += chalk.hex(MANTU_GOLD).bold.italic(match[0]);
     lastIndex = index + match[0].length;
   }
   if (lastIndex < text.length) {
-    parts.push(text.slice(lastIndex));
+    out += text.slice(lastIndex);
   }
-  return parts;
+  return out;
 }
 
 export function InputBox({
@@ -90,56 +89,63 @@ export function InputBox({
       >
         <Box flexDirection="column">
           {
-            // Find which line and position the cursor is on.
+            // Each row is a single <Text> holding one pre-coloured string,
+            // with **no nested <Text> elements and no sibling children**.
+            // Both constraints are load-bearing, and each comes from a real
+            // bug:
             //
-            // Each row is a single <Text> with the mention prefix/cursor
-            // highlight nested inside it, rather than sibling <Text>
-            // elements side by side in the Box - Ink only wraps long
-            // content within one Text's own subtree; sibling elements in a
-            // row-direction Box just overflow it. A row wide enough to wrap
-            // (a long single-line draft, or the mention-prefixed first line)
-            // would overflow un-wrapped, and since Ink's redraw logic
-            // still thinks that row is one terminal line tall, the next
-            // keystroke's redraw wouldn't clear the extra wrapped line -
-            // leaving stale fragments of the old text on screen and making
-            // the cursor look like it's stuck on the first line.
-            lines.map((line, index) => (
-              <Box key={index}>
-                <Text wrap="wrap">
-                  {index === 0 && (
-                    <Text color={isProcessingQuestion ? "gray" : "cyan"} bold>
-                      {mentionPrefix}
-                    </Text>
-                  )}
-                  {index === cursorLine ? (
-                    <>
-                      {renderWithMentions(
-                        line.substring(0, cursorPosInLine),
-                        `l${index}_before`
-                      )}
-                      <Text
-                        backgroundColor={
-                          isProcessingQuestion ? "gray" : "blue"
-                        }
-                        color="white"
-                      >
-                        {line.charAt(cursorPosInLine) || " "}
-                      </Text>
-                      {renderWithMentions(
-                        line.substring(cursorPosInLine + 1),
-                        `l${index}_after`
-                      )}
-                    </>
-                  ) : (
-                    // Regular line without cursor.
-                    // For empty lines, just render a space to ensure the line is visible.
-                    line === ""
-                      ? " "
-                      : renderWithMentions(line, `l${index}`)
-                  )}
-                </Text>
-              </Box>
-            ))
+            // - Sibling <Text> elements laid out side by side in a
+            //   row-direction Box don't wrap; Ink only wraps within one
+            //   Text's own subtree. A row wide enough to wrap (a long
+            //   draft, or the mention-prefixed first line) overflowed
+            //   un-wrapped, and since Ink still thought the row was one
+            //   line tall the next keystroke's redraw left stale fragments
+            //   behind and the cursor looked stuck on the first line.
+            //
+            // - Nesting <Text> inside the wrapping <Text> fixed that, but
+            //   mis-measures the row when a plain-string child changes from
+            //   empty to non-empty in a single update - which is exactly
+            //   what Up-arrow history recall does ("" -> the whole recalled
+            //   message at once). The box's bottom border was then drawn
+            //   with the row's own text written into it
+            //   ("+-so in wieghts ----" instead of "+--------"). Typing
+            //   never triggered it because each keystroke grows an
+            //   already-non-empty child. Reduced to a minimal case: the
+            //   nesting alone causes it, independently of backgroundColor.
+            //
+            // Pre-colouring with chalk satisfies both: one Text, one string,
+            // so wrapping works and there is nothing for Ink to mis-measure.
+            // Same reasoning as the status bar's pre-coloured segments in
+            // Conversation.tsx.
+            lines.map((line, index) => {
+              const prefix =
+                index === 0
+                  ? (isProcessingQuestion ? chalk.gray : chalk.cyan).bold(
+                      mentionPrefix
+                    )
+                  : "";
+
+              let body: string;
+              if (index === cursorLine) {
+                const cursorChar = line.charAt(cursorPosInLine) || " ";
+                const highlight = isProcessingQuestion
+                  ? chalk.bgGray.white
+                  : chalk.bgBlue.white;
+                body =
+                  colorMentions(line.substring(0, cursorPosInLine)) +
+                  highlight(cursorChar) +
+                  colorMentions(line.substring(cursorPosInLine + 1));
+              } else {
+                // A space for an empty line, so the row stays visible.
+                body = line === "" ? " " : colorMentions(line);
+              }
+
+              return (
+                <Box key={index}>
+                  <Text wrap="wrap">{prefix + body}</Text>
+                </Box>
+              );
+            })
           }
         </Box>
       </Box>

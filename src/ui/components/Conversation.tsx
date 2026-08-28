@@ -29,6 +29,7 @@ import {
   MANTU_THINKING_PINK,
   MANTU_THINKING_PINK_FADED,
   MANTU_USER_ACCENT,
+  PICKER_PURPLE,
   QUEUED_BODY_BG,
   QUEUED_BODY_FG,
   QUEUED_TITLE_BG,
@@ -45,6 +46,7 @@ import {
 } from "../../utils/brand.js";
 import type { ContextUsage } from "../../utils/contextUsage.js";
 import type { CreditsUsage } from "../../utils/creditsInfo.js";
+import type { ModelStatus } from "../../utils/modelSelection.js";
 import type { MarkdownSegment } from "../../utils/markdown.js";
 import { renderMarkdownSegments } from "../../utils/markdown.js";
 import { formatFileSize, isImageFile } from "../../utils/fileHandling.js";
@@ -291,6 +293,9 @@ interface ConversationProps {
   transientHint: string | null;
   retryStatus: string | null;
   workspaceName: string | null;
+  // The model in use - the agent's own unless /model or /effort is
+  // overriding it, with `overridden` distinguishing the two.
+  modelStatus: ModelStatus | null;
   consumedCredits: CreditsUsage | null;
   contextUsage: ContextUsage | null;
   userInput: string;
@@ -333,6 +338,7 @@ const _Conversation: FC<ConversationProps> = ({
   transientHint,
   retryStatus,
   workspaceName,
+  modelStatus,
   consumedCredits,
   contextUsage,
   userInput,
@@ -382,6 +388,20 @@ const _Conversation: FC<ConversationProps> = ({
 
     if (workspaceName) {
       add(workspaceName, chalk.hex(STATUS_BAR_WORKSPACE)(workspaceName));
+    }
+    // The model in use, always shown when known. Purple while /model or
+    // /effort is overriding the agent's own configuration, neutral grey
+    // when it's just the agent's configured model - so a deviation reads
+    // as one at a glance, rather than looking the same as the default.
+    // Sits early, next to the mode, since like the mode it's about how the
+    // agent behaves rather than where you are.
+    if (modelStatus) {
+      add(
+        modelStatus.text,
+        modelStatus.overridden
+          ? chalk.hex(PICKER_PURPLE)(modelStatus.text)
+          : chalk.hex(STATUS_BAR_TEXT)(modelStatus.text)
+      );
     }
     add(displayPath, chalk.hex(MANTU_GOLD)(displayPath));
     if (gitBranch) {
@@ -480,6 +500,7 @@ const _Conversation: FC<ConversationProps> = ({
   }, [
     chatMode,
     workspaceName,
+    modelStatus,
     displayPath,
     gitBranch,
     conversationId,

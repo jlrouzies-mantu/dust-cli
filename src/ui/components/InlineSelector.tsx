@@ -55,8 +55,25 @@ export function InlineSelector({
     item.label.toLowerCase().includes(query.toLowerCase())
   );
 
-  const visible = filtered.slice(0, maxVisible);
-  const remaining = filtered.length - visible.length;
+  // A window that follows the selection, rather than always showing the
+  // first `maxVisible` items: with a long list (the ~27-entry /model
+  // catalogue) a fixed window means everything past the tenth row is
+  // unreachable by arrow key. The window only moves once the selection
+  // would leave it, so short lists never scroll and the rows stay put
+  // while you arrow through what's already on screen.
+  const windowStart = Math.max(
+    0,
+    Math.min(
+      selectedIndex - Math.floor(maxVisible / 2),
+      filtered.length - maxVisible
+    )
+  );
+  const visible = filtered.slice(windowStart, windowStart + maxVisible);
+  const hiddenAbove = windowStart;
+  const hiddenBelow = filtered.length - (windowStart + visible.length);
+  // Index within the window, since the caller's selectedIndex addresses the
+  // whole filtered list.
+  const selectedInWindow = selectedIndex - windowStart;
 
   // Descriptions line up in one column, sized to the longest *visible*
   // name so the gap doesn't jump around as the list is filtered, and
@@ -94,27 +111,36 @@ export function InlineSelector({
       ) : (
         <Box paddingX={1} flexDirection="column">
           {visible.map((item, index) => {
-            const isSelected = index === selectedIndex;
+            const isSelected = index === selectedInWindow;
 
-            // Single-select modes keep the original inline layout
-            // untouched - they're shared with the approval/diff/plan/file
-            // pickers, whose labels and descriptions vary wildly in length
-            // and don't benefit from a fixed column.
+            // Single-select modes keep the original inline layout - they're
+            // shared with the approval/diff/plan/file pickers, whose labels
+            // and descriptions vary wildly in length and don't benefit from
+            // a fixed column. The only change is that the description
+            // truncates instead of overflowing: siblings in a row-direction
+            // Box don't wrap (see the InputBox comment on the same Ink
+            // behaviour), so a long one used to spill past the terminal
+            // edge and push the row's real width out of step with what Ink
+            // thinks it drew.
             if (!multiSelect) {
               return (
                 <Box key={item.id} flexDirection="row">
-                  <Text
-                    color={isSelected ? "blue" : undefined}
-                    bold={isSelected}
-                  >
-                    {isSelected ? "> " : "  "}
-                    {item.label}
-                  </Text>
-                  {item.description && (
-                    <Text dimColor>
-                      {"  "}
-                      {item.description}
+                  <Box flexShrink={0}>
+                    <Text
+                      color={isSelected ? "blue" : undefined}
+                      bold={isSelected}
+                    >
+                      {isSelected ? "> " : "  "}
+                      {item.label}
                     </Text>
+                  </Box>
+                  {item.description && (
+                    <Box flexGrow={1}>
+                      <Text dimColor wrap="truncate-end">
+                        {"  "}
+                        {item.description}
+                      </Text>
+                    </Box>
                   )}
                 </Box>
               );
@@ -179,9 +205,17 @@ export function InlineSelector({
               </Box>
             );
           })}
-          {remaining > 0 && (
+          {(hiddenAbove > 0 || hiddenBelow > 0) && (
+            // Counts on both sides so the list reads as a window into
+            // something longer, and it's obvious more can be reached by
+            // holding the arrow key - a single trailing "(N more)" looked
+            // like a hard cap.
             <Box>
-              <Text dimColor> ({remaining} more)</Text>
+              <Text dimColor>
+                {hiddenAbove > 0 ? `  ↑ ${hiddenAbove} above` : ""}
+                {hiddenAbove > 0 && hiddenBelow > 0 ? " · " : ""}
+                {hiddenBelow > 0 ? `  ↓ ${hiddenBelow} below` : ""}
+              </Text>
             </Box>
           )}
         </Box>

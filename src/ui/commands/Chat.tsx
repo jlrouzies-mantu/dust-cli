@@ -57,7 +57,7 @@ import {
   MODEL_CATALOG,
   REASONING_EFFORTS,
   buildModelSelection,
-  describeOverrides,
+  describeModelStatus,
   modelCandidates,
   resolveModel,
 } from "../../utils/modelSelection.js";
@@ -3447,9 +3447,6 @@ const CliChat: FC<CliChatProps> = ({
               .toLowerCase()
               .includes(inlineSelector.query.toLowerCase())
           );
-      const maxVisible = 10;
-      const visibleCount = Math.min(filtered.length, maxVisible);
-
       if (key.upArrow) {
         setInlineSelector((prev) =>
           prev
@@ -3460,12 +3457,19 @@ const CliChat: FC<CliChatProps> = ({
       }
 
       if (key.downArrow) {
+        // Clamped to the whole filtered list, not to how many rows happen
+        // to be on screen: InlineSelector scrolls its window to follow the
+        // selection, so every item is reachable with the arrow keys. This
+        // used to clamp to the visible count, which made anything past the
+        // 10th item unreachable unless you typed a filter - fine for the
+        // short menus this started with, wrong for the ~27-entry /model
+        // list.
         setInlineSelector((prev) =>
           prev
             ? {
                 ...prev,
                 selectedIndex: Math.min(
-                  visibleCount - 1,
+                  filtered.length - 1,
                   prev.selectedIndex + 1
                 ),
               }
@@ -4617,7 +4621,16 @@ const CliChat: FC<CliChatProps> = ({
         retryStatus={retryStatus}
         transientHint={transientHint}
         workspaceName={workspaceName}
-        modelStatus={describeOverrides(modelOverride, effortOverride)}
+        modelStatus={describeModelStatus(
+          modelOverride,
+          effortOverride,
+          selectedAgent?.model
+            ? {
+                modelId: selectedAgent.model.modelId,
+                providerId: selectedAgent.model.providerId,
+              }
+            : null
+        )}
         consumedCredits={consumedCredits}
         contextUsage={contextUsage}
         userInput={inlineSelector ? inlineSelector.query : userInput}

@@ -432,16 +432,18 @@ A Dust agent is configured server-side with a model, and that's what every messa
 /effort default             # back to the agent's own effort
 ```
 
-While either is set, it shows in the status bar in purple:
+**The model in use is always in the status bar** — the agent's own in neutral grey, or your override in purple, so a deviation reads as one at a glance:
 
 ```
-□ normal · claude-opus-5 · high · my-workspace · ~/src/repo · main · …
+□ normal · gpt-5.6-luna · my-workspace · ~/src/repo · main · …        (agent's own)
+□ normal · claude-opus-5 · high · my-workspace · ~/src/repo · main …  (overridden)
 ```
 
-Nothing appears there when neither is overridden — deliberately, rather than displaying the agent's default. The public agent API exposes each agent's `modelId` but **not** its reasoning effort, so the CLI can state the model but would have to guess at the effort; showing half a default is worse than showing none.
+Effort only appears once you've overridden it. The public agent API exposes each agent's `modelId` but **not** its reasoning effort, so there's no default to show and inventing one would be worse than silence.
 
 Notes worth knowing:
 
+- **The picker scrolls.** Arrow through the whole list without typing — it shows ten rows at a time with `↑ N above` / `↓ N below`, and long descriptions truncate rather than wrapping. Typing still filters if you'd rather jump.
 - **The picker's list isn't exhaustive.** There's no API that lists the models a workspace can use, so the list is a hand-maintained convenience. `/model <id>` accepts anything, including models released after this list was written — the provider is inferred from the id's prefix (`claude-*`, `gpt-*`/`o*`, `gemini-*`, `grok-*`, `mistral-*`, `deepseek-*`, `accounts/fireworks/models/*`). An id whose provider can't be inferred is refused rather than guessed at, and a model your workspace isn't entitled to is rejected by the server.
 - **`auto`, `auto_fast` and `auto_complex`** are in the list too — Dust picks the concrete model per message.
 - **An effort override always carries a model.** The API requires `providerId` and `modelId` whenever a selection is present, so `/effort` on its own re-sends the agent's own model with your chosen effort. If the agent list hasn't loaded yet there's no model to attach it to, and `/effort` says so rather than silently doing nothing.

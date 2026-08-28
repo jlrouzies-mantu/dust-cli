@@ -46,6 +46,7 @@ import {
 } from "../../utils/brand.js";
 import type { ContextUsage } from "../../utils/contextUsage.js";
 import type { CreditsUsage } from "../../utils/creditsInfo.js";
+import type { ModelStatus } from "../../utils/modelSelection.js";
 import type { MarkdownSegment } from "../../utils/markdown.js";
 import { renderMarkdownSegments } from "../../utils/markdown.js";
 import { formatFileSize, isImageFile } from "../../utils/fileHandling.js";
@@ -292,9 +293,9 @@ interface ConversationProps {
   transientHint: string | null;
   retryStatus: string | null;
   workspaceName: string | null;
-  // Compact "<model> · <effort>" while /model or /effort is overriding the
-  // agent's configuration; null when neither is.
-  modelStatus: string | null;
+  // The model in use - the agent's own unless /model or /effort is
+  // overriding it, with `overridden` distinguishing the two.
+  modelStatus: ModelStatus | null;
   consumedCredits: CreditsUsage | null;
   contextUsage: ContextUsage | null;
   userInput: string;
@@ -388,14 +389,19 @@ const _Conversation: FC<ConversationProps> = ({
     if (workspaceName) {
       add(workspaceName, chalk.hex(STATUS_BAR_WORKSPACE)(workspaceName));
     }
-    // Only shown while /model or /effort is overriding the agent's own
-    // configuration. Deliberately absent otherwise rather than printing the
-    // agent's default: the public agent config carries no reasoning effort,
-    // so the CLI cannot state the real default without guessing at half of
-    // it. Sits early, next to the mode, since like the mode it changes how
-    // the agent behaves rather than just describing where you are.
+    // The model in use, always shown when known. Purple while /model or
+    // /effort is overriding the agent's own configuration, neutral grey
+    // when it's just the agent's configured model - so a deviation reads
+    // as one at a glance, rather than looking the same as the default.
+    // Sits early, next to the mode, since like the mode it's about how the
+    // agent behaves rather than where you are.
     if (modelStatus) {
-      add(modelStatus, chalk.hex(PICKER_PURPLE)(modelStatus));
+      add(
+        modelStatus.text,
+        modelStatus.overridden
+          ? chalk.hex(PICKER_PURPLE)(modelStatus.text)
+          : chalk.hex(STATUS_BAR_TEXT)(modelStatus.text)
+      );
     }
     add(displayPath, chalk.hex(MANTU_GOLD)(displayPath));
     if (gitBranch) {

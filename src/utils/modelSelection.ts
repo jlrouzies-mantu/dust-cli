@@ -296,21 +296,45 @@ export function buildModelSelection(
   };
 }
 
+export interface ModelStatus {
+  text: string;
+  // True when the user has overridden something with /model or /effort, so
+  // the status bar can colour it as a deviation rather than as the plain
+  // fact of which model the agent uses.
+  overridden: boolean;
+}
+
 /**
- * Compact status-bar text, e.g. "claude-opus-5 · high". Returns null when
- * nothing is overridden, so the segment is omitted entirely rather than
- * showing a default the CLI can't actually verify.
+ * Status-bar text for the model in use, e.g. "claude-opus-5" or
+ * "claude-opus-5 · high".
+ *
+ * Falls back to the agent's own model when nothing is overridden, so the
+ * bar always answers "what model is this?" - the agent's configured model
+ * is a plain fact the API does report, and not showing it just moved the
+ * question to the web app.
+ *
+ * Effort is only ever shown when *overridden*: the public agent config
+ * carries no reasoning effort, so there is no default to display and
+ * inventing one would be worse than silence.
  */
-export function describeOverrides(
+export function describeModelStatus(
   modelOverride: ModelOverride | null,
-  effortOverride: ReasoningEffort | null
-): string | null {
+  effortOverride: ReasoningEffort | null,
+  agentDefault: AgentDefaultModel | null
+): ModelStatus | null {
+  const modelLabel = modelOverride?.label ?? agentDefault?.modelId ?? null;
   const parts: string[] = [];
-  if (modelOverride) {
-    parts.push(modelOverride.label);
+  if (modelLabel) {
+    parts.push(modelLabel);
   }
   if (effortOverride) {
-    parts.push(modelOverride ? effortOverride : `effort ${effortOverride}`);
+    parts.push(modelLabel ? effortOverride : `effort ${effortOverride}`);
   }
-  return parts.length > 0 ? parts.join(" · ") : null;
+  if (parts.length === 0) {
+    return null;
+  }
+  return {
+    text: parts.join(" · "),
+    overridden: modelOverride !== null || effortOverride !== null,
+  };
 }

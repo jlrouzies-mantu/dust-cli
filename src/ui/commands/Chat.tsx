@@ -37,6 +37,14 @@ import {
 import { getClipboardImagePath } from "../../utils/clipboardImage.js";
 import type { ContextUsage } from "../../utils/contextUsage.js";
 import { getContextUsage } from "../../utils/contextUsage.js";
+import {
+  describeTab,
+  registerTerminalTitleCleanup,
+  setTaskbarProgress,
+  setTerminalTitle,
+} from "../../utils/terminalTitle.js";
+import type { WorkspaceModels } from "../../utils/workspaceModels.js";
+import { getWorkspaceModels } from "../../utils/workspaceModels.js";
 import type { CreditsUsage } from "../../utils/creditsInfo.js";
 import { getConsumedCredits } from "../../utils/creditsInfo.js";
 import { getDustClient } from "../../utils/dustClient.js";
@@ -49,6 +57,10 @@ import {
   setPlanMode,
 } from "../../utils/planMode.js";
 import { saveApprovedPlan } from "../../utils/planStore.js";
+import {
+  startCompaction,
+  waitForCompaction,
+} from "../../utils/compactionService.js";
 import type {
   ModelOverride,
   ReasoningEffort,
@@ -58,7 +70,9 @@ import {
   REASONING_EFFORTS,
   buildModelSelection,
   describeModelStatus,
+  formatContextSize,
   modelCandidates,
+  resolveCompactionModel,
   resolveModel,
 } from "../../utils/modelSelection.js";
 import type { Skill } from "../../utils/skillStore.js";
@@ -241,6 +255,30 @@ function buildSteerRedirectPrompt(
     `1. Respond to the user's interrupting message above. Always address it explicitly - never skip it or reply with an empty/placeholder line, even if it seems trivial or unrelated to the task.\n` +
     `2. Then resume and complete the original task, unless the interruption told you to stop, cancel, or abandon it. Being interrupted does not by itself mean the task was cancelled. If the interruption was a correction, clarification, or change of direction for that task, fold it in and continue accordingly.`
   );
+}
+
+// Longest tab label worth emitting. Windows Terminal truncates a tab to far
+// less than this, but the same string is the window title when only one tab
+// is open, where there's room for more.
+const TAB_TASK_MAX_LENGTH = 40;
+
+/**
+ * Condenses a sent message into something that reads as a label in a tab
+ * strip. Trims at a word boundary where one is close enough to the limit,
+ * since a tab cut mid-word looks like a rendering fault rather than a
+ * deliberate abbreviation.
+ */
+function summarizeForTab(message: string): string | null {
+  const flat = message.replace(/\s+/g, " ").trim();
+  if (!flat) {
+    return null;
+  }
+  if (flat.length <= TAB_TASK_MAX_LENGTH) {
+    return flat;
+  }
+  const cut = flat.slice(0, TAB_TASK_MAX_LENGTH);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${(lastSpace > TAB_TASK_MAX_LENGTH * 0.6 ? cut.slice(0, lastSpace) : cut).trimEnd()}...`;
 }
 
 function buildConversationItemsFromHistory(
@@ -530,6 +568,29 @@ const CliChat: FC<CliChatProps> = ({
   // otherwise they only show up in the debug log, indistinguishable from
   // "it didn't retry at all" from the user's perspective.
   const [retryStatus, setRetryStatus] = useState<string | null>(null);
+  // Spinner line while /compact is in flight. Deliberately its own state
+  // rather than borrowing retryStatus above: a retry can fire during the
+  // compaction wait, and one would then silently overwrite the other.
+  const [compactionStatus, setCompactionStatus] = useState<string | null>(null);
+  // What the tab title says the agent is doing - the last message's opening
+  // words. Null until something has been sent, when the tab falls back to
+  // naming the folder instead.
+  const [tabTask, setTabTask] = useState<string | null>(null);
+  // Sticky "this turn finished" flag behind the tab's checkmark. Deliberately
+  // not time-based: the whole point is to be seen by someone who tabbed away,
+  // and a marker that clears itself on a timer is exactly the one they'd
+  // miss. Cleared by a keypress in this tab instead - see useInput.
+  const [turnFinished, setTurnFinished] = useState(false);
+  const turnFinishedRef = useRef(false);
+  const wasProcessingRef = useRef(false);
+  // The workspace's real, entitled model list (see workspaceModels.ts).
+  // Null until the prefetch lands, or permanently if the endpoint is
+  // unreachable - every consumer falls back to MODEL_CATALOG, so /model
+  // keeps working either way.
+  const [workspaceModels, setWorkspaceModels] =
+    useState<WorkspaceModels | null>(null);
+  const workspaceModelsRef = useRef<WorkspaceModels | null>(null);
+  const modelCatalogue = workspaceModels?.models ?? MODEL_CATALOG;
   // A brief, self-clearing status line (unlike pushNotice, which appends
   // permanently to scrollback) - for feedback on a key press that's routine
   // to repeat (e.g. Ctrl+S pressed before typing anything), so mashing it
@@ -1331,6 +1392,13 @@ const CliChat: FC<CliChatProps> = ({
       pushNoticeLines(
         [
           `Model: ${choice.label} (${choice.providerId})`,
+          // Only stated when it's known - an id typed in that isn't in the
+          // catalogue has no context size to quote, and the status bar
+          // will report the real one from the server on the next turn
+          // anyway. See ModelChoice.contextSize.
+          ...(choice.contextSize
+            ? [`  Context window: ${formatContextSize(choice.contextSize)}`]
+            : []),
           "  Sent with each message from now on - this overrides the agent's own",
           "  model for you only, and doesn't change its saved configuration.",
           "  /model default to go back.",
@@ -1399,17 +1467,39 @@ const CliChat: FC<CliChatProps> = ({
                 ? `the agent's own model (${agentModelId})`
                 : "the agent's own model",
             },
-            ...MODEL_CATALOG.map((m) => ({
-              id: m.modelId,
-              label: m.label,
-              description: [
-                m.providerId,
-                m.note,
-                m.modelId === currentId ? "current" : null,
-              ]
-                .filter(Boolean)
-                .join(" · "),
-            })),
+            // Largest context first, then by provider, so the answer to
+            // "what's the biggest window I can have?" is simply the top of
+            // the list. The auto selectors carry no context size and sort
+            // to the end rather than to the front as a zero.
+            ...[...modelCatalogue]
+              .sort(
+                (a, b) =>
+                  (b.contextSize ?? -1) - (a.contextSize ?? -1) ||
+                  a.providerId.localeCompare(b.providerId) ||
+                  a.label.localeCompare(b.label)
+              )
+              .map((m) => ({
+                id: m.modelId,
+                label: m.label,
+                // Context window sits first in the description because it's
+                // the field people open this picker to compare - Dust pins a
+                // hardcoded window per model server-side and nothing on the
+                // client can raise it, so choosing here is the only way to
+                // get a bigger one.
+                description: [
+                  m.contextSize
+                    ? `${formatContextSize(m.contextSize)} ctx`
+                    : null,
+                  m.providerId,
+                  m.note,
+                  workspaceModels?.degradedModelIds.has(m.modelId)
+                    ? "degraded"
+                    : null,
+                  m.modelId === currentId ? "current" : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · "),
+              })),
           ],
           query: "",
           selectedIndex: 0,
@@ -1432,14 +1522,21 @@ const CliChat: FC<CliChatProps> = ({
         return;
       }
 
-      const resolved = resolveModel(query);
+      const resolved = resolveModel(query, modelCatalogue);
       if (!resolved) {
-        const candidates = modelCandidates(query);
+        const candidates = modelCandidates(query, modelCatalogue);
         pushNoticeLines(
           candidates.length > 1
             ? [
                 `"${query}" matches more than one model - be more specific:`,
-                ...candidates.map((c) => `  ${c.label} (${c.providerId})`),
+                ...candidates.map(
+                  (c) =>
+                    `  ${c.label} (${c.providerId})${
+                      c.contextSize
+                        ? ` · ${formatContextSize(c.contextSize)} ctx`
+                        : ""
+                    }`
+                ),
               ]
             : [
                 `Unknown model "${query}".`,
@@ -1455,6 +1552,173 @@ const CliChat: FC<CliChatProps> = ({
       applyModelOverride(resolved);
     },
     [pushNoticeLines, selectedAgent, applyModelOverride]
+  );
+
+  /**
+   * Handles `/compact`: asks Dust to summarize the conversation so far into
+   * a single compaction message, which is what later turns carry instead of
+   * the full history.
+   *
+   * The model is an explicit argument to the endpoint, so it has to be
+   * resolved here: `/compact <model-id>` wins, then your `/model` override,
+   * then the agent's own model. The `auto*` meta-selectors are refused
+   * rather than passed through - the server validates the pair against its
+   * concrete model list and would reject them anyway, and refusing here
+   * says why instead of surfacing a bare 400.
+   *
+   * Everything after the request is polled rather than streamed - see
+   * compactionService.ts for why this CLI can't hear the event the web app
+   * listens for.
+   */
+  const runCompactCommand = useCallback(
+    (args?: string) => {
+      const conversationId = currentConversationId;
+      if (!conversationId) {
+        pushNoticeLines(
+          [
+            "Nothing to compact - this conversation hasn't started yet.",
+            "  Send a message first.",
+          ],
+          "compact_none"
+        );
+        return;
+      }
+      if (isProcessingQuestion) {
+        // The server 409s on this too, but catching it here avoids spending
+        // a round trip to be told something already on screen.
+        pushNoticeLines(
+          [
+            "The agent is still working - a turn has to finish before compacting.",
+            "  Wait for it (or Esc to cancel), then run /compact again.",
+          ],
+          "compact_busy"
+        );
+        return;
+      }
+
+      const query = args?.trim();
+      if (query && !resolveModel(query, modelCatalogue)) {
+        pushNoticeLines(
+          [
+            `Unknown model "${query}".`,
+            "  /compact takes the same model ids /model does.",
+          ],
+          "compact_no_model"
+        );
+        return;
+      }
+
+      void (async () => {
+        setCompactionStatus("Compacting…");
+        try {
+          // Refreshed rather than read from state: it's both the "before"
+          // figure for the report and, for an `auto` agent, the only place
+          // the conversation's *concrete* model can be learned.
+          const before = await getContextUsage(conversationId);
+
+          const chosen = resolveCompactionModel({
+            query,
+            override: modelOverrideRef.current,
+            conversationModel: before,
+            agentModel: selectedAgent?.model ?? null,
+            // Read from the ref, not the state closure: /compact can be run
+            // before the prefetch lands, and the callback would otherwise be
+            // holding the null it was created with.
+            catalogue: workspaceModelsRef.current?.models ?? MODEL_CATALOG,
+          });
+
+          if (!chosen) {
+            pushNoticeLines(
+              [
+                "No model to summarize with.",
+                "  Compaction has to name a concrete provider/model pair. This agent",
+                "  runs on an `auto` selector, which only resolves to one per message,",
+                "  and the conversation hasn't run a turn yet for one to be read from.",
+                "  Send a message first, or name one: /compact <model-id>.",
+              ],
+              "compact_no_model"
+            );
+            return;
+          }
+
+          setCompactionStatus(`Compacting with ${chosen.label}…`);
+          const started = await startCompaction({
+            conversationId,
+            model: {
+              providerId: chosen.providerId,
+              modelId: chosen.modelId,
+            },
+          });
+          if (!started.ok) {
+            pushNoticeLines(
+              [
+                `Compaction failed: ${started.message}`,
+                ...(started.detail ? [`  ${started.detail}`] : []),
+              ],
+              "compact_failed"
+            );
+            return;
+          }
+
+          const outcome = await waitForCompaction({
+            conversationId,
+            compactionMessageId: started.compactionMessageId,
+          });
+
+          if (outcome.status === "timeout") {
+            pushNoticeLines(
+              [
+                "Compaction is taking longer than expected - still running server-side.",
+                "  The status bar's context figure will drop when it lands.",
+              ],
+              "compact_timeout"
+            );
+            return;
+          }
+          if (outcome.status === "failed") {
+            pushNoticeLines(
+              [
+                "Compaction failed server-side. Nothing was changed.",
+                "  Long conversations may keep degrading; /new starts a fresh one.",
+              ],
+              "compact_server_failed"
+            );
+            return;
+          }
+
+          const after = await getContextUsage(conversationId);
+          if (after) {
+            setContextUsageIfPresent(after);
+          }
+          pushNoticeLines(
+            [
+              "Compacted.",
+              // Only claimed when both readings are real: a "0 -> 0" line
+              // would read as the compaction having done nothing.
+              ...(before && after
+                ? [
+                    `  Context: ${Math.round(before.contextUsage / 1000)}k -> ${Math.round(
+                      after.contextUsage / 1000
+                    )}k of ${Math.round(after.contextSize / 1000)}k`,
+                  ]
+                : []),
+              "  Everything above is still in your scrollback, but the agent now sees",
+              "  a summary of it rather than the full text.",
+            ],
+            "compact_done"
+          );
+        } finally {
+          setCompactionStatus(null);
+        }
+      })();
+    },
+    [
+      currentConversationId,
+      isProcessingQuestion,
+      selectedAgent,
+      pushNoticeLines,
+      setContextUsageIfPresent,
+    ]
   );
 
   /**
@@ -2145,6 +2409,7 @@ const CliChat: FC<CliChatProps> = ({
     runTasksCommand,
     runSkillsCommand,
     runModelCommand,
+    runCompactCommand,
     runEffortCommand,
   });
 
@@ -2387,6 +2652,68 @@ const CliChat: FC<CliChatProps> = ({
   useEffect(() => {
     effortOverrideRef.current = effortOverride;
   }, [effortOverride]);
+
+  // Restore the tab's title and clear its progress ring when the process
+  // goes away, so a session that ended while "working" doesn't leave that
+  // label behind on the shell prompt that follows it.
+  useEffect(() => {
+    registerTerminalTitleCleanup();
+  }, []);
+
+  // Raise the sticky "done" marker on the processing -> idle edge, which is
+  // the moment a turn actually ends. Watched via a ref rather than derived
+  // in the title effect below, because that effect re-runs for reasons that
+  // have nothing to do with a turn ending (a new task label, an error
+  // clearing) and would otherwise re-raise the marker after a keypress
+  // dismissed it.
+  useEffect(() => {
+    if (wasProcessingRef.current && !isProcessingQuestion) {
+      setTurnFinished(true);
+      turnFinishedRef.current = true;
+    }
+    wasProcessingRef.current = isProcessingQuestion;
+  }, [isProcessingQuestion]);
+
+  // Drive the tab title and Windows Terminal's taskbar progress ring from
+  // the same state the UI already renders. See utils/terminalTitle.ts for
+  // why writing these escape sequences is safe alongside Ink's rendering,
+  // and why they're layered (a terminal may honour the title but not the
+  // progress ring).
+  useEffect(() => {
+    const { title, progress } = describeTab({
+      agentName: selectedAgent?.name ?? "dustm",
+      // Falls back to the folder because that's the other thing that
+      // distinguishes two tabs from each other before either has been used.
+      subject: tabTask ?? path.basename(process.cwd()),
+      isWorking: isProcessingQuestion,
+      isBlockedOnUser: inlineSelector !== null,
+      hasError: error !== null,
+      turnFinished,
+    });
+    setTerminalTitle(title);
+    setTaskbarProgress(progress);
+  }, [
+    isProcessingQuestion,
+    inlineSelector,
+    error,
+    turnFinished,
+    tabTask,
+    selectedAgent,
+  ]);
+
+  // Prefetch the workspace's real model list once, in the background. Done
+  // eagerly rather than lazily on the first /model so the picker opens
+  // instantly on an accurate list instead of showing the built-in fallback
+  // and then changing under the cursor. Failure is silent by design - every
+  // consumer falls back to MODEL_CATALOG.
+  useEffect(() => {
+    void getWorkspaceModels().then((models) => {
+      if (models) {
+        workspaceModelsRef.current = models;
+        setWorkspaceModels(models);
+      }
+    });
+  }, []);
 
   // Push the active conversation id across into the module-level flag
   // todo_write/read_tasks read (see utils/taskStore.ts) - the same pattern
@@ -2641,6 +2968,11 @@ const CliChat: FC<CliChatProps> = ({
       });
 
       setIsProcessingQuestion(true);
+      // Label the tab with what this turn is about. Taken from the typed
+      // text, not the expanded one: a pasted blob's first 40 characters
+      // describe nothing, whereas the "[Pasted N lines of text]" placeholder
+      // at least reads as itself.
+      setTabTask(summarizeForTab(questionText));
       setStreamingContentPreview([]);
       setThinkingContentPreview("");
       const controller = new AbortController();
@@ -3277,6 +3609,15 @@ const CliChat: FC<CliChatProps> = ({
 
   // Handle keyboard events.
   useInput((input, key) => {
+    // Any keypress in this tab means you're looking at it, so the sticky
+    // "turn finished" marker has done its job. Cleared before anything else
+    // runs, and via the ref so a stream of keystrokes doesn't queue up a
+    // state update per character.
+    if (turnFinishedRef.current) {
+      turnFinishedRef.current = false;
+      setTurnFinished(false);
+    }
+
     // Ctrl+C: cancel an in-flight generation immediately (mirrors ESC), but
     // never exit the whole session on a single accidental press while idle
     // — require a second press within 2s, with a visible hint in between.
@@ -4619,6 +4960,7 @@ const CliChat: FC<CliChatProps> = ({
         thinkingContentPreview={thinkingContentPreview}
         showExitHint={showExitHint}
         retryStatus={retryStatus}
+        compactionStatus={compactionStatus}
         transientHint={transientHint}
         workspaceName={workspaceName}
         modelStatus={describeModelStatus(

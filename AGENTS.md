@@ -241,16 +241,85 @@ last-synced commit (procedure step 3 above):
     `modelSelection` is present, so an effort-only override has to re-send
     the agent's own model alongside it (`buildModelSelection` does this).
     There is no way to send an effort by itself.
-  - `MODEL_CATALOG` is a convenience for the picker, **not** an
-    authoritative list: the API's `modelId` widens to `string`, no endpoint
-    lists a workspace's available models, and new ones ship regularly. Keep
-    `/model <id>` accepting ids outside the catalogue via
-    `inferProviderId`, and don't add validation that would reject an
-    unknown-but-valid model - the server is the only thing that can
-    actually know.
+  - `MODEL_CATALOG` is the **offline fallback**, not the primary list -
+    `workspaceModels.ts` is (see below). It is also not authoritative in
+    the other direction: the API's `modelId` widens to `string` and new
+    models ship regularly, so keep `/model <id>` accepting ids outside
+    *either* list via `inferProviderId`, and don't add validation that
+    would reject an unknown-but-valid model - the server is the only thing
+    that can actually know. `resolveModel`/`modelCandidates`/
+    `resolveCompactionModel` all take the catalogue as a parameter
+    defaulting to `MODEL_CATALOG`; call sites pass the live list. Don't
+    re-hardcode `MODEL_CATALOG` inside them.
+  - `ModelChoice.contextSize` is **display only**. There is no client-side
+    way to raise a context window: Dust stores a hardcoded `contextSize`
+    per model server-side (`front/types/assistant/models/*.ts`) and
+    `PublicModelSelectionSchema` carries only
+    `providerId`/`modelId`/`reasoningEffort`. If someone asks for a
+    "bigger context" setting, the answer is a different model, not a new
+    field. Don't quote a context size for the `auto*` selectors - the
+    server reports the pool's maximum there, not what a message gets.
   - The reasoning-effort levels are `high`/`medium`/**`light`**/`none` -
     "light", not "low". A wrong value is a server-side 400, not a type
     error, since these are compared as plain strings.
+- `src/utils/compactionService.ts` - `/compact` (see README's "Compacting a
+  conversation"). Three things to preserve:
+  - It calls **private** endpoints (`POST .../conversations/{cId}/compactions`
+    to start, `GET .../conversations/{cId}/messages` to poll), so it uses the
+    `AuthService.getValidAccessToken()` + `getApiDomain()` pattern that
+    `contextUsage.ts`/`creditsInfo.ts` use, **not** the `DustAPI` client.
+    That also means it doesn't work under a headless `DUST_API_KEY`, same as
+    those two.
+  - **Poll the private `/messages` endpoint, not the conversation.** Verified
+    live: the public v1 conversation endpoint does **not** return
+    compaction messages at all - a conversation whose compaction had
+    succeeded still came back with only `user_message`/`agent_message` in
+    `content`. The private `/messages` endpoint does return them, with
+    `status` and the summary. This is also why `dustClient.getConversation()`
+    is safe to keep everywhere else despite the SDK's `ConversationSchema`
+    being a closed union that would reject a `compaction_message`: the
+    endpoint it calls never hands it one. If that ever changes, *that* is
+    when a tolerant fetch becomes necessary - it isn't yet, and a wrapper
+    for it was written and then removed once the live behaviour was
+    confirmed. Don't re-add one speculatively.
+  - Error messages from the server are surfaced **verbatim**. The three 409s
+    ("Answer the pending agent message first", "A compaction is already in
+    progress", "This conversation was just compacted") each tell the user a
+    different thing to do; replacing them with one generic string loses
+    that.
+- `src/utils/workspaceModels.ts` - the live model list behind `/model`.
+  `GET /api/w/{wId}/models` (private, same standing/auth as context-usage
+  and credits) returns the workspace's entitled models with authoritative
+  `contextSize`, plus `degradedModelIds`. This **supersedes** the old
+  "there is no endpoint that lists a workspace's models" assumption, which
+  was wrong - there is one, it just isn't public. Cached at module scope
+  and deduped in flight; every failure degrades to `MODEL_CATALOG` rather
+  than erroring. Two rules: filter out `isSelectable === false` entries,
+  and drop `contextSize` for the `auto*` selectors (the endpoint reports
+  the pool maximum there, e.g. 1M for an `auto` that actually routes to a
+  272k model).
+- `src/utils/terminalTitle.ts` - tab title + Windows Terminal taskbar
+  progress (see README's "Tab title and progress"). Four rules:
+  - **`sanitize()` is a security boundary, not tidying.** The title carries a
+    summary of the user's own (typed or pasted) message, so an unstripped
+    ESC/BEL would terminate the OSC early and leave the remainder to be
+    interpreted as terminal commands. Don't relax it to "just strip
+    newlines".
+  - The control characters are built with `String.fromCharCode` and a
+    `RegExp` from escapes rather than written literally, so the file stays
+    ASCII. It previously held literal control bytes, which made `grep`
+    report it as binary and made the constants invisible in diffs. Keep it
+    that way.
+  - These writes are **safe alongside Ink**, unlike `clearTerminal()`'s:
+    they emit no printable cells, move no cursor and set no attributes, so
+    Ink's render diffing has nothing to get out of step with. Don't copy
+    `clearTerminal()`'s `\x1b[0m` guard here thinking it's needed - and
+    don't add anything to this module that *does* print.
+  - `describeTab()` is deliberately **pure and separate** from the React
+    effect that calls it, so the state precedence (blocked-on-user >
+    working > error > finished > idle) is unit-testable and stated in one
+    place. If a state is added, add it there, not as another `if` in
+    `Chat.tsx`.
 - `src/types/marked-terminal.d.ts` - type shim
 - Everything under `.github/`, `scripts/`, `img/`, plus `AGENTS.md` and
   `README.md` themselves

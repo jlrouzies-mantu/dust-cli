@@ -27,12 +27,14 @@
   - [Shortcuts](#shortcuts)
   - [Steering](#steering)
   - [Status bar](#status-bar)
+  - [Tab title and progress](#tab-title-and-progress)
   - [In-Chat Commands](#in-chat-commands)
   - [Modes](#modes)
   - [Loops](#loops)
   - [Tasks](#tasks)
   - [Skills](#skills)
   - [Model and effort](#model-and-effort)
+  - [Compacting a conversation](#compacting-a-conversation)
   - [Fetching a URL](#fetching-a-url)
   - [Claude Code mode](#claude-code-mode)
   - [Headless Authentication](#headless-authentication)
@@ -70,6 +72,9 @@
 | `/claude-code-mode` | Primes the Dust agent with the memories Claude Code keeps for this folder, plus the repo's own `CLAUDE.md`/`AGENTS.md` — so a Dust agent starts with the same background your coding CLI has. Comes with `read_memory`/`write_memory` tools so the agent can maintain those memories too — see [Claude Code mode](#claude-code-mode) |
 | Local skills | Dust's own agent skills are configured server-side and locked to workspace admins — this is the client-side alternative: hand-authored `SKILL.md` files the agent discovers, gets a cheap catalogue of, and pulls in full on demand via a `read_skill` tool. `/skills` opens a checklist to switch them on and off — see [Skills](#skills) |
 | `/model` and `/effort` | Override the agent's server-side model and reasoning effort for your conversation, via the API's per-message `modelSelection`. The web app exposes these; the CLI had no equivalent, so you were stuck with whatever the agent was configured with — see [Model and effort](#model-and-effort) |
+| `/compact` | Summarize the conversation so far server-side, so a long session stops crowding out the context window instead of forcing a `/new` that throws the history away — see [Compacting a conversation](#compacting-a-conversation) |
+| Live tab title + taskbar progress | The terminal tab says which agent is running, what it's working on, and whether it's finished — plus a pulsing progress ring on the tab in Windows Terminal. So a `dustm` you've tabbed away from can tell you it's done without you switching to it — see [Tab title and progress](#tab-title-and-progress) |
+| Live model list with context sizes | `/model`'s picker now shows the models your workspace is **actually entitled to**, largest context window first, read from the endpoint the web app's own picker uses. It used to be a hand-maintained list that couldn't know your entitlements — on a real workspace, 13 of its entries were models that workspace had no access to — see [Model and effort](#model-and-effort) |
 | Update check against this fork's releases | This fork isn't on npm, so the upstream update notifier had nothing to check and was stubbed out entirely. It now checks this repo's own GitHub releases and shows the actual reinstall one-liner instead of an `npm install -g` command that was never going to work — network failures and blocked endpoints just mean "no update", never a startup error |
 | `@` file mentions | Type `@` to fuzzy-search the current folder and insert `@relative/path` at the cursor, rendered in dim gold italic so it's easy to pick out from the rest of the draft — same fuzzy-picker UI as `/attach` |
 | Resume command on exit | A second Ctrl+C prints `dustm --agent <name> --conversationId <id>` right before exiting, so a reflexive double-press to interrupt a runaway turn doesn't cost you the conversation |
@@ -231,6 +236,35 @@ The [permission mode](#modes) leads the line and is always present — it's the 
 
 Context-window usage and consumed credits come from endpoints the Dust web dashboard itself calls internally (`/api/w/{workspaceId}/credits/my-usage` and `.../assistant/conversations/{id}/context-usage`) — not the public, documented `/api/v1` API. They work with the same Bearer token this CLI already has, but Dust hasn't committed to supporting them for external clients, so they could change or disappear without notice. If either call fails, that piece of the status bar just silently omits itself rather than erroring.
 
+### Tab title and progress
+
+The status bar only helps when you're looking at it. **The terminal tab is relabelled as the agent works**, so a `dustm` you've tabbed away from can tell you it's finished without you switching to it:
+
+```
+ ● helper - check CI and fix what...      working
+ ◆ helper - needs you                     waiting on an approval, mid-turn
+ ✓ helper - check CI and fix what...      turn finished, and you haven't looked yet
+ ✗ helper - error                         the turn failed
+   helper - dust-cli                      idle (falls back to naming the folder)
+```
+
+The label is the agent's name plus the opening words of your last message, so several tabs stay tellable apart. Before anything has been sent, it names the folder instead.
+
+**In Windows Terminal the tab also gets a progress ring** — pulsing while the agent works, red on an error, gone when idle. That's the part that's visible even when the tab strip is too crowded to show any text, and there's no other way for a console app on Windows to signal state on its own tab.
+
+**The `✓` is sticky.** It stays until you press a key in that tab, rather than clearing itself after a few seconds — a marker that expires on a timer is precisely the one that's gone by the time you come back, which would defeat the point.
+
+Notes:
+
+- **Precedence is by urgency, not by what the UI is drawing.** An approval prompt outranks "working", because that's the one state where the agent is genuinely blocked on you. Only prompts the *agent* raised count — a picker you opened yourself (`/model`, `/skills`, `@`) doesn't flag the tab, since you already know it's there.
+- **`/compact` counts as working too**, so a compaction you've tabbed away from gets the same ring and the same `✓` when it finishes.
+- **Nothing here can corrupt a legacy console.** These are OSC escape sequences (`OSC 0` for the title, `OSC 9;4` for the ring), and a terminal that doesn't recognise one *consumes and discards* it rather than printing garbage — unlike an unsupported glyph, which is why the status bar's gauges are constrained to CP437 and these icons aren't. Windows Terminal honours both; legacy conhost honours the title and ignores the ring.
+- **The title is off when output isn't a terminal**, so `-m/--message`'s JSON stays byte-for-byte clean when piped. `DUSTM_NO_TITLE=1` turns it off entirely, as does `TERM=dumb`.
+- **Your own text is sanitized before it goes in the title.** The label carries part of a message you typed or pasted, and a stray `ESC` or `BEL` in there would close the escape sequence early and leave the rest to be read as terminal commands. The whole control-character range is stripped first.
+- **The tab is handed back on exit**, so a session that ended while "working" doesn't leave that label sitting on your shell prompt.
+
+Not yet wired into the headless `--loop` path — that's arguably where an unattended indicator is most useful, but it's a separate surface with its own process lifecycle.
+
 ### In-Chat Commands
 
 - **`/exit`** — exit the chat session
@@ -245,6 +279,7 @@ Context-window usage and consumed credits come from endpoints the Dust web dashb
 - **`/skills`** — open a checklist to switch local skills on/off, or `/skills <name>` to force one into your next message — see [Skills](#skills)
 - **`/model`** — override the model for this conversation (`/model default` to clear) — see [Model and effort](#model-and-effort)
 - **`/effort`** — override the reasoning effort: `high`, `medium`, `light`, `none` (`/effort default` to clear)
+- **`/compact`** — summarize the conversation so far to free up context window (`/compact <model-id>` to choose what summarizes it) — see [Compacting a conversation](#compacting-a-conversation)
 - **`/claude-code-mode`** — prime the agent with your Claude Code memories for this folder — see [Claude Code mode](#claude-code-mode)
 
 ### Modes
@@ -441,14 +476,73 @@ A Dust agent is configured server-side with a model, and that's what every messa
 
 Effort only appears once you've overridden it. The public agent API exposes each agent's `modelId` but **not** its reasoning effort, so there's no default to show and inventing one would be worse than silence.
 
-Notes worth knowing:
+#### The model list, and context windows
+
+**The picker shows the models your workspace is actually entitled to, largest context window first**, read from `/api/w/{workspaceId}/models` — the endpoint the web app's own model picker calls. Each row carries its real context window:
+
+```
+ gemini-3.8-flash            1.05M ctx · google_ai_studio
+ glm-5p3                     1M ctx · fireworks
+ gpt-5.6-luna                272k ctx · openai · current
+ kimi-k3                     256k ctx · fireworks
+ claude-opus-5               250k ctx · anthropic
+ auto                        auto · Dust picks
+```
+
+That ordering is the point: **the context window is not something a client can set.** Dust stores a hardcoded `contextSize` per model server-side, and the per-message `modelSelection` field carries only `providerId`, `modelId` and `reasoningEffort` — there is no context field anywhere in the API or the SDK. So if 250k isn't enough, the only lever is picking a different model, and the picker is sorted to answer that question directly.
+
+Worth knowing what the ceilings actually are, because they're lower than the models' own headline numbers: Dust caps **every Anthropic model at 250k** (it hasn't wired up Anthropic's extended-context beta) and **Kimi K3 at 256k**. The 1M-class options are Gemini, GLM-5p3 and Inkling; on workspaces entitled to them, `gpt-5.4`/`gpt-5.5` are 1M and the Grok fast models are 2M.
+
+Other notes:
 
 - **The picker scrolls.** Arrow through the whole list without typing — it shows ten rows at a time with `↑ N above` / `↓ N below`, and long descriptions truncate rather than wrapping. Typing still filters if you'd rather jump.
-- **The picker's list isn't exhaustive.** There's no API that lists the models a workspace can use, so the list is a hand-maintained convenience. `/model <id>` accepts anything, including models released after this list was written — the provider is inferred from the id's prefix (`claude-*`, `gpt-*`/`o*`, `gemini-*`, `grok-*`, `mistral-*`, `deepseek-*`, `accounts/fireworks/models/*`). An id whose provider can't be inferred is refused rather than guessed at, and a model your workspace isn't entitled to is rejected by the server.
-- **`auto`, `auto_fast` and `auto_complex`** are in the list too — Dust picks the concrete model per message.
+- **Models having a bad day are marked `degraded`**, from the same endpoint's `degradedModelIds`.
+- **If that endpoint can't be reached**, `/model` falls back to a small hand-maintained list built into the CLI. It's a snapshot, so it may offer models your workspace can't use — the ones the live list would have filtered out. It's a fallback, not a second opinion.
+- **The list still isn't a hard boundary.** `/model <id>` accepts anything, including models released after either list was written — the provider is inferred from the id's prefix (`claude-*`, `gpt-*`/`o*`, `gemini-*`, `grok-*`, `mistral-*`, `deepseek-*`, `accounts/fireworks/models/*`). An id whose provider can't be inferred is refused rather than guessed at, and a model your workspace isn't entitled to is rejected by the server.
+- **`auto`, `auto_fast` and `auto_complex`** are in the list too — Dust picks the concrete model per message. They deliberately show **no** context size: the endpoint reports one, but it's the largest in the pool rather than what a given message gets (a workspace whose `auto` advertised 1M was actually routing to a 272k model), so quoting it would mislead.
 - **An effort override always carries a model.** The API requires `providerId` and `modelId` whenever a selection is present, so `/effort` on its own re-sends the agent's own model with your chosen effort. If the agent list hasn't loaded yet there's no model to attach it to, and `/effort` says so rather than silently doing nothing.
 - **`/switch` resets both.** An override is a deviation from *that* agent's default, so carrying it to a different agent would silently impose the old one's model. The switch notice says when it reset something.
 - **It's per-session, not persisted** — a fresh `dustm` starts on the agent's own configuration again.
+
+### Compacting a conversation
+
+A long session eventually fills the model's context window, and the usual escape — `/new` — throws away everything you'd built up. **`/compact` asks Dust to summarize the conversation so far into a single compaction message**, which is what later turns carry instead of the full history. Your scrollback is untouched; what changes is what the agent is given.
+
+```
+/compact                  # summarize with whatever model the conversation is running on
+/compact gemini-3.7-flash # summarize with a specific model
+```
+
+```
+ ⠋ Compacting with claude-sonnet-4-6…
+
+ Compacted.
+   Context: 6k -> 0k of 250k
+   Everything above is still in your scrollback, but the agent now sees
+   a summary of it rather than the full text.
+```
+
+This is genuinely **server-side** — Dust runs the summarization in a workflow, and the CLI couldn't usefully fake it, since the conversation history lives on Dust's side and the next turn is assembled there.
+
+**Which model does the summarizing.** The endpoint takes a concrete `providerId`/`modelId` pair as an explicit argument, so an `auto` selector isn't an answer — and agents configured with `auto` are common. Rather than refusing, the model is resolved in this order: `/compact <model-id>` if you named one, then your `/model` override, then **the model the conversation has actually been running on** (read from the context-usage endpoint, which reports the concrete model of the last completed run), then the agent's own configuration. Only a conversation that hasn't had a turn yet on an `auto` agent ends up with nothing to use, and it says so. Naming `auto` explicitly is refused rather than silently swapped for something else — you'd be billed for whatever was substituted.
+
+**A message typed while it's running gets queued**, exactly as one typed mid-turn does — it's sent automatically once the compaction lands. A compaction is a server-side operation on the conversation just like an agent turn, and the two can't overlap, so anything that would send a message treats it as busy: the input box queues, the auto-send drain waits, and a `/loop` tick is skipped rather than stacked.
+
+**When it won't run**, with the server's own wording passed through:
+
+| | |
+|---|---|
+| A turn is still in flight | "Answer the pending agent message first" — caught client-side too, so it doesn't cost a round trip |
+| A compaction is already running | "A compaction is already in progress. Please wait." |
+| You just compacted | "This conversation was just compacted. Send a new message before compacting again." |
+| The model isn't available to you | "Unsupported model: `<provider>/<model>`", plus a pointer to `/compact <model-id>` |
+
+**Caveats:**
+
+- **It's an undocumented endpoint.** `POST /api/w/{workspaceId}/assistant/conversations/{id}/compactions` is not part of the public `/api/v1` API and `@dust-tt/client` has no method for it (nor any reference to compaction at all, as of 1.2.8 — which is npm-latest, not a stale pin). Same standing as the context-usage and credits endpoints this CLI already calls: it works with the token the CLI has, but Dust hasn't committed to supporting it for external clients.
+- **It needs a real login.** Like those other private endpoints, a headless `DUST_API_KEY` workspace key can't reach it — only a `dustm login` session.
+- **Progress is polled, not streamed.** The web app hears a `compaction_message_done` event on the conversation-wide SSE stream; this CLI subscribes to the per-agent-message stream instead, so it polls the compaction message's status rather than opening a second stream just for this. If it's still running after five minutes the CLI says so and stops watching — the compaction itself continues server-side, and the status bar's context figure drops when it lands.
+- **A compacted conversation still resumes normally.** The public v1 conversation endpoint doesn't return compaction messages at all, so `--resume` and crash recovery are unaffected.
 
 ### Fetching a URL
 

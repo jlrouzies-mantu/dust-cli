@@ -47,22 +47,66 @@ export interface ModelChoice {
   providerId: ProviderId;
   label: string;
   note?: string;
+  /**
+   * The model's context window, in tokens.
+   *
+   * This is **not** something the client gets to choose. Dust stores a
+   * hardcoded `contextSize` per model server-side and the context-usage
+   * endpoint reports it back from there; `modelSelection` carries only
+   * providerId/modelId/reasoningEffort, with no context field of any kind.
+   * So the only lever a user has over how much context they get is *which
+   * model they pick* - which is exactly why this is surfaced in the picker
+   * rather than left to be discovered from the status bar after the fact.
+   *
+   * Mirrored by hand from `front/types/assistant/models/*.ts` upstream, and
+   * therefore as advisory as the rest of MODEL_CATALOG: it can go stale, so
+   * it's only ever shown as a hint. The status bar's `n/m context` figure
+   * comes from the server and remains the authority. Omitted for the `auto*`
+   * meta-selectors, where Dust picks the concrete model per message and
+   * there is no single answer.
+   */
+  contextSize?: number;
 }
 
 /**
- * A curated subset of the SDK's KnownModelLLMId union.
+ * Renders a context window for display: 250000 -> "250k", 1000000 -> "1M",
+ * 1050000 -> "1.05M". Switches to millions at 1M so the large-context
+ * models - the whole reason this is shown - read as obviously different
+ * rather than as one more six-digit number to compare digit by digit.
+ */
+export function formatContextSize(tokens: number): string {
+  if (tokens >= 1_000_000) {
+    const millions = tokens / 1_000_000;
+    return `${Number(millions.toFixed(2))}M`;
+  }
+  return `${Math.round(tokens / 1000)}k`;
+}
+
+/**
+ * Offline fallback for `/model`'s list.
  *
- * Deliberately not the whole union: it carries ~75 entries going back to
- * gpt-3.5-turbo, which makes for a useless picker. It is also deliberately
- * not authoritative - the API's modelId widens to `string`, there is no
- * endpoint that lists the models a workspace can actually use, and new
- * ones ship regularly. So this list is a convenience for the picker, and
- * `/model <id>` accepts anything, including ids not listed here (see
- * inferProviderId). A model the workspace isn't entitled to is rejected by
- * the server, which is the only place that can actually know.
+ * **Not the primary source any more.** workspaceModels.ts fetches the
+ * workspace's real entitlements - with authoritative context sizes - and
+ * everything here is only used when that call fails. Treat this as a
+ * best-effort snapshot: it cannot know what a given workspace is entitled
+ * to, and on a real workspace 13 of these entries turned out to be models
+ * that workspace had no access to at all. That is the cost of a
+ * hand-maintained list, and the reason it was demoted.
+ *
+ * Still deliberately not the SDK's whole KnownModelLLMId union, which
+ * carries ~75 entries going back to gpt-3.5-turbo. And still not
+ * authoritative in the other direction either: the API's modelId widens to
+ * `string`, so `/model <id>` accepts anything, including ids listed in
+ * neither this nor the live list (see inferProviderId). The server is the
+ * only thing that can actually decide.
+ *
+ * Context sizes are mirrored by hand from
+ * `front/types/assistant/models/*.ts` upstream and can go stale - another
+ * reason the live list wins wherever it's available.
  */
 export const MODEL_CATALOG: ModelChoice[] = [
-  // Meta-selectors: Dust picks the concrete model per message.
+  // Meta-selectors: Dust picks the concrete model per message, so there is
+  // no single context size to quote.
   { modelId: "auto", providerId: "auto", label: "auto", note: "Dust picks" },
   {
     modelId: "auto_complex",
@@ -77,88 +121,181 @@ export const MODEL_CATALOG: ModelChoice[] = [
     note: "Dust picks, favouring speed",
   },
 
-  // Anthropic
-  { modelId: "claude-opus-5", providerId: "anthropic", label: "claude-opus-5" },
+  // Anthropic. 250k is Dust's ceiling for the whole provider - it has not
+  // wired up Anthropic's extended-context beta, so there is no Claude model
+  // here that goes higher.
+  {
+    modelId: "claude-opus-5",
+    providerId: "anthropic",
+    label: "claude-opus-5",
+    contextSize: 250_000,
+  },
   {
     modelId: "claude-sonnet-5",
     providerId: "anthropic",
     label: "claude-sonnet-5",
+    contextSize: 250_000,
   },
-  { modelId: "claude-fable-5", providerId: "anthropic", label: "claude-fable-5" },
+  {
+    modelId: "claude-fable-5",
+    providerId: "anthropic",
+    label: "claude-fable-5",
+    contextSize: 250_000,
+  },
   {
     modelId: "claude-opus-4-8",
     providerId: "anthropic",
     label: "claude-opus-4-8",
+    contextSize: 250_000,
   },
   {
     modelId: "claude-sonnet-4-6",
     providerId: "anthropic",
     label: "claude-sonnet-4-6",
+    contextSize: 250_000,
   },
   {
     modelId: "claude-haiku-4-5-20251001",
     providerId: "anthropic",
     label: "claude-haiku-4-5",
+    contextSize: 180_000,
   },
 
   // OpenAI
-  { modelId: "gpt-5.6-sol", providerId: "openai", label: "gpt-5.6-sol" },
-  { modelId: "gpt-5.6-terra", providerId: "openai", label: "gpt-5.6-terra" },
-  { modelId: "gpt-5.6-luna", providerId: "openai", label: "gpt-5.6-luna" },
-  { modelId: "gpt-5.5", providerId: "openai", label: "gpt-5.5" },
-  { modelId: "gpt-5.4", providerId: "openai", label: "gpt-5.4" },
-  { modelId: "gpt-5.4-mini", providerId: "openai", label: "gpt-5.4-mini" },
-  { modelId: "o3", providerId: "openai", label: "o3" },
-  { modelId: "o4-mini", providerId: "openai", label: "o4-mini" },
+  {
+    modelId: "gpt-5.6-terra-long-context",
+    providerId: "openai",
+    label: "gpt-5.6-terra-long-context",
+    contextSize: 1_050_000,
+  },
+  {
+    modelId: "gpt-5.5",
+    providerId: "openai",
+    label: "gpt-5.5",
+    contextSize: 1_000_000,
+  },
+  {
+    modelId: "gpt-5.4",
+    providerId: "openai",
+    label: "gpt-5.4",
+    contextSize: 1_000_000,
+  },
+  {
+    modelId: "gpt-5.4-mini",
+    providerId: "openai",
+    label: "gpt-5.4-mini",
+    contextSize: 400_000,
+  },
+  {
+    modelId: "gpt-5.6-sol",
+    providerId: "openai",
+    label: "gpt-5.6-sol",
+    contextSize: 272_000,
+  },
+  {
+    modelId: "gpt-5.6-terra",
+    providerId: "openai",
+    label: "gpt-5.6-terra",
+    contextSize: 272_000,
+  },
+  {
+    modelId: "gpt-5.6-luna",
+    providerId: "openai",
+    label: "gpt-5.6-luna",
+    contextSize: 272_000,
+  },
+  { modelId: "o3", providerId: "openai", label: "o3", contextSize: 200_000 },
+  {
+    modelId: "o4-mini",
+    providerId: "openai",
+    label: "o4-mini",
+    contextSize: 200_000,
+  },
 
   // Google
+  {
+    modelId: "gemini-3.8-flash",
+    providerId: "google_ai_studio",
+    label: "gemini-3.8-flash",
+    contextSize: 1_048_576,
+  },
   {
     modelId: "gemini-3.6-flash",
     providerId: "google_ai_studio",
     label: "gemini-3.6-flash",
-  },
-  {
-    modelId: "gemini-3.1-pro-preview",
-    providerId: "google_ai_studio",
-    label: "gemini-3.1-pro-preview",
+    contextSize: 1_000_000,
   },
   {
     modelId: "gemini-3.5-flash",
     providerId: "google_ai_studio",
     label: "gemini-3.5-flash",
+    contextSize: 1_000_000,
+  },
+  {
+    modelId: "gemini-3.1-pro-preview",
+    providerId: "google_ai_studio",
+    label: "gemini-3.1-pro-preview",
+    contextSize: 1_000_000,
   },
 
   // xAI
-  { modelId: "grok-4.5", providerId: "xai", label: "grok-4.5" },
   {
     modelId: "grok-4-1-fast-reasoning-latest",
     providerId: "xai",
     label: "grok-4-1-fast-reasoning",
+    contextSize: 2_000_000,
+  },
+  {
+    modelId: "grok-4.5",
+    providerId: "xai",
+    label: "grok-4.5",
+    contextSize: 500_000,
   },
 
   // Mistral
   {
-    modelId: "mistral-medium-3-5",
-    providerId: "mistral",
-    label: "mistral-medium-3-5",
-  },
-  {
     modelId: "mistral-large-latest",
     providerId: "mistral",
     label: "mistral-large-latest",
+    contextSize: 256_000,
+  },
+  {
+    modelId: "mistral-medium-3-5",
+    providerId: "mistral",
+    label: "mistral-medium-3-5",
+    contextSize: 256_000,
   },
 
   // DeepSeek / Fireworks-hosted open models
-  { modelId: "deepseek-chat", providerId: "deepseek", label: "deepseek-chat" },
+  {
+    modelId: "accounts/fireworks/models/deepseek-v4-pro",
+    providerId: "fireworks",
+    label: "deepseek-v4-pro",
+    contextSize: 1_000_000,
+  },
+  {
+    modelId: "accounts/fireworks/models/glm-5p3",
+    providerId: "fireworks",
+    label: "glm-5p3",
+    contextSize: 1_000_000,
+  },
+  {
+    modelId: "accounts/fireworks/models/kimi-k2p5",
+    providerId: "fireworks",
+    label: "kimi-k2p5",
+    contextSize: 262_100,
+  },
   {
     modelId: "accounts/fireworks/models/kimi-k3",
     providerId: "fireworks",
     label: "kimi-k3",
+    contextSize: 256_000,
   },
   {
-    modelId: "accounts/fireworks/models/glm-5p2",
-    providerId: "fireworks",
-    label: "glm-5p2",
+    modelId: "deepseek-chat",
+    providerId: "deepseek",
+    label: "deepseek-chat",
+    contextSize: 64_000,
   },
 ];
 
@@ -192,21 +329,24 @@ export function inferProviderId(modelId: string): ProviderId | null {
  * failing that, treats the input as a raw model id if a provider can be
  * inferred from it.
  */
-export function resolveModel(query: string): ModelChoice | null {
+export function resolveModel(
+  query: string,
+  catalogue: ModelChoice[] = MODEL_CATALOG
+): ModelChoice | null {
   const q = query.trim();
   if (!q) {
     return null;
   }
   const lower = q.toLowerCase();
 
-  const exact = MODEL_CATALOG.find(
+  const exact = catalogue.find(
     (m) => m.modelId.toLowerCase() === lower || m.label.toLowerCase() === lower
   );
   if (exact) {
     return exact;
   }
 
-  const partial = MODEL_CATALOG.filter(
+  const partial = catalogue.filter(
     (m) =>
       m.modelId.toLowerCase().includes(lower) ||
       m.label.toLowerCase().includes(lower)
@@ -225,12 +365,15 @@ export function resolveModel(query: string): ModelChoice | null {
     : null;
 }
 
-export function modelCandidates(query: string): ModelChoice[] {
+export function modelCandidates(
+  query: string,
+  catalogue: ModelChoice[] = MODEL_CATALOG
+): ModelChoice[] {
   const lower = query.trim().toLowerCase();
   if (!lower) {
     return [];
   }
-  return MODEL_CATALOG.filter(
+  return catalogue.filter(
     (m) =>
       m.modelId.toLowerCase().includes(lower) ||
       m.label.toLowerCase().includes(lower)
@@ -241,6 +384,10 @@ export interface ModelOverride {
   modelId: string;
   providerId: ProviderId;
   label: string;
+  // Carried through from MODEL_CATALOG so /model can say what window the
+  // model you just picked has. Absent for ids typed in that aren't in the
+  // catalogue - there is no endpoint to look one up from.
+  contextSize?: number;
 }
 
 /**
@@ -294,6 +441,89 @@ export function buildModelSelection(
     modelId: base.modelId,
     ...(effortOverride ? { reasoningEffort: effortOverride } : {}),
   };
+}
+
+// The three meta-selectors. They resolve to a different concrete model per
+// message, so anywhere an API wants a real provider/model pair up front
+// (compaction does) they are not an answer.
+function isAutoSelector(providerId: string): boolean {
+  return (
+    providerId === "auto" ||
+    providerId === "auto_complex" ||
+    providerId === "auto_fast"
+  );
+}
+
+/**
+ * Picks the model `/compact` summarizes with.
+ *
+ * Unlike a message, compaction takes the model as an explicit argument and
+ * validates it against the server's concrete model list, so an `auto`
+ * selector can't be passed through. That's not an edge case - agents
+ * configured with `auto` are common - so rather than refusing, this falls
+ * back to the model the conversation has *actually* been running on, which
+ * the context-usage endpoint reports from the last completed run.
+ *
+ * In order: an explicit `/compact <model-id>`, then a `/model` override,
+ * then the conversation's real current model, then the agent's own
+ * configuration. Null only when every one of those is absent or `auto` -
+ * which in practice means a conversation that hasn't had a turn yet.
+ */
+export function resolveCompactionModel({
+  query,
+  override,
+  conversationModel,
+  agentModel,
+  catalogue = MODEL_CATALOG,
+}: {
+  query?: string;
+  override: ModelOverride | null;
+  conversationModel: { modelId: string | null; providerId: string | null } | null;
+  agentModel: { modelId: string; providerId: string } | null;
+  catalogue?: ModelChoice[];
+}): ModelOverride | null {
+  if (query) {
+    const resolved = resolveModel(query, catalogue);
+    // An explicitly named auto selector is refused rather than quietly
+    // swapped for something else: the user named it, and silently
+    // substituting a model they'd be billed for is worse than not acting.
+    if (resolved && !isAutoSelector(resolved.providerId)) {
+      return resolved;
+    }
+    return null;
+  }
+
+  if (override && !isAutoSelector(override.providerId)) {
+    return override;
+  }
+
+  if (
+    conversationModel?.modelId &&
+    conversationModel.providerId &&
+    !isAutoSelector(conversationModel.providerId)
+  ) {
+    const providerId = conversationModel.providerId as ProviderId;
+    return {
+      modelId: conversationModel.modelId,
+      providerId,
+      label: conversationModel.modelId,
+      contextSize: catalogue.find(
+        (m) => m.modelId === conversationModel.modelId
+      )?.contextSize,
+    };
+  }
+
+  if (agentModel && !isAutoSelector(agentModel.providerId)) {
+    return {
+      modelId: agentModel.modelId,
+      providerId: agentModel.providerId as ProviderId,
+      label: agentModel.modelId,
+      contextSize: catalogue.find((m) => m.modelId === agentModel.modelId)
+        ?.contextSize,
+    };
+  }
+
+  return null;
 }
 
 export interface ModelStatus {

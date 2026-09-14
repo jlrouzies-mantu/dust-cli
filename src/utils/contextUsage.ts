@@ -6,6 +6,13 @@ export interface ContextUsage {
   contextUsage: number;
   contextSize: number;
   modelId: string | null;
+  // The provider that goes with modelId. Carried alongside it because the
+  // pair is what identifies a model to the API - `/compact` needs both, and
+  // this endpoint is the only place that reports the *concrete* model a
+  // conversation actually ran on (an agent configured with `auto` resolves
+  // to a different real model per message, so its own configuration can't
+  // answer that).
+  providerId: string | null;
 }
 
 // Cached at module scope (outside any component's state), keyed by
@@ -65,7 +72,7 @@ async function fetchContextUsage(
     const data = (await res.json()) as {
       contextUsage?: unknown;
       contextSize?: unknown;
-      model?: { modelId?: unknown };
+      model?: { modelId?: unknown; providerId?: unknown };
     };
     if (
       typeof data.contextUsage !== "number" ||
@@ -79,6 +86,10 @@ async function fetchContextUsage(
       contextSize: data.contextSize,
       modelId:
         typeof data.model?.modelId === "string" ? data.model.modelId : null,
+      providerId:
+        typeof data.model?.providerId === "string"
+          ? data.model.providerId
+          : null,
     };
   } catch {
     return null;

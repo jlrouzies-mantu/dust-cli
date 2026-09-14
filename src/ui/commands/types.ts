@@ -21,6 +21,9 @@ export interface CommandContext {
   // open a picker.
   runModelCommand?: (args?: string) => void;
   runEffortCommand?: (args?: string) => void;
+  // args present -> summarize with that model; absent -> use the /model
+  // override, or failing that the agent's own model.
+  runCompactCommand?: (args?: string) => void;
 }
 
 export interface Command {
@@ -189,6 +192,17 @@ export const createCommands = (context: CommandContext): Command[] => [
     execute: (args) => {
       if (context.runModelCommand) {
         context.runModelCommand(args);
+      }
+    },
+  },
+  {
+    name: "compact",
+    description:
+      "Summarize this conversation server-side to free up context window",
+    usage: "[model-id]",
+    execute: (args) => {
+      if (context.runCompactCommand) {
+        context.runCompactCommand(args);
       }
     },
   },

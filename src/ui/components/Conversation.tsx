@@ -292,6 +292,8 @@ interface ConversationProps {
   showExitHint: boolean;
   transientHint: string | null;
   retryStatus: string | null;
+  // Non-null while /compact is running (see the render block below).
+  compactionStatus: string | null;
   workspaceName: string | null;
   // The model in use - the agent's own unless /model or /effort is
   // overriding it, with `overridden` distinguishing the two.
@@ -337,6 +339,7 @@ const _Conversation: FC<ConversationProps> = ({
   showExitHint,
   transientHint,
   retryStatus,
+  compactionStatus,
   workspaceName,
   modelStatus,
   consumedCredits,
@@ -527,6 +530,21 @@ const _Conversation: FC<ConversationProps> = ({
         <Box marginTop={1}>
           <Text color="yellow">
             <Spinner type="dots" /> {retryStatus}
+          </Text>
+        </Box>
+      )}
+
+      {/*
+        /compact's progress. Rendered alongside retryStatus rather than
+        through it: compaction polls for minutes, and a retry firing during
+        that window would otherwise replace the only thing telling the user
+        why the CLI looks idle. Purple rather than retry's yellow - this is
+        routine work in progress, not a warning about something going wrong.
+      */}
+      {compactionStatus && (
+        <Box marginTop={1}>
+          <Text color={MANTU_PURPLE}>
+            <Spinner type="dots" /> {compactionStatus}
           </Text>
         </Box>
       )}

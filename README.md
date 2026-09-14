@@ -256,7 +256,8 @@ The label is the agent's name plus the opening words of your last message, so se
 
 Notes:
 
-- **Precedence is by urgency, not by what the UI is drawing.** An approval prompt open *mid-turn* outranks "working", because that's the one state where the agent is genuinely blocked on you. A picker you opened yourself (`/model`, `/skills`) doesn't count as "needs you" — you already know it's there.
+- **Precedence is by urgency, not by what the UI is drawing.** An approval prompt outranks "working", because that's the one state where the agent is genuinely blocked on you. Only prompts the *agent* raised count — a picker you opened yourself (`/model`, `/skills`, `@`) doesn't flag the tab, since you already know it's there.
+- **`/compact` counts as working too**, so a compaction you've tabbed away from gets the same ring and the same `✓` when it finishes.
 - **Nothing here can corrupt a legacy console.** These are OSC escape sequences (`OSC 0` for the title, `OSC 9;4` for the ring), and a terminal that doesn't recognise one *consumes and discards* it rather than printing garbage — unlike an unsupported glyph, which is why the status bar's gauges are constrained to CP437 and these icons aren't. Windows Terminal honours both; legacy conhost honours the title and ignores the ring.
 - **The title is off when output isn't a terminal**, so `-m/--message`'s JSON stays byte-for-byte clean when piped. `DUSTM_NO_TITLE=1` turns it off entirely, as does `TERM=dumb`.
 - **Your own text is sanitized before it goes in the title.** The label carries part of a message you typed or pasted, and a stray `ESC` or `BEL` in there would close the escape sequence early and leave the rest to be read as terminal commands. The whole control-character range is stripped first.
@@ -524,6 +525,8 @@ A long session eventually fills the model's context window, and the usual escape
 This is genuinely **server-side** — Dust runs the summarization in a workflow, and the CLI couldn't usefully fake it, since the conversation history lives on Dust's side and the next turn is assembled there.
 
 **Which model does the summarizing.** The endpoint takes a concrete `providerId`/`modelId` pair as an explicit argument, so an `auto` selector isn't an answer — and agents configured with `auto` are common. Rather than refusing, the model is resolved in this order: `/compact <model-id>` if you named one, then your `/model` override, then **the model the conversation has actually been running on** (read from the context-usage endpoint, which reports the concrete model of the last completed run), then the agent's own configuration. Only a conversation that hasn't had a turn yet on an `auto` agent ends up with nothing to use, and it says so. Naming `auto` explicitly is refused rather than silently swapped for something else — you'd be billed for whatever was substituted.
+
+**A message typed while it's running gets queued**, exactly as one typed mid-turn does — it's sent automatically once the compaction lands. A compaction is a server-side operation on the conversation just like an agent turn, and the two can't overlap, so anything that would send a message treats it as busy: the input box queues, the auto-send drain waits, and a `/loop` tick is skipped rather than stacked.
 
 **When it won't run**, with the server's own wording passed through:
 

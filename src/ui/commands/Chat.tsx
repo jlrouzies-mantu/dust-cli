@@ -257,6 +257,20 @@ function buildSteerRedirectPrompt(
   );
 }
 
+/**
+ * Whether an open inline selector is the agent asking for something, rather
+ * than a picker the user opened themselves.
+ *
+ * The same `inlineSelector` slot serves both, which matters for the tab
+ * title: "needs you" should mean the agent is stuck waiting, not that you
+ * happen to have `/model` open. Listed as an allowlist of the agent-raised
+ * modes, so a new user-facing picker doesn't silently start flagging the
+ * tab.
+ */
+function isAgentApprovalPrompt(mode: string | undefined): boolean {
+  return mode === "approval" || mode === "diff" || mode === "plan";
+}
+
 // Longest tab label worth emitting. Windows Terminal truncates a tab to far
 // less than this, but the same string is the window title when only one tab
 // is open, where there's room for more.
@@ -572,6 +586,13 @@ const CliChat: FC<CliChatProps> = ({
   // rather than borrowing retryStatus above: a retry can fire during the
   // compaction wait, and one would then silently overwrite the other.
   const [compactionStatus, setCompactionStatus] = useState<string | null>(null);
+  // A compaction is a server-side operation on this conversation just as
+  // much as an agent turn is - the server refuses to run the two at once -
+  // so everywhere that asks "is this conversation busy?" has to count it.
+  // Sending a message mid-compaction would race it, which is exactly what
+  // the message queue exists to prevent.
+  const isCompacting = compactionStatus !== null;
+  const isConversationBusy = isProcessingQuestion || isCompacting;
   // What the tab title says the agent is doing - the last message's opening
   // words. Null until something has been sent, when the tab falls back to
   // naming the folder instead.
@@ -1583,6 +1604,13 @@ const CliChat: FC<CliChatProps> = ({
         );
         return;
       }
+      if (isCompacting) {
+        pushNoticeLines(
+          ["A compaction is already running - give it a moment."],
+          "compact_already"
+        );
+        return;
+      }
       if (isProcessingQuestion) {
         // The server 409s on this too, but catching it here avoids spending
         // a round trip to be told something already on screen.
@@ -1715,6 +1743,7 @@ const CliChat: FC<CliChatProps> = ({
     [
       currentConversationId,
       isProcessingQuestion,
+      isCompacting,
       selectedAgent,
       pushNoticeLines,
       setContextUsageIfPresent,
@@ -2660,19 +2689,21 @@ const CliChat: FC<CliChatProps> = ({
     registerTerminalTitleCleanup();
   }, []);
 
-  // Raise the sticky "done" marker on the processing -> idle edge, which is
-  // the moment a turn actually ends. Watched via a ref rather than derived
-  // in the title effect below, because that effect re-runs for reasons that
-  // have nothing to do with a turn ending (a new task label, an error
-  // clearing) and would otherwise re-raise the marker after a keypress
-  // dismissed it.
+  // Raise the sticky "done" marker on the busy -> idle edge - whichever
+  // kind of server-side work it was, an agent turn or a /compact, since both
+  // are things you might have tabbed away from.
+  //
+  // Watched via a ref rather than derived in the title effect below, because
+  // that effect re-runs for reasons that have nothing to do with work ending
+  // (a new task label, an error clearing) and would otherwise re-raise the
+  // marker after a keypress had dismissed it.
   useEffect(() => {
-    if (wasProcessingRef.current && !isProcessingQuestion) {
+    if (wasProcessingRef.current && !isConversationBusy) {
       setTurnFinished(true);
       turnFinishedRef.current = true;
     }
-    wasProcessingRef.current = isProcessingQuestion;
-  }, [isProcessingQuestion]);
+    wasProcessingRef.current = isConversationBusy;
+  }, [isConversationBusy]);
 
   // Drive the tab title and Windows Terminal's taskbar progress ring from
   // the same state the UI already renders. See utils/terminalTitle.ts for
@@ -2685,15 +2716,18 @@ const CliChat: FC<CliChatProps> = ({
       // Falls back to the folder because that's the other thing that
       // distinguishes two tabs from each other before either has been used.
       subject: tabTask ?? path.basename(process.cwd()),
-      isWorking: isProcessingQuestion,
-      isBlockedOnUser: inlineSelector !== null,
+      isWorking: isConversationBusy,
+      // Only the prompts the *agent* raised count as being blocked on you.
+      // A picker you opened yourself (/model, /skills, @-mentions) leaves
+      // the turn running and needs no flag - you're already looking at it.
+      isBlockedOnUser: isAgentApprovalPrompt(inlineSelector?.mode),
       hasError: error !== null,
       turnFinished,
     });
     setTerminalTitle(title);
     setTaskbarProgress(progress);
   }, [
-    isProcessingQuestion,
+    isConversationBusy,
     inlineSelector,
     error,
     turnFinished,
@@ -2729,8 +2763,8 @@ const CliChat: FC<CliChatProps> = ({
   // runs inside a setInterval closure.
   useEffect(() => {
     loopBusyRef.current =
-      isProcessingQuestion || messageQueue.some((message) => message.loop);
-  }, [isProcessingQuestion, messageQueue]);
+      isConversationBusy || messageQueue.some((message) => message.loop);
+  }, [isConversationBusy, messageQueue]);
 
   // The loop's timer. Keyed on the loop's id and interval only - not on the
   // whole object - so counting a run doesn't tear the interval down and
@@ -3500,7 +3534,7 @@ const CliChat: FC<CliChatProps> = ({
   // whether it completed normally, was cancelled via Esc/Ctrl+C, or was
   // interrupted by a genuine Ctrl+S steer (see cancelCurrentGeneration).
   useEffect(() => {
-    if (isProcessingQuestion || messageQueue.length === 0) {
+    if (isConversationBusy || messageQueue.length === 0) {
       return;
     }
     if (!selectedAgent || !me || meError || isMeLoading) {
@@ -3510,7 +3544,7 @@ const CliChat: FC<CliChatProps> = ({
     setMessageQueue(rest);
     void handleSubmitQuestion(next.text, next.files);
   }, [
-    isProcessingQuestion,
+    isConversationBusy,
     messageQueue,
     selectedAgent,
     me,
@@ -3544,9 +3578,10 @@ const CliChat: FC<CliChatProps> = ({
       setPendingFiles([]);
 
       // If there's a message waiting to be sent with these files, send it
-      // now - or queue it if the agent is still working a prior turn.
+      // now - or queue it if the conversation is busy (a prior turn, or a
+      // /compact).
       if (userInput.trim()) {
-        if (isProcessingQuestion) {
+        if (isConversationBusy) {
           setMessageQueue((prev) => [
             ...prev,
             {
@@ -3564,7 +3599,7 @@ const CliChat: FC<CliChatProps> = ({
         setHistoryIndex(null);
       }
     },
-    [userInput, isProcessingQuestion, handleSubmitQuestion]
+    [userInput, isConversationBusy, handleSubmitQuestion]
   );
 
   // Handle file upload error
@@ -4291,10 +4326,10 @@ const CliChat: FC<CliChatProps> = ({
         return;
       }
 
-      if (isProcessingQuestion) {
-        // The agent is still working the current turn - queue this message
-        // instead of sending it now. It's sent automatically once the
-        // in-flight turn ends.
+      if (isConversationBusy) {
+        // The conversation is busy - the agent is working the current turn,
+        // or a /compact is in flight - so queue this message instead of
+        // sending it now. It goes out automatically once that finishes.
         setMessageQueue((prev) => [
           ...prev,
           {

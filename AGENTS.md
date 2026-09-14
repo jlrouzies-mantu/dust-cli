@@ -282,6 +282,14 @@ last-synced commit (procedure step 3 above):
     when a tolerant fetch becomes necessary - it isn't yet, and a wrapper
     for it was written and then removed once the live behaviour was
     confirmed. Don't re-add one speculatively.
+  - **A compaction makes the conversation busy.** `Chat.tsx` derives
+    `isConversationBusy = isProcessingQuestion || isCompacting`, and every
+    gate that asks "can a message go out now?" uses it - the Enter handler,
+    the queue-drain effect, the post-file-upload send, and the loop's
+    busy flag. Gating only on `isProcessingQuestion` is the bug this
+    shipped with: a message typed during a compaction bypassed the queue
+    and raced the compaction server-side. If a fourth send path is ever
+    added, it needs the same flag.
   - Error messages from the server are surfaced **verbatim**. The three 409s
     ("Answer the pending agent message first", "A compaction is already in
     progress", "This conversation was just compacted") each tell the user a

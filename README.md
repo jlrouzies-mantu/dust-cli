@@ -35,6 +35,7 @@
   - [Skills](#skills)
   - [Model and effort](#model-and-effort)
   - [Compacting a conversation](#compacting-a-conversation)
+  - [Side questions (/btw)](#side-questions-btw)
   - [Fetching a URL](#fetching-a-url)
   - [Claude Code mode](#claude-code-mode)
   - [Headless Authentication](#headless-authentication)
@@ -73,6 +74,7 @@
 | Local skills | Dust's own agent skills are configured server-side and locked to workspace admins — this is the client-side alternative: hand-authored `SKILL.md` files the agent discovers, gets a cheap catalogue of, and pulls in full on demand via a `read_skill` tool. `/skills` opens a checklist to switch them on and off — see [Skills](#skills) |
 | `/model` and `/effort` | Override the agent's server-side model and reasoning effort for your conversation, via the API's per-message `modelSelection`. The web app exposes these; the CLI had no equivalent, so you were stuck with whatever the agent was configured with — see [Model and effort](#model-and-effort) |
 | `/compact` | Summarize the conversation so far server-side, so a long session stops crowding out the context window instead of forcing a `/new` that throws the history away — see [Compacting a conversation](#compacting-a-conversation) |
+| `/btw` | Ask the agent a quick side question — even mid-turn — without it becoming part of the conversation: answered in a separate, unlisted conversation primed with this one's history, and shown in its own boxed block — see [Side questions (/btw)](#side-questions-btw) |
 | Live tab title + taskbar progress | The terminal tab says which agent is running, what it's working on, and whether it's finished — plus a pulsing progress ring on the tab in Windows Terminal. So a `dustm` you've tabbed away from can tell you it's done without you switching to it — see [Tab title and progress](#tab-title-and-progress) |
 | Live model list with context sizes | `/model`'s picker now shows the models your workspace is **actually entitled to**, largest context window first, read from the endpoint the web app's own picker uses. It used to be a hand-maintained list that couldn't know your entitlements — on a real workspace, 13 of its entries were models that workspace had no access to — see [Model and effort](#model-and-effort) |
 | Update check against this fork's releases | This fork isn't on npm, so the upstream update notifier had nothing to check and was stubbed out entirely. It now checks this repo's own GitHub releases and shows the actual reinstall one-liner instead of an `npm install -g` command that was never going to work — network failures and blocked endpoints just mean "no update", never a startup error |
@@ -109,6 +111,7 @@
 | Creating a file dumped its entire contents into the chat, unbounded | A new file has no real diff — every line is a `+` — and the permanent transcript view of `write_file`/`edit_file` changes had no line cap, unlike every other place this CLI shows tool output. Now capped at 30 lines with a "N more lines not shown" note, same as the ephemeral approval preview |
 | Wide tables rendered as shredded box-drawing characters across several lines | `cli-table3` sizes columns purely by content, with no idea how wide the terminal is. Any table wider than the terminal produced physical lines longer than the terminal's column count, which then hard-wrapped at an arbitrary column — slicing borders and cell text apart mid-row. Columns are now given explicit widths when the natural layout would overflow, so long cells wrap *inside* their own column and every emitted line already fits |
 | Tables with a divider between every row rendered with garbage `---` rows | Agents sometimes emit "grid tables" — a `\|---\|---\|` line between *every* row, not just after the header. `marked` only treats the first one as a separator; each extra one parsed as a literal data row whose cells were all `---`, slicing the table apart. Redundant divider rows are now stripped before markdown ever sees them (left alone inside fenced code blocks, where such a table may be a deliberate example) |
+| Typing got progressively more sluggish the longer a session ran | Ink keeps every line ever printed in memory, and once its live region (preview, queue, pickers, input box, status bar) is as tall as the terminal, it stops updating incrementally and rewrites **the entire conversation** on every frame — every keystroke and spinner tick. Measured on a 30-row terminal: 195 bytes per keystroke normally, 455 KB per keystroke with 5,000 lines of history. Several parts of the live region could grow that tall — the `/` command list (18 entries, more once descriptions wrapped), long multi-line drafts, a long queue, and the streaming preview, which was capped by *logical* lines, so six long paragraphs could still wrap into thirty-odd rows. Each is now bounded relative to the terminal's actual height (see `src/utils/liveRegion.ts`) |
 | `-m`/`--message` polluted its own machine-readable output | The pulsing "Starting dustm..." line, its trailing newline, and the logger init were printed unconditionally — including in the non-interactive path whose stdout callers parse as JSON. They're now interactive-only |
 
 ---
@@ -280,6 +283,7 @@ Not yet wired into the headless `--loop` path — that's arguably where an unatt
 - **`/model`** — override the model for this conversation (`/model default` to clear) — see [Model and effort](#model-and-effort)
 - **`/effort`** — override the reasoning effort: `high`, `medium`, `light`, `none` (`/effort default` to clear)
 - **`/compact`** — summarize the conversation so far to free up context window (`/compact <model-id>` to choose what summarizes it) — see [Compacting a conversation](#compacting-a-conversation)
+- **`/btw <question>`** — ask a quick side question that isn't added to the conversation; works mid-turn — see [Side questions (/btw)](#side-questions-btw)
 - **`/claude-code-mode`** — prime the agent with your Claude Code memories for this folder — see [Claude Code mode](#claude-code-mode)
 
 ### Modes
@@ -543,6 +547,25 @@ This is genuinely **server-side** — Dust runs the summarization in a workflow,
 - **It needs a real login.** Like those other private endpoints, a headless `DUST_API_KEY` workspace key can't reach it — only a `dustm login` session.
 - **Progress is polled, not streamed.** The web app hears a `compaction_message_done` event on the conversation-wide SSE stream; this CLI subscribes to the per-agent-message stream instead, so it polls the compaction message's status rather than opening a second stream just for this. If it's still running after five minutes the CLI says so and stops watching — the compaction itself continues server-side, and the status bar's context figure drops when it lands.
 - **A compacted conversation still resumes normally.** The public v1 conversation endpoint doesn't return compaction messages at all, so `--resume` and crash recovery are unaffected.
+
+### Side questions (/btw)
+
+```
+/btw what does the --frozen-lockfile flag do again?
+/btw which file did you say the retry logic lives in?
+```
+
+`/btw` asks the current agent a quick question **without adding it to the conversation** — the agent's context, and everything later turns carry, stays exactly as it was. It works while the agent is still mid-turn: the main answer keeps streaming, and the side answer appears in its own gold-bordered `btw ›` block when it's ready.
+
+**How it works.** Dust has no ephemeral messages — anything posted to a conversation is history. So the question goes to the same agent in a **separate, unlisted conversation**, primed with an excerpt of the current one (the newest messages, up to ~24k characters, plus whatever the agent has streamed so far in a running turn), so it can answer questions about what you're working on. Your `/model`/`/effort` overrides apply to it too.
+
+**It's read-only.** The side conversation gets none of this CLI's local tools (no file access, no `run_command`), and any server-side tool that asks for approval is rejected automatically — a side question can't change anything, which is also why it needs no plan-mode gating.
+
+**Caveats:**
+
+- **It costs one agent message**, like any other.
+- **The side conversation isn't deleted afterwards.** The public API has no endpoint for that. It's created unlisted — the same visibility every conversation from this CLI gets.
+- One `/btw` at a time; a second one while the first is answering is refused rather than queued.
 
 ### Fetching a URL
 

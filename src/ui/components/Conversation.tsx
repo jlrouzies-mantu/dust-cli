@@ -54,6 +54,11 @@ import type { ChatMode } from "../../utils/chatMode.js";
 import { chatModeColor, chatModeLabel } from "../../utils/chatMode.js";
 import { getGitBranch } from "../../utils/gitInfo.js";
 import { useTerminalSize } from "../../utils/hooks/use_terminal_size.js";
+import {
+  inputRowBudget,
+  queueRowBudget,
+  selectorRowBudget,
+} from "../../utils/liveRegion.js";
 import type { LoopState } from "../../utils/loopController.js";
 import { loopBlockTitle } from "../../utils/loopController.js";
 import { clearTerminal } from "../../utils/terminal.js";
@@ -268,6 +273,14 @@ export type ConversationItem = { key: string } & (
       type: "file_change";
     } & DiffContent)
   | {
+      // A /btw side answer. Printed as its own boxed block so it never reads
+      // as a turn of the conversation - it isn't one (see utils/btw.ts).
+      // Rendered once the full answer is in, like an agent message.
+      type: "btw_answer";
+      question: string;
+      segments: MarkdownSegment[];
+    }
+  | {
       type: "separator";
     }
 );
@@ -294,6 +307,8 @@ interface ConversationProps {
   retryStatus: string | null;
   // Non-null while /compact is running (see the render block below).
   compactionStatus: string | null;
+  // Non-null while a /btw side question is being answered.
+  btwStatus: string | null;
   workspaceName: string | null;
   // The model in use - the agent's own unless /model or /effort is
   // overriding it, with `overridden` distinguishing the two.
@@ -340,6 +355,7 @@ const _Conversation: FC<ConversationProps> = ({
   transientHint,
   retryStatus,
   compactionStatus,
+  btwStatus,
   workspaceName,
   modelStatus,
   consumedCredits,
@@ -549,6 +565,14 @@ const _Conversation: FC<ConversationProps> = ({
         </Box>
       )}
 
+      {btwStatus && (
+        <Box marginTop={1}>
+          <Text color={MANTU_GOLD}>
+            <Spinner type="dots" /> {btwStatus}
+          </Text>
+        </Box>
+      )}
+
       {/*
         Both this streaming preview and the spinner block below are gated on
         `!inlineSelector` too: while an inline selector prompt is open
@@ -645,7 +669,22 @@ const _Conversation: FC<ConversationProps> = ({
           bodyBg: string,
           bodyFg: string
         ) => {
-          const rowTexts = rows.map(
+          // Bounded like the rest of the live region (see
+          // utils/liveRegion.ts): the head of the queue is what's sent
+          // next, so that's what stays visible.
+          const maxRows = queueRowBudget(stdout?.rows);
+          const overflow = rows.length - maxRows;
+          const shownRows =
+            overflow > 0
+              ? [
+                  ...rows.slice(0, maxRows - 1),
+                  {
+                    id: `${key}_overflow`,
+                    text: `… +${overflow + 1} more`,
+                  },
+                ]
+              : rows;
+          const rowTexts = shownRows.map(
             (row) =>
               `${row.text.split("\n")[0]}${row.text.includes("\n") ? " …" : ""}`
           );
@@ -670,7 +709,7 @@ const _Conversation: FC<ConversationProps> = ({
               </Text>
               {rowTexts.map((text, index) => (
                 <Text
-                  key={rows[index].id}
+                  key={shownRows[index].id}
                   backgroundColor={bodyBg}
                   color={bodyFg}
                 >
@@ -748,6 +787,7 @@ const _Conversation: FC<ConversationProps> = ({
         isProcessingQuestion={isProcessingQuestion}
         mentionPrefix={mentionPrefix}
         claudeCodeMode={claudeCodeMode}
+        maxVisibleLines={inputRowBudget(stdout?.rows)}
       />
       {showCommandSelector && (
         <CommandSelector
@@ -755,6 +795,7 @@ const _Conversation: FC<ConversationProps> = ({
           selectedIndex={selectedCommandIndex}
           commands={commands}
           onSelect={() => {}}
+          maxVisible={selectorRowBudget(stdout?.rows, 8)}
         />
       )}
       {!showCommandSelector && inlineSelector && (
@@ -1151,6 +1192,42 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
               </Text>
             );
           })}
+        </Box>
+      );
+    case "btw_answer":
+      return (
+        <Box
+          flexDirection="column"
+          alignSelf="flex-start"
+          marginLeft={2}
+          marginBottom={1}
+          paddingX={1}
+          borderStyle="round"
+          borderColor={MANTU_GOLD}
+        >
+          <Text bold color={MANTU_GOLD}>
+            {`btw › ${item.question}`}
+          </Text>
+          {item.segments.map((segment, index) =>
+            segment.type === "code" ? (
+              <Box
+                key={index}
+                flexDirection="column"
+                alignSelf="flex-start"
+                marginY={1}
+                paddingX={1}
+                borderStyle="classic"
+                borderColor="gray"
+              >
+                <Text backgroundColor={CODE_BLOCK_BG}>{segment.content}</Text>
+              </Box>
+            ) : (
+              <Text key={index}>{segment.content}</Text>
+            )
+          )}
+          <Text dimColor italic>
+            side answer · not added to the conversation
+          </Text>
         </Box>
       );
     case "separator":

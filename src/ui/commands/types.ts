@@ -24,6 +24,8 @@ export interface CommandContext {
   // args present -> summarize with that model; absent -> use the /model
   // override, or failing that the agent's own model.
   runCompactCommand?: (args?: string) => void;
+  // args = the side question.
+  runBtwCommand?: (args?: string) => void;
 }
 
 export interface Command {
@@ -214,6 +216,17 @@ export const createCommands = (context: CommandContext): Command[] => [
     execute: (args) => {
       if (context.runEffortCommand) {
         context.runEffortCommand(args);
+      }
+    },
+  },
+  {
+    name: "btw",
+    description:
+      "Ask a quick side question - answered apart, never added to the conversation",
+    usage: "<question>",
+    execute: (args) => {
+      if (context.runBtwCommand) {
+        context.runBtwCommand(args);
       }
     },
   },

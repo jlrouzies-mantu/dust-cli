@@ -328,6 +328,32 @@ last-synced commit (procedure step 3 above):
     working > error > finished > idle) is unit-testable and stated in one
     place. If a state is added, add it there, not as another `if` in
     `Chat.tsx`.
+- `src/utils/liveRegion.ts` - height budgets for Ink's live (non-`<Static>`)
+  region. **The rule it exists for: the live region must stay shorter than
+  the terminal.** Ink 5 keeps every line ever printed in `fullStaticOutput`,
+  and once the live region's height reaches `stdout.rows`, its `onRender`
+  writes `clearTerminal + fullStaticOutput + output` on *every* frame - so
+  each keystroke and spinner tick costs O(whole conversation). Measured: 195
+  bytes/keystroke under the limit vs 455 KB at 5,000 history lines over it.
+  That was the "gets more sluggish the longer the session runs" bug. Anything
+  added to the live region that can grow with content (a picker, a preview,
+  a list) must be bounded through a budget here, relative to `stdout.rows`,
+  not a fixed line count - and count *rows*, not logical lines (one long
+  paragraph wraps into many). If Ink is upgraded, re-check `onRender` in
+  `node_modules/ink/build/ink.js` before assuming this still applies.
+- `src/utils/btw.ts` - `/btw` side questions (see README's "Side questions
+  (/btw)"). Three rules:
+  - It **never posts into the main conversation** - the whole point is that
+    the agent's context is untouched. It uses a separate unlisted
+    conversation primed with a transcript excerpt instead. Don't
+    "simplify" it into a `postUserMessage` on the current conversation.
+  - It is **read-only by construction**: `clientSideMCPServerIds: null`
+    (no local tools) and every `tool_approve_execution` is rejected. That's
+    what lets it skip plan-mode gating, so keep both if this is touched.
+  - It does **not** make the conversation busy (`btwStatus` is deliberately
+    not part of `isConversationBusy` in `Chat.tsx`) - it's a different
+    conversation, so it can't race the main turn server-side, and blocking
+    the queue on it would defeat asking mid-turn.
 - `src/types/marked-terminal.d.ts` - type shim
 - Everything under `.github/`, `scripts/`, `img/`, plus `AGENTS.md` and
   `README.md` themselves

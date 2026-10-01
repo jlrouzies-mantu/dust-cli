@@ -3,6 +3,7 @@ import { Box, Text } from "ink";
 import React from "react";
 
 import { MANTU_GOLD } from "../../utils/brand.js";
+import { windowAround } from "../../utils/liveRegion.js";
 
 interface InputBoxProps {
   userInput: string;
@@ -10,6 +11,11 @@ interface InputBoxProps {
   isProcessingQuestion: boolean;
   mentionPrefix: string;
   claudeCodeMode: boolean;
+  // Most draft lines shown at once; the window follows the cursor. A long
+  // multi-line draft would otherwise grow the live region past the
+  // terminal's height, and from there every keystroke makes Ink repaint the
+  // whole conversation - see utils/liveRegion.ts.
+  maxVisibleLines?: number;
 }
 
 // Matches an "@" mention token (an "@" run into the following non-space
@@ -54,6 +60,7 @@ export function InputBox({
   isProcessingQuestion,
   mentionPrefix,
   claudeCodeMode,
+  maxVisibleLines,
 }: InputBoxProps) {
   let currentPos = 0;
   const lines = userInput.split("\n");
@@ -78,6 +85,17 @@ export function InputBox({
               .reduce((sum, line) => sum + line.length + 1, 0))
       : 0;
 
+  // The hidden-lines markers take a row each, so they come out of the
+  // budget rather than being added on top of it.
+  const { start, end } =
+    maxVisibleLines && lines.length > maxVisibleLines
+      ? windowAround(
+          Math.max(0, cursorLine),
+          lines.length,
+          Math.max(1, maxVisibleLines - 2)
+        )
+      : { start: 0, end: lines.length };
+
   return (
     <Box flexDirection="column" marginTop={0} paddingTop={0}>
       <Box
@@ -88,6 +106,9 @@ export function InputBox({
         marginTop={0}
       >
         <Box flexDirection="column">
+          {start > 0 && (
+            <Text dimColor>{`↑ ${start} more line${start === 1 ? "" : "s"}`}</Text>
+          )}
           {
             // Each row is a single <Text> holding one pre-coloured string,
             // with **no nested <Text> elements and no sibling children**.
@@ -117,7 +138,8 @@ export function InputBox({
             // so wrapping works and there is nothing for Ink to mis-measure.
             // Same reasoning as the status bar's pre-coloured segments in
             // Conversation.tsx.
-            lines.map((line, index) => {
+            lines.slice(start, end).map((line, offset) => {
+              const index = start + offset;
               const prefix =
                 index === 0
                   ? (isProcessingQuestion ? chalk.gray : chalk.cyan).bold(
@@ -147,6 +169,11 @@ export function InputBox({
               );
             })
           }
+          {end < lines.length && (
+            <Text dimColor>{`↓ ${lines.length - end} more line${
+              lines.length - end === 1 ? "" : "s"
+            }`}</Text>
+          )}
         </Box>
       </Box>
       {/*

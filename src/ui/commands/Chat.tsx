@@ -106,6 +106,12 @@ import {
 } from "../../utils/fileHandling.js";
 import { useAgents } from "../../utils/hooks/use_agents.js";
 import { useMe } from "../../utils/hooks/use_me.js";
+import { askBtw } from "../../utils/btw.js";
+import {
+  clampSegmentsToRows,
+  streamingPreviewRowBudget,
+  tailByRows,
+} from "../../utils/liveRegion.js";
 import type { MarkdownSegment } from "../../utils/markdown.js";
 import { renderMarkdownSegments } from "../../utils/markdown.js";
 import { retryResult } from "../../utils/retry.js";
@@ -185,17 +191,6 @@ function getLastConversationItem<T extends ConversationItem>(
   return null;
 }
 
-// The live streaming preview re-renders the *entire* accumulated answer on
-// every tick (see the comment on pushFinalContentToConversationItems for
-// why it can't incrementally commit to the Static list instead). Every one
-// of those re-renders is new output from the terminal's point of view, so
-// it auto-scrolls to reveal it - which is what fights back when you try to
-// scroll up to read earlier output while a long answer is still streaming.
-// A big live region makes each of those forced scrolls jarring; keeping it
-// to just a handful of lines (about the same footprint as the "Thinking"
-// spinner, which doesn't cause this complaint) keeps each one small enough
-// to not fight your own scrolling. The full untruncated content still
-// lands in scrollback normally once the message finishes.
 // Heading shown above each kind of inline selector. A lookup rather than
 // the nested ternary chain this used to be: one line per mode, and adding
 // a mode can't accidentally re-nest the branches around it. Modes with no
@@ -213,14 +208,36 @@ const SELECTOR_PROMPTS: Record<string, string | undefined> = {
   plan: "Use Up/Down to navigate, Enter to confirm, Esc to reject:",
 };
 
-const STREAMING_PREVIEW_MAX_LINES = 6;
+// The live streaming preview re-renders the accumulated answer on every
+// tick (see the comment on pushFinalContentToConversationItems for why it
+// can't incrementally commit to the Static list instead). Every one of
+// those re-renders is new output from the terminal's point of view, so it
+// auto-scrolls to reveal it - which is what fights back when you try to
+// scroll up to read earlier output while a long answer is still streaming.
+// Keeping it to a handful of *rows* (not logical lines - one long paragraph
+// is a single line that can wrap into a dozen rows) keeps each of those
+// forced scrolls small, and, more importantly, keeps the live region off
+// Ink's full-history repaint path (see utils/liveRegion.ts). The full
+// untruncated content still lands in scrollback once the message finishes.
+//
+// Two stages: the raw markdown tail is cut here, before rendering, so the
+// renderer only ever sees a few lines; clampSegmentsToRows then trims
+// whatever rendering made taller again (tables, code-fence boxes).
+// marginLeft={2} on the preview, plus a column of slack.
+const STREAMING_PREVIEW_INDENT = 3;
 function truncateForStreamingPreview(text: string): string {
-  const maxLines = STREAMING_PREVIEW_MAX_LINES;
-  const lines = text.split("\n");
-  if (lines.length <= maxLines) {
-    return text;
-  }
-  return `…\n${lines.slice(-maxLines).join("\n")}`;
+  return tailByRows(
+    text,
+    streamingPreviewRowBudget(process.stdout.rows),
+    (process.stdout.columns || 80) - STREAMING_PREVIEW_INDENT
+  );
+}
+function renderStreamingPreview(text: string): MarkdownSegment[] {
+  return clampSegmentsToRows(
+    renderMarkdownSegments(truncateForStreamingPreview(text)),
+    streamingPreviewRowBudget(process.stdout.rows),
+    (process.stdout.columns || 80) - STREAMING_PREVIEW_INDENT
+  );
 }
 
 // Matches the "[Pasted N lines of text]" placeholder a large paste gets
@@ -591,6 +608,11 @@ const CliChat: FC<CliChatProps> = ({
   // so everywhere that asks "is this conversation busy?" has to count it.
   // Sending a message mid-compaction would race it, which is exactly what
   // the message queue exists to prevent.
+  // Spinner line while a /btw side question is in flight. Separate from
+  // compactionStatus/retryStatus for the same reason those are separate from
+  // each other - and, unlike them, it does NOT make the conversation busy:
+  // the side question runs in its own conversation (see utils/btw.ts).
+  const [btwStatus, setBtwStatus] = useState<string | null>(null);
   const isCompacting = compactionStatus !== null;
   const isConversationBusy = isProcessingQuestion || isCompacting;
   // What the tab title says the agent is doing - the last message's opening
@@ -1751,6 +1773,97 @@ const CliChat: FC<CliChatProps> = ({
   );
 
   /**
+   * Handles `/btw <question>`: asks the agent a side question in a separate
+   * conversation primed with this one's history, and prints the answer in
+   * its own block. Nothing is posted to this conversation, so it works
+   * mid-turn and the agent's context is untouched - see utils/btw.ts.
+   */
+  const runBtwCommand = useCallback(
+    (args?: string) => {
+      const question = args?.trim();
+      if (!question) {
+        pushNoticeLines(
+          [
+            "Usage: /btw <question>",
+            "  Asks the agent a quick side question. The answer is shown here but",
+            "  never added to the conversation, and it works while a turn is running.",
+          ],
+          "btw_usage"
+        );
+        return;
+      }
+      if (!selectedAgent || !me) {
+        pushNoticeLines(["/btw: no agent selected yet."], "btw_none");
+        return;
+      }
+      if (btwStatus !== null) {
+        pushNoticeLines(
+          ["A /btw question is already being answered - give it a moment."],
+          "btw_already"
+        );
+        return;
+      }
+
+      const modelSelection = buildModelSelection(
+        modelOverrideRef.current,
+        effortOverrideRef.current,
+        selectedAgent.model
+          ? {
+              modelId: selectedAgent.model.modelId,
+              providerId: selectedAgent.model.providerId,
+            }
+          : null
+      );
+
+      void (async () => {
+        setBtwStatus(`btw: asking @${selectedAgent.name}…`);
+        try {
+          const result = await askBtw({
+            question,
+            agentId: selectedAgent.sId,
+            mainConversationId: currentConversationId,
+            inFlightAnswer: isProcessingQuestion
+              ? contentRef.current
+              : undefined,
+            user: {
+              username: me.username,
+              fullName: me.fullName,
+              email: me.email,
+            },
+            modelSelection,
+            spaceId: resolvedSpaceId,
+          });
+          if (!result.ok) {
+            pushNoticeLines([`/btw failed: ${result.message}`], "btw_failed");
+            return;
+          }
+          const stamp = Date.now();
+          setConversationItems((prev) => [
+            ...prev,
+            {
+              key: `btw_${stamp}`,
+              type: "btw_answer",
+              question,
+              segments: renderMarkdownSegments(result.answer || "(no answer)"),
+            },
+          ]);
+        } finally {
+          setBtwStatus(null);
+        }
+      })();
+    },
+    [
+      selectedAgent,
+      me,
+      btwStatus,
+      currentConversationId,
+      isProcessingQuestion,
+      resolvedSpaceId,
+      pushNoticeLines,
+    ]
+  );
+
+  /**
    * Handles `/effort`: same shape as /model. Note the API's levels are
    * high/medium/light/none - "light", not "low".
    */
@@ -2258,7 +2371,7 @@ const CliChat: FC<CliChatProps> = ({
 
   const showHelp = useCallback(() => {
     const helpText =
-      "Commands: /help /switch /new /clear /resume /attach /clear-files /auto /plan /loop /tasks /skills /model /effort /claude-code-mode /exit\n" +
+      "Commands: /help /switch /new /clear /resume /attach /clear-files /auto /plan /loop /tasks /skills /model /effort /compact /btw /claude-code-mode /exit\n" +
       `Modes (Shift+Tab cycles, shown in the status bar): ${(
         ["normal", "auto", "plan"] as ChatMode[]
       )
@@ -2440,6 +2553,7 @@ const CliChat: FC<CliChatProps> = ({
     runModelCommand,
     runCompactCommand,
     runEffortCommand,
+    runBtwCommand,
   });
 
   // Clear the terminal (screen + scrollback) once, when the interactive
@@ -3352,9 +3466,7 @@ const CliChat: FC<CliChatProps> = ({
         let usageRefreshTickCount = 0;
         updateIntervalRef.current = setInterval(() => {
           setStreamingContentPreview(
-            renderMarkdownSegments(
-              truncateForStreamingPreview(contentRef.current)
-            )
+            renderStreamingPreview(contentRef.current)
           );
           setThinkingContentPreview(
             truncateForStreamingPreview(chainOfThoughtRef.current)
@@ -4996,6 +5108,7 @@ const CliChat: FC<CliChatProps> = ({
         showExitHint={showExitHint}
         retryStatus={retryStatus}
         compactionStatus={compactionStatus}
+        btwStatus={btwStatus}
         transientHint={transientHint}
         workspaceName={workspaceName}
         modelStatus={describeModelStatus(

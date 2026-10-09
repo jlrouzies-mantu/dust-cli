@@ -44,7 +44,7 @@ const ENABLED =
 // C0 (which includes ESC and BEL), DEL, and C1. Written as explicit unicode
 // escapes rather than literal characters so the source stays plain text and
 // the intent survives any editor, diff or copy-paste that would eat them.
-// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
+// oxlint-disable-next-line no-control-regex -- stripping them is the point
 const CONTROL_CHARS = new RegExp(
   `[\u0000-\u001f\u007f-\u009f]`,
   "g"

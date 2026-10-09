@@ -630,10 +630,18 @@ const CliChat: FC<CliChatProps> = ({
   // Null until the prefetch lands, or permanently if the endpoint is
   // unreachable - every consumer falls back to MODEL_CATALOG, so /model
   // keeps working either way.
-  const [workspaceModels, setWorkspaceModels] =
+  const [, setWorkspaceModels] =
     useState<WorkspaceModels | null>(null);
   const workspaceModelsRef = useRef<WorkspaceModels | null>(null);
-  const modelCatalogue = workspaceModels?.models ?? MODEL_CATALOG;
+  // Read through the ref, never a render-time snapshot: /model, /compact and
+  // the picker's Enter handler are memoized callbacks that don't re-create
+  // when the prefetch lands, so a snapshot pins them to MODEL_CATALOG for the
+  // session - which is how a live-only model (claude-opus-5-5) showed up in
+  // the picker but silently did nothing when chosen.
+  const getModelCatalogue = useCallback(
+    () => workspaceModelsRef.current?.models ?? MODEL_CATALOG,
+    []
+  );
   // A brief, self-clearing status line (unlike pushNotice, which appends
   // permanently to scrollback) - for feedback on a key press that's routine
   // to repeat (e.g. Ctrl+S pressed before typing anything), so mashing it
@@ -1514,7 +1522,7 @@ const CliChat: FC<CliChatProps> = ({
             // "what's the biggest window I can have?" is simply the top of
             // the list. The auto selectors carry no context size and sort
             // to the end rather than to the front as a zero.
-            ...[...modelCatalogue]
+            ...[...getModelCatalogue()]
               .sort(
                 (a, b) =>
                   (b.contextSize ?? -1) - (a.contextSize ?? -1) ||
@@ -1535,7 +1543,7 @@ const CliChat: FC<CliChatProps> = ({
                     : null,
                   m.providerId,
                   m.note,
-                  workspaceModels?.degradedModelIds.has(m.modelId)
+                  workspaceModelsRef.current?.degradedModelIds.has(m.modelId)
                     ? "degraded"
                     : null,
                   m.modelId === currentId ? "current" : null,
@@ -1565,9 +1573,9 @@ const CliChat: FC<CliChatProps> = ({
         return;
       }
 
-      const resolved = resolveModel(query, modelCatalogue);
+      const resolved = resolveModel(query, getModelCatalogue());
       if (!resolved) {
-        const candidates = modelCandidates(query, modelCatalogue);
+        const candidates = modelCandidates(query, getModelCatalogue());
         pushNoticeLines(
           candidates.length > 1
             ? [
@@ -1647,7 +1655,7 @@ const CliChat: FC<CliChatProps> = ({
       }
 
       const query = args?.trim();
-      if (query && !resolveModel(query, modelCatalogue)) {
+      if (query && !resolveModel(query, getModelCatalogue())) {
         pushNoticeLines(
           [
             `Unknown model "${query}".`,
@@ -1674,7 +1682,7 @@ const CliChat: FC<CliChatProps> = ({
             // Read from the ref, not the state closure: /compact can be run
             // before the prefetch lands, and the callback would otherwise be
             // holding the null it was created with.
-            catalogue: workspaceModelsRef.current?.models ?? MODEL_CATALOG,
+            catalogue: getModelCatalogue(),
           });
 
           if (!chosen) {
@@ -4169,7 +4177,7 @@ const CliChat: FC<CliChatProps> = ({
                 "model_default"
               );
             } else {
-              const choice = MODEL_CATALOG.find(
+              const choice = getModelCatalogue().find(
                 (m) => m.modelId === selected.id
               );
               if (choice) {

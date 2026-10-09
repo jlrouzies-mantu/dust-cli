@@ -94,6 +94,13 @@ interface AppProps {
     loopFreshConversation: {
       type: "boolean";
     };
+    allowPath: {
+      type: "string";
+      isMultiple: true;
+    };
+    dangerouslyDisableSandbox: {
+      type: "boolean";
+    };
   }>;
 }
 

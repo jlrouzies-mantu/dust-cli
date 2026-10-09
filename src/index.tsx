@@ -59,13 +59,19 @@ if (!isNonInteractiveMessage) {
   initLogger();
 }
 
-const [{ render }, { default: meow }, { createElement }, { default: App }] =
-  await Promise.all([
-    import("ink"),
-    import("meow"),
-    import("react"),
-    import("./ui/App.js"),
-  ]);
+const [
+  { render },
+  { default: meow },
+  { createElement },
+  { default: App },
+  { configureSandbox },
+] = await Promise.all([
+  import("ink"),
+  import("meow"),
+  import("react"),
+  import("./ui/App.js"),
+  import("./utils/sandbox.js"),
+]);
 
 // Loading is done - stop pulsing and close off the line so anything printed
 // next (Ink's first frame, or a one-shot command's output) starts cleanly on
@@ -188,7 +194,23 @@ const cli = meow({
       description:
         "Start each --loop run in a new conversation instead of continuing the same one",
     },
+    allowPath: {
+      type: "string",
+      isMultiple: true,
+      description:
+        "Grant file system tools access to a path outside the current directory (can be repeated)",
+    },
+    dangerouslyDisableSandbox: {
+      type: "boolean",
+      description:
+        "Let file system tools reach anywhere on the machine, not just the current directory",
+    },
   },
+});
+
+configureSandbox({
+  allowPaths: cli.flags.allowPath,
+  disabled: cli.flags.dangerouslyDisableSandbox,
 });
 
 // Ink's default exitOnCtrlC kills the process on the very first Ctrl+C

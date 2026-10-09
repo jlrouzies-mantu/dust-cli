@@ -6,16 +6,22 @@ import {
   isPlanModeActive,
   planModeRefusal,
 } from "../../utils/planMode.js";
+import {
+  escapingCommandOperands,
+  resolveInSandbox,
+} from "../../utils/sandbox.js";
 import type { McpTool } from "../types/tools.js";
 
 export class RunCommandTool implements McpTool {
   name = "run_command";
+  stake = "high" as const;
   description =
     "Executes a shell command directly on the user's local machine (the real OS and filesystem the CLI itself is " +
     "running on), NOT a hosted/sandboxed execution environment. Use this - never a hosted code interpreter or " +
     "isolated sandbox - whenever the user asks you to run a command, script, build, or test in their actual project. " +
     "Defaults to the CLI's current working directory when `cwd` is omitted. Returns structured output with exit " +
-    "code, stdout, stderr, and command info." +
+    "code, stdout, stderr, and command info. " +
+    "Commands are scoped to the workspace the CLI was started in: arguments pointing outside it are refused." +
     PLAN_MODE_TOOL_NOTICE;
 
   inputSchema = z.object({
@@ -64,7 +70,39 @@ export class RunCommandTool implements McpTool {
       };
     }
 
-    const cmdRes = await executeCommand(command, args, cwd, timeout, true);
+    const cwdRes = resolveInSandbox(cwd ?? process.cwd());
+    if (cwdRes.isErr()) {
+      return {
+        content: [
+          { type: "text" as const, text: `Error: ${cwdRes.error.message}` },
+        ],
+        isError: true,
+      };
+    }
+    const workingDirectory = cwdRes.value;
+
+    const escaping = escapingCommandOperands(args, workingDirectory);
+    if (escaping.length > 0) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text:
+              `Error: refusing to run ${command}, it targets paths outside the workspace: ` +
+              `${escaping.join(", ")}. Restart the CLI with --allow-path to grant access.`,
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    const cmdRes = await executeCommand(
+      command,
+      args,
+      workingDirectory,
+      timeout,
+      true
+    );
 
     if (cmdRes.isErr()) {
       const error = cmdRes.error;

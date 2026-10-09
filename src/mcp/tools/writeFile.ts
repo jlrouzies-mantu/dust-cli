@@ -8,6 +8,7 @@ import {
   isPlanModeActive,
   planModeRefusal,
 } from "../../utils/planMode.js";
+import { resolveInSandbox } from "../../utils/sandbox.js";
 import type { McpTool } from "../types/tools.js";
 
 export class WriteFileTool implements McpTool {
@@ -29,7 +30,8 @@ export class WriteFileTool implements McpTool {
     "2. `content` NEEDS TO contain the complete, final content of the file - this tool does not merge " +
     "or append, it writes the full file contents.\n\n" +
     "If the file already exists, prefer the edit_file tool for targeted changes; this tool will fully " +
-    "overwrite it. Parent directories are created automatically if they do not exist." +
+    "overwrite it. Parent directories are created automatically if they do not exist. " +
+    "Writes are scoped to the workspace the CLI was started in: a path outside it is refused." +
     PLAN_MODE_TOOL_NOTICE;
 
   inputSchema = z.object({
@@ -56,7 +58,7 @@ export class WriteFileTool implements McpTool {
   }
 
   async execute({
-    path: filePath,
+    path: requestedPath,
     content,
   }: z.infer<typeof this.inputSchema>) {
     try {
@@ -73,9 +75,20 @@ export class WriteFileTool implements McpTool {
         };
       }
 
-      if (!path.isAbsolute(filePath)) {
-        throw new Error(`Path must be absolute: ${filePath}`);
+      if (!path.isAbsolute(requestedPath)) {
+        throw new Error(`Path must be absolute: ${requestedPath}`);
       }
+
+      const pathRes = resolveInSandbox(requestedPath);
+      if (pathRes.isErr()) {
+        return {
+          content: [
+            { type: "text" as const, text: `Error: ${pathRes.error.message}` },
+          ],
+          isError: true,
+        };
+      }
+      const filePath = pathRes.value;
 
       const fileExists = fs.existsSync(filePath);
       const originalContent = fileExists

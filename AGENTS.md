@@ -45,13 +45,18 @@ releases, so the version should not imply more history than exists.
 
 ## Syncing with upstream
 
-**Last synced with:** `dust-tt/dust` @ `8f55d2a728815fe861befd10ef7c09e8e6cdb8f1`
-(2026-08-05). Confirmed via the GitHub API that no commit has touched
-`cli/dust-cli` in the upstream repo since `4e02a5f50573e8c8fff5116a2195a6e0232cf041`
-(2026-07-24, "Update mcpsdk to 1.29") - so as of that date this fork was, and
-still may be, fully caught up. **Update this line to the new commit SHA and
-date every time you complete a sync below**, so the next sync knows exactly
-where to start.
+**Last synced with:** `dust-tt/dust` @ `cca35d17fdfa882898840f6ef95b8ef1bb8978bd`
+(2026-10-09, upstream `main` at the time). The newest commit touching
+`cli/dust-cli` at that point was `adb88346d13a13cfa00d655427fef377d8bb1ba5`
+(2026-10-05, "Switch from Biome to oxlint and oxfmt") - start the next sync's
+commit list from there. Upstream's CLI `package.json` version was `0.4.6`
+(mirrored in `src/utils/version.ts`'s `UPSTREAM_CLI_VERSION`). **Update this
+line to the new commit SHA and date every time you complete a sync below**,
+so the next sync knows exactly where to start.
+
+The previous version of this line claimed nothing had changed since
+2026-07-24 - that went stale silently while five upstream commits landed.
+Always re-run step 1 below rather than trusting this line's "caught up" state.
 
 An `upstream` git remote (`https://github.com/dust-tt/dust.git`) is also
 already configured (`git remote -v`) if you'd rather work with `git log
@@ -366,6 +371,24 @@ Everything else under `src/` (notably `src/ui/App.tsx`, `src/ui/commands/*`,
 `.nvmrc`, `.env.development`, `.env.production`. In particular, grep for the
 literal string `dustm` before touching any of these - every occurrence is a
 deliberate rename from upstream's `dust` that a sync must preserve.
+
+`src/utils/sandbox.ts` (upstream's file system scope, ported 2026-10-09) is
+one of these. Each Mantu change in it is marked with a `// Mantu:` comment:
+both `\` and `/` count as separators in `run_command`'s operand check
+(upstream only checks `path.sep`, so `../.env` slipped through on Windows),
+`~\` expands like `~/`, and single-segment `/x` switches are skipped on
+Windows so `cmd /c` isn't refused. `searchFiles.ts` also refuses absolute or
+`..` glob patterns, which upstream doesn't. Two rules:
+- **Every tool that takes a path from the agent must call
+  `resolveInSandbox`.** Upstream wired it into its five tools; this fork's
+  `write_file` needed the same wiring by hand, because upstream doesn't
+  have that tool. A new path-taking tool that skips this gets around the
+  sandbox without any error. In writing tools, keep the plan-mode refusal
+  *before* the sandbox check: while planning, the answer must not depend
+  on the path.
+- `index.tsx` loads `sandbox.js` through the same deferred `Promise.all`
+  import as `App.js` instead of a top-level static import. A static import
+  would load `@dust-tt/client` before the startup pulse prints.
 
 ### Keeping the Node.js version in lockstep
 

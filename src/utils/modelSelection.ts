@@ -125,6 +125,30 @@ export const MODEL_CATALOG: ModelChoice[] = [
   // wired up Anthropic's extended-context beta, so there is no Claude model
   // here that goes higher.
   {
+    modelId: "claude-opus-5-5",
+    providerId: "anthropic",
+    label: "claude-opus-5-5",
+    contextSize: 250_000,
+  },
+  {
+    modelId: "claude-sonnet-5-5",
+    providerId: "anthropic",
+    label: "claude-sonnet-5-5",
+    contextSize: 250_000,
+  },
+  {
+    modelId: "claude-fable-5-1",
+    providerId: "anthropic",
+    label: "claude-fable-5-1",
+    contextSize: 250_000,
+  },
+  {
+    modelId: "claude-haiku-5-5",
+    providerId: "anthropic",
+    label: "claude-haiku-5-5",
+    contextSize: 250_000,
+  },
+  {
     modelId: "claude-opus-5",
     providerId: "anthropic",
     label: "claude-opus-5",

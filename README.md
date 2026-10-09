@@ -36,6 +36,7 @@
   - [Model and effort](#model-and-effort)
   - [Compacting a conversation](#compacting-a-conversation)
   - [Side questions (/btw)](#side-questions-btw)
+  - [File system scope](#file-system-scope)
   - [Fetching a URL](#fetching-a-url)
   - [Claude Code mode](#claude-code-mode)
   - [Headless Authentication](#headless-authentication)
@@ -112,6 +113,8 @@
 | Wide tables rendered as shredded box-drawing characters across several lines | `cli-table3` sizes columns purely by content, with no idea how wide the terminal is. Any table wider than the terminal produced physical lines longer than the terminal's column count, which then hard-wrapped at an arbitrary column — slicing borders and cell text apart mid-row. Columns are now given explicit widths when the natural layout would overflow, so long cells wrap *inside* their own column and every emitted line already fits |
 | Tables with a divider between every row rendered with garbage `---` rows | Agents sometimes emit "grid tables" — a `\|---\|---\|` line between *every* row, not just after the header. `marked` only treats the first one as a separator; each extra one parsed as a literal data row whose cells were all `---`, slicing the table apart. Redundant divider rows are now stripped before markdown ever sees them (left alone inside fenced code blocks, where such a table may be a deliberate example) |
 | Typing got progressively more sluggish the longer a session ran | Ink keeps every line ever printed in memory, and once its live region (preview, queue, pickers, input box, status bar) is as tall as the terminal, it stops updating incrementally and rewrites **the entire conversation** on every frame — every keystroke and spinner tick. Measured on a 30-row terminal: 195 bytes per keystroke normally, 455 KB per keystroke with 5,000 lines of history. Several parts of the live region could grow that tall — the `/` command list (18 entries, more once descriptions wrapped), long multi-line drafts, a long queue, and the streaming preview, which was capped by *logical* lines, so six long paragraphs could still wrap into thirty-odd rows. Each is now bounded relative to the terminal's actual height (see `src/utils/liveRegion.ts`) |
+| Upstream's file system sandbox let `run_command` reach outside the workspace on Windows with a forward-slash path | Its argument check only treated the platform separator (`\` on Windows) as marking a path, so `../.env` passed unchecked; it also would have refused `cmd /c` once `/` *was* counted. Both separators now count, and single-segment `/x` switches are recognised as switches |
+| `search_files` could list files outside the workspace despite the sandbox | Upstream checks the `directory` argument but not the glob `pattern`, so `../**` walked out of it anyway. Absolute patterns and `..` segments are now refused |
 | `-m`/`--message` polluted its own machine-readable output | The pulsing "Starting dustm..." line, its trailing newline, and the logger init were printed unconditionally — including in the non-interactive path whose stdout callers parse as JSON. They're now interactive-only |
 
 ---
@@ -203,6 +206,8 @@ When no command is given, `chat` is used by default.
 | &nbsp;&nbsp;`--resume <conversationId>` / `-r` | Resume a past conversation |
 | &nbsp;&nbsp;`--auto` | Automatically accept all file-edit operations without prompting |
 | &nbsp;&nbsp;`--plan` | Start in plan mode: research only until you approve a plan — see [Modes](#modes) |
+| &nbsp;&nbsp;`--allow-path <path>` | Let the file system tools reach a path outside the current folder (repeatable) — see [File system scope](#file-system-scope) |
+| &nbsp;&nbsp;`--dangerously-disable-sandbox` | Let the file system tools reach anywhere on the machine |
 | &nbsp;&nbsp;`--message "<text>"` / `-m` | Send one message non-interactively and exit |
 | `help` | Display help information |
 
@@ -566,6 +571,22 @@ This is genuinely **server-side** — Dust runs the summarization in a workflow,
 - **It costs one agent message**, like any other.
 - **The side conversation isn't deleted afterwards.** The public API has no endpoint for that. It's created unlisted — the same visibility every conversation from this CLI gets.
 - One `/btw` at a time; a second one while the first is answering is refused rather than queued.
+
+### File system scope
+
+The file system tools (`read_file`, `write_file`, `edit_file`, `search_files`, `search_content`, `run_command`) are scoped to the folder `dustm` was started in. A path outside it — including one reached through a symlink — is refused, with a message telling you which flag would allow it. The scope is printed in the header when a chat starts.
+
+Widen it with `--allow-path` (repeatable), or lift it entirely with `--dangerously-disable-sandbox`:
+
+```bash
+dustm chat --allow-path ~/shared/design-docs
+```
+
+`run_command` is the weak spot: its arguments are checked against the same boundary, so `dir ..` or `type ../.env` is refused, but the process it spawns is not confined. A command that reaches outside on its own (a shell one-liner, a script, a tool reading an absolute path from its config) is not stopped. Treat the boundary as a guardrail against accidents and casual prompt injection, not as containment.
+
+On Windows, both `\` and `/` count as path separators in that argument check (agents send either), and single-segment switches like `cmd /c` or `dir /b` are recognised as switches rather than paths.
+
+Unaffected by the scope: `/claude-code-mode`'s memory and skill tools, which read and write `~/.claude` by design through their own fixed paths, never a path the agent supplies.
 
 ### Fetching a URL
 

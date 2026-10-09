@@ -7,6 +7,7 @@ import {
   isPlanModeActive,
   planModeRefusal,
 } from "../../utils/planMode.js";
+import { resolveInSandbox } from "../../utils/sandbox.js";
 import type { McpTool } from "../types/tools.js";
 import { ReadFileTool } from "./readFile.js";
 
@@ -33,7 +34,8 @@ export class EditFileTool implements McpTool {
     "ESSENTIAL for `old_string`: Must provide unique identification for the specific instance requiring modification. " +
     "Include minimum 3 lines of surrounding context BEFORE and AFTER the target content, preserving exact spacing and formatting. Multiple matches or inexact matches will cause failure." +
     "**Batch replacements:** Define `expected_replacements` with the number of instances to modify. The tool will modify ALL instances matching `old_string` precisely. " +
-    "Verify the replacement count aligns with your intentions." +
+    "Verify the replacement count aligns with your intentions.\n\n" +
+    "Edits are scoped to the workspace the CLI was started in: a path outside it is refused." +
     PLAN_MODE_TOOL_NOTICE;
 
   inputSchema = z.object({
@@ -76,7 +78,7 @@ export class EditFileTool implements McpTool {
   }
 
   async execute({
-    path: filePath,
+    path: requestedPath,
     old_string,
     new_string,
     expected_replacements = 1,
@@ -93,6 +95,17 @@ export class EditFileTool implements McpTool {
           isError: true,
         };
       }
+
+      const pathRes = resolveInSandbox(requestedPath);
+      if (pathRes.isErr()) {
+        return {
+          content: [
+            { type: "text" as const, text: `Error: ${pathRes.error.message}` },
+          ],
+          isError: true,
+        };
+      }
+      const filePath = pathRes.value;
 
       // Validate file exists and is readable
       if (!fs.existsSync(filePath)) {

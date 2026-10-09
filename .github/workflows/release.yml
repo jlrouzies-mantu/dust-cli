@@ -1,7 +1,8 @@
 name: Release
 
 # Push a version tag (e.g. `git tag v1.0.0 && git push origin v1.0.0`) to
-# build a prebuilt release of dustm for Windows and macOS. The install
+# build a prebuilt release of dustm (CLI) for Windows and macOS, plus dustm
+# Desktop (Windows zip + installer, macOS zip, Linux AppImage). The install
 # scripts (scripts/Install-DustCLI.ps1, scripts/install-dustcli.sh on
 # macOS) download the latest release asset instead of building from
 # source on the target machine - this is what actually builds it, on a
@@ -90,8 +91,75 @@ jobs:
           path: ${{ matrix.asset }}.zip
           retention-days: 7
 
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            builder: --win
+          - os: macos-14 # Apple Silicon (arm64)
+            builder: --mac --arm64
+          - os: macos-15-intel # Intel (x64)
+            builder: --mac --x64
+          - os: ubuntu-latest
+            builder: --linux --x64
+    runs-on: ${{ matrix.os }}
+    env:
+      # Unsigned builds: stop electron-builder hunting for a signing identity.
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.16.0"
+
+      # keytar links against libsecret on Linux.
+      - name: Install libsecret (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev
+
+      # The desktop main process imports the CLI's modules from ../src, so
+      # the root dependencies are needed too.
+      - name: Install dependencies (root)
+        run: npm ci
+
+      - name: Install dependencies (desktop)
+        working-directory: desktop
+        run: npm ci
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "value=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        working-directory: desktop
+        run: npm run build
+
+      - name: Package
+        working-directory: desktop
+        run: npx electron-builder ${{ matrix.builder }} --publish never --config.extraMetadata.version=${{ steps.ver.outputs.value }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dustm-desktop-${{ matrix.os }}
+          path: |
+            desktop/release/dustm-desktop-*.zip
+            desktop/release/dustm-desktop-*.exe
+            desktop/release/dustm-desktop-*.AppImage
+          if-no-files-found: error
+          retention-days: 7
+
   release:
-    needs: build
+    needs: [build, desktop]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -103,7 +171,7 @@ jobs:
       - name: Flatten artifacts
         run: |
           mkdir -p release
-          find artifacts -name '*.zip' -exec cp {} release/ \;
+          find artifacts \( -name '*.zip' -o -name '*.exe' -o -name '*.AppImage' \) -exec cp {} release/ \;
           ls -la release
 
       - name: Resolve release tag
@@ -127,4 +195,4 @@ jobs:
             # the default branch points to by the time this step runs.
             gh release create "$TAG" --repo "${{ github.repository }}" --title "$TAG" --target "${{ github.sha }}" --generate-notes
           fi
-          gh release upload "$TAG" release/*.zip --repo "${{ github.repository }}" --clobber
+          gh release upload "$TAG" release/* --repo "${{ github.repository }}" --clobber

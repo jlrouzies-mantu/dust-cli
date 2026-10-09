@@ -162,6 +162,16 @@ Same idea, via `nvm` instead of NVM for Windows — untested on a real Mac/Linux
 curl -fsSL "https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/install-dustcli.sh?nocache=$(date +%s)" | bash
 ```
 
+### Installing dustm Desktop
+
+Both install scripts above start by asking what to install: `[1]` the CLI (default), `[2]` dustm Desktop, or `[3]` both. Desktop needs no Node.js or NVM: the scripts download the prebuilt app from the latest release and share sign-in and settings with the CLI.
+
+- **Windows:** unzipped to `%LOCALAPPDATA%\Programs\dustm Desktop` with Start Menu and Desktop shortcuts (close a running dustm Desktop first). The release also carries `dustm-desktop-windows-x64-setup.exe` if you prefer an installer.
+- **macOS:** `dustm Desktop.app` in `/Applications` (or `~/Applications`), quarantine flag removed since the build is unsigned.
+- **Linux (x64):** `~/Applications/dustm-desktop.AppImage` plus a `.desktop` entry. Needs `libsecret` (and a keyring such as gnome-keyring) for credential storage, and FUSE 2 to run AppImages.
+
+Release assets: `dustm-desktop-windows-x64.zip`, `dustm-desktop-windows-x64-setup.exe`, `dustm-desktop-macos-arm64.zip`, `dustm-desktop-macos-x64.zip`, `dustm-desktop-linux-x64.AppImage`. `scripts/Install-LocalMode.ps1` offers the same choice but builds Desktop from your local checkout.
+
 ### Manual install
 
 ```bash

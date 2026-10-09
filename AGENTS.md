@@ -520,7 +520,13 @@ last-synced commit (procedure step 3 above):
     `PLAN_MODE_BLOCKED_TOOLS` so it stays truthful.
   - Node 24.16.0 lockstep: `desktop/.nvmrc` and `desktop/package.json` `engines` belong
     to the "Keeping the Node.js version in lockstep" list below.
-  - No release workflow yet; do not wire it into `release.yml` without being asked.
+  - Release wiring: `release.yml`'s `desktop` job (windows, macos-14 arm64, macos-15-intel x64,
+    ubuntu x64) builds unsigned artifacts with version-less names via
+    `desktop/electron-builder.yml` (`dustm-desktop-windows-x64.zip`, `-windows-x64-setup.exe`,
+    `-macos-{arm64,x64}.zip`, `-linux-x64.AppImage`) and the `release` job uploads them next to
+    the CLI zips. The install scripts ask CLI / Desktop / both and fetch
+    `releases/latest/download/<name>`; keep names, workflow and scripts in step. Linux needs
+    libsecret at runtime (keytar).
 - `src/types/marked-terminal.d.ts` - type shim
 - Everything under `.github/`, `scripts/`, `img/`, plus `AGENTS.md` and
   `README.md` themselves

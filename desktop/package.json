@@ -16,6 +16,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "smoke": "electron . --smoke",
     "package": "npm run build && electron-builder --win",
+    "package:mac": "npm run build && electron-builder --mac",
+    "package:linux": "npm run build && electron-builder --linux",
     "package:dir": "npm run build && electron-builder --win --dir",
     "icons": "node scripts/gen-icons.mjs",
     "sounds": "node scripts/gen-sounds.mjs"

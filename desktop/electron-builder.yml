@@ -1,4 +1,9 @@
-# Windows packaging for dustm Desktop (preview). No CI / release.yml wiring yet.
+# Packaging for dustm Desktop (preview): Windows (NSIS installer + zip), macOS
+# (zip, unsigned) and Linux (AppImage). Built by the "desktop" job in
+# .github/workflows/release.yml. Artifact names carry NO version so the install
+# scripts can use releases/latest/download/<name>. The mac arch comes from the
+# host (macos-14 = arm64, macos-15-intel = x64); the workflow passes --arm64/--x64.
+# Linux needs libsecret (libsecret-1-0) at runtime for keytar.
 appId: com.mantu.dustm.desktop
 productName: dustm Desktop
 copyright: Mantu
@@ -16,8 +21,26 @@ asarUnpack:
   - "**/node_modules/keytar/**"
 win:
   icon: build/icon.ico
+  artifactName: dustm-desktop-windows-${arch}.${ext}
   target:
     - target: nsis
+      arch:
+        - x64
+    - target: zip
+      arch:
+        - x64
+mac:
+  icon: build/icon.png
+  category: public.app-category.developer-tools
+  artifactName: dustm-desktop-macos-${arch}.${ext}
+  target:
+    - target: zip
+linux:
+  icon: build/icon.png
+  category: Development
+  artifactName: dustm-desktop-linux-${arch}.${ext}
+  target:
+    - target: AppImage
       arch:
         - x64
 nsis:
@@ -27,4 +50,4 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
-  artifactName: dustm-desktop-${version}-setup.${ext}
+  artifactName: dustm-desktop-windows-${arch}-setup.${ext}

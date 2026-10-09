@@ -6,6 +6,8 @@
  * sign-in flow exposes only the user code and the verification URLs.
  */
 
+import type { SoundId } from "./sounds";
+
 export type ChatMode = "normal" | "auto" | "plan";
 export type Effort = "high" | "medium" | "light" | "none";
 
@@ -75,6 +77,49 @@ export interface Usage {
   credits: { consumed: number; limit: number | null } | null;
 }
 
+/** Side panel widths (px) and collapsed state; remembered in settings. */
+export interface PanelLayout {
+  left: number;
+  right: number;
+  leftCollapsed: boolean;
+  rightCollapsed: boolean;
+}
+
+/** Desktop notifications: a master switch and one per kind. */
+export interface NotifyChannel {
+  /** Show a native pop-up. */
+  popup: boolean;
+  /** Tone to play ("none" = silent). Both off = this kind is off. */
+  sound: SoundId;
+}
+
+export interface NotifySettings {
+  enabled: boolean;
+  /** 0..1, applied to every sound. */
+  volume: number;
+  finished: NotifyChannel;
+  approval: NotifyChannel;
+  error: NotifyChannel;
+}
+
+/** What a sidebar row shows for a live session. */
+export type SessionStatus =
+  | "idle"
+  | "running"
+  | "waiting-slot"
+  | "approval"
+  | "finished"
+  | "error";
+
+/** One live (in-memory) session. A draft has no conversationId yet. */
+export interface SessionBadge {
+  key: string;
+  conversationId: string | null;
+  title: string;
+  status: SessionStatus;
+  selected: boolean;
+}
+
 export interface SessionState {
   version: string;
   upstreamVersion: string;
@@ -115,6 +160,18 @@ export interface SessionState {
   /** Older messages exist that were not loaded when the conversation opened. */
   hasEarlier: boolean;
   loadingEarlier: boolean;
+  /** Key of the session this state describes (the one on screen). */
+  sessionKey: string;
+  /** Every live session, for the sidebar badges. */
+  sessions: SessionBadge[];
+  /** Turns running right now, across all sessions. */
+  running: number;
+  /** Concurrency cap (settings). */
+  maxParallel: number;
+  /** This session has a message waiting for a free slot under the cap. */
+  waitingForSlot: boolean;
+  layout: PanelLayout;
+  notify: NotifySettings;
 }
 
 export interface LoopInfo {
@@ -227,18 +284,40 @@ export type PlanChoice =
 
 // -------------------------------------------------------------- events
 
+/**
+ * Events that belong to one session carry its key in `sid`. Main only sends
+ * the selected session's, and the renderer drops any whose `sid` is not the
+ * selected one (an event already in flight when the user switched).
+ */
 export type SessionEvent =
   | { type: "auth"; status: AuthStatus }
-  | { type: "state"; state: SessionState }
-  | { type: "transcript-reset"; items: TranscriptItem[] }
-  | { type: "transcript-prepend"; items: TranscriptItem[] }
-  | { type: "append"; item: TranscriptItem }
-  | { type: "text-delta"; id: string; text: string }
-  | { type: "patch"; id: string; patch: Partial<TranscriptItem> }
-  | { type: "approval"; request: ApprovalRequest | null; pending: number }
-  | { type: "plan-request"; id: string; markdown: string }
-  | { type: "plan-clear" }
-  | { type: "conversations-changed" };
+  | { type: "state"; state: SessionState; sid?: string }
+  | {
+      /** Lightweight: the sidebar list and the running count only. */
+      type: "sessions";
+      sessions: SessionBadge[];
+      running: number;
+    }
+  | {
+      /** Switching sessions: everything the view needs, in one atomic event. */
+      type: "view";
+      sid: string;
+      items: TranscriptItem[];
+      state: SessionState;
+      approval: { request: ApprovalRequest; pending: number } | null;
+      planId: string | null;
+    }
+  | { type: "transcript-reset"; items: TranscriptItem[]; sid?: string }
+  | { type: "transcript-prepend"; items: TranscriptItem[]; sid?: string }
+  | { type: "append"; item: TranscriptItem; sid?: string }
+  | { type: "text-delta"; id: string; text: string; sid?: string }
+  | { type: "patch"; id: string; patch: Partial<TranscriptItem>; sid?: string }
+  | { type: "approval"; request: ApprovalRequest | null; pending: number; sid?: string }
+  | { type: "plan-request"; id: string; markdown: string; sid?: string }
+  | { type: "plan-clear"; sid?: string }
+  | { type: "conversations-changed" }
+  /** Play a notification tone in the page (works while the window is hidden). */
+  | { type: "sound"; sound: SoundId; volume: number };
 
 // ----------------------------------------------------------------- API
 
@@ -264,12 +343,24 @@ export interface DustmApi {
   chooseFolder(): Promise<Result<string | null>>;
   listConversations(): Promise<Result<ConversationSummary[]>>;
   loadConversation(id: string): Promise<Result>;
+  /** Switch to a live session (a draft, or one running in the background). */
+  selectSession(key: string): Promise<Result>;
   newConversation(): Promise<Result>;
+  /** Concurrency cap for running turns (1-8); remembered. */
+  setMaxParallel(n: number): Promise<Result>;
+  setLayout(patch: Partial<PanelLayout>): Promise<Result>;
+  setNotify(patch: Partial<NotifySettings>): Promise<Result>;
   loadEarlier(): Promise<Result>;
   selectAgent(id: string): Promise<Result>;
 
   send(text: string): Promise<Result>;
-  cancel(): Promise<Result>;
+  /** `source` is only logged: it says what stopped a turn (esc, button...). */
+  /**
+   * `sid` is the session the renderer was showing when the user asked to
+   * stop; main refuses when another session is on screen by then, so a stop
+   * aimed at one conversation can never land on another.
+   */
+  cancel(source?: string, sid?: string | null): Promise<Result>;
   recallQueued(): Promise<Result<string | null>>;
 
   setMode(mode: ChatMode): Promise<Result>;

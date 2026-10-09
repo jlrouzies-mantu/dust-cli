@@ -9,6 +9,10 @@ import path from "node:path";
 export interface Settings {
   workingDir?: string;
   agentId?: string;
+  /** Max concurrently running turns across sessions (1-8, default 3). */
+  maxParallel?: number;
+  layout?: Partial<import("../shared/ipc").PanelLayout>;
+  notify?: Partial<import("../shared/ipc").NotifySettings>;
   windowBounds?: { width: number; height: number; x?: number; y?: number };
 }
 

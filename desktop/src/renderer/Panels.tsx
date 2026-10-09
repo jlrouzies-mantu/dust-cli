@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { ConversationSummary, SessionState } from "../shared/ipc";
+import type { ConversationSummary, SessionBadge, SessionState } from "../shared/ipc";
 import { contextUsageColor, creditsUsageColor } from "../../../src/utils/brand";
 import { chatModeColor, chatModeLabel } from "../../../src/utils/chatMode";
 import {
@@ -16,9 +16,13 @@ import { toast } from "./store";
 export function Sidebar({
   session,
   conversations,
+  onCollapse,
+  onSettings,
 }: {
   session: SessionState;
   conversations: ConversationSummary[] | null;
+  onCollapse: () => void;
+  onSettings: () => void;
 }) {
   const [menu, setMenu] = useState(false);
   const [search, setSearch] = useState("");
@@ -44,10 +48,18 @@ export function Sidebar({
     };
   }, [menu]);
 
+  // Switching never waits: a conversation that is still opening is superseded
+  // by the next click, and a running one keeps going in the background.
   const open = async (id: string) => {
-    if (id === session.conversationId) return;
+    if (id === session.conversationId && !session.loadingConversationId) return;
     const res = await window.dustm.loadConversation(id);
     if (!res.ok) toast(res.error ?? "Could not open the conversation.");
+  };
+
+  const openSession = async (key: string) => {
+    if (key === session.sessionKey && !session.loadingConversationId) return;
+    const res = await window.dustm.selectSession(key);
+    if (!res.ok) toast(res.error ?? "Could not open the session.");
   };
 
   const newChat = async () => {
@@ -56,8 +68,18 @@ export function Sidebar({
   };
 
   const needle = search.trim().toLowerCase();
+  // Sessions that are doing something (or have something for you) sit in an
+  // "Active" group; the same conversation is not repeated in the list below.
+  const activeSessions = session.sessions.filter((x) => x.status !== "idle");
+  const activeIds = new Set(activeSessions.map((x) => x.conversationId).filter(Boolean));
+  const statusByConversation = new Map(
+    session.sessions.filter((x) => x.conversationId).map((x) => [x.conversationId as string, x])
+  );
   const visible = (conversations ?? []).filter(
-    (c) => !needle || c.title.toLowerCase().includes(needle)
+    (c) => !activeIds.has(c.sId) && (!needle || c.title.toLowerCase().includes(needle))
+  );
+  const visibleActive = activeSessions.filter(
+    (x) => !needle || x.title.toLowerCase().includes(needle)
   );
   const opening = session.loadingConversationId;
   const groups: { name: string; rows: ConversationSummary[] }[] = [];
@@ -78,12 +100,25 @@ export function Sidebar({
         <div className="shape s1" aria-hidden="true" />
         <div className="shape s2" aria-hidden="true" />
         <div className="shape s3" aria-hidden="true" />
+        <button
+          type="button"
+          className="panel-toggle"
+          aria-label="Collapse conversations panel (Ctrl+B)"
+          title="Collapse (Ctrl+B)"
+          onClick={onCollapse}
+        >
+          ‹
+        </button>
         <div className="top">
           <Logo />
           <div className="who">
             {session.workspaceName ?? "Dust workspace"}
             <br />
-            <b>{session.userName ?? ""}</b>
+            {session.userName ? (
+              <span className="author" title={session.userName}>
+                author: {session.userName}
+              </span>
+            ) : null}
           </div>
         </div>
         <div className="tagline">
@@ -93,7 +128,7 @@ export function Sidebar({
       </div>
 
       <div className="side-body">
-        <button type="button" className="btn-primary" disabled={session.busy || !!session.compacting || !!opening} onClick={() => void newChat()}>
+        <button type="button" className="btn-primary" onClick={() => void newChat()}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
             <path d="M12 5v14M5 12h14" />
           </svg>
@@ -121,11 +156,24 @@ export function Sidebar({
         </div>
 
         <div className="convo-list" aria-busy={!!opening}>
+          {visibleActive.length > 0 ? (
+            <div style={{ display: "contents" }}>
+              <div className="convo-group">── Active</div>
+              {visibleActive.map((x) => (
+                <SessionRow
+                  key={x.key}
+                  badge={x}
+                  agentName={agentName}
+                  onOpen={() => void openSession(x.key)}
+                />
+              ))}
+            </div>
+          ) : null}
           {conversations === null ? (
             <div className="convo-group">loading…</div>
-          ) : conversations.length === 0 ? (
+          ) : conversations.length === 0 && visibleActive.length === 0 ? (
             <div className="convo-group">no conversations yet</div>
-          ) : visible.length === 0 ? (
+          ) : visible.length === 0 && visibleActive.length === 0 ? (
             <div className="convo-group" role="status">no matches for “{search.trim()}”</div>
           ) : (
             groups.map((g) => (
@@ -134,6 +182,7 @@ export function Sidebar({
                 {g.rows.map((c) => {
                   const active = c.sId === session.conversationId;
                   const isOpening = opening === c.sId;
+                  const live = statusByConversation.get(c.sId);
                   return (
                     <button
                       key={c.sId}
@@ -141,7 +190,6 @@ export function Sidebar({
                       className="convo"
                       aria-current={active || isOpening}
                       aria-busy={isOpening}
-                      disabled={(!!opening && !isOpening) || ((session.busy || !!session.compacting) && !active)}
                       onClick={() => void open(c.sId)}
                     >
                       <div className="t">{active && session.conversationTitle ? session.conversationTitle : c.title}</div>
@@ -149,8 +197,8 @@ export function Sidebar({
                         @{agentName}{" "}
                         {isOpening ? (
                           <span className="working"><span className="spinner small" aria-hidden="true" /> opening…</span>
-                        ) : active && session.busy ? (
-                          <span className="working">· working</span>
+                        ) : live && live.status !== "idle" ? (
+                          <StatusBadge status={live.status} />
                         ) : (
                           <>· {relativeDay(c.updated)}</>
                         )}
@@ -170,6 +218,16 @@ export function Sidebar({
                 type="button"
                 role="menuitem"
                 autoFocus
+                onClick={() => {
+                  setMenu(false);
+                  onSettings();
+                }}
+              >
+                Settings
+              </button>
+              <button
+                type="button"
+                role="menuitem"
                 onClick={() => {
                   setMenu(false);
                   void window.dustm.auth.signOut();
@@ -202,6 +260,63 @@ export function Sidebar({
   );
 }
 
+function StatusBadge({ status }: { status: SessionBadge["status"] }) {
+  switch (status) {
+    case "running":
+      return (
+        <span className="sbadge running">
+          <span aria-hidden="true">[ .. ]</span>
+          <span className="sr-only">running</span>
+        </span>
+      );
+    case "waiting-slot":
+      return (
+        <span className="sbadge waiting">
+          <span aria-hidden="true">[ zz ]</span> waiting for a free slot
+        </span>
+      );
+    case "approval":
+      return (
+        <span className="sbadge approval">
+          <span className="sdot" aria-hidden="true" /> needs you
+        </span>
+      );
+    case "finished":
+      return (
+        <span className="sbadge finished">
+          <span className="sdot" aria-hidden="true" /> finished
+        </span>
+      );
+    case "error":
+      return (
+        <span className="sbadge error">
+          <span className="sdot" aria-hidden="true" /> error
+        </span>
+      );
+    default:
+      return null;
+  }
+}
+
+function SessionRow({
+  badge,
+  agentName,
+  onOpen,
+}: {
+  badge: SessionBadge;
+  agentName: string;
+  onOpen: () => void;
+}) {
+  return (
+    <button type="button" className="convo" aria-current={badge.selected} onClick={onOpen}>
+      <div className="t">{badge.title}</div>
+      <div className="m">
+        @{agentName} <StatusBadge status={badge.status} />
+      </div>
+    </button>
+  );
+}
+
 // ------------------------------------------------------------ aside
 
 function Meter({ ratio, color, dots }: { ratio: number; color: string; dots?: boolean }) {
@@ -224,7 +339,7 @@ export function contextText(x: NonNullable<SessionState["usage"]["context"]>): s
   return `${compact(x.used)}/${compact(x.size)} tokens`;
 }
 
-export function Aside({ session }: { session: SessionState }) {
+export function Aside({ session, onCollapse }: { session: SessionState; onCollapse: () => void }) {
   const ctx = session.usage.context;
   const cr = session.usage.credits;
   const ctxRatio = ctx && ctx.size > 0 ? (ctx.used / ctx.size) * 100 : 0;
@@ -232,6 +347,15 @@ export function Aside({ session }: { session: SessionState }) {
 
   return (
     <aside className="aside" aria-label="Session">
+      <button
+        type="button"
+        className="panel-toggle right"
+        aria-label="Collapse session panel (Ctrl+Alt+B)"
+        title="Collapse (Ctrl+Alt+B)"
+        onClick={onCollapse}
+      >
+        ›
+      </button>
       {session.mode === "plan" ? (
         <>
           <section className="card teal">
@@ -358,6 +482,19 @@ export function StatusBar({ session }: { session: SessionState }) {
       ) : null}
       {sep}
       <span style={{ color: chatModeColor(session.mode) }}>{chatModeLabel(session.mode)}</span>
+      {session.running > 0 ? (
+        <>
+          {sep}
+          <span
+            className="sbadge running"
+            role="status"
+            title={`${session.running} turn(s) running, up to ${session.maxParallel} at once`}
+          >
+            {session.running} running
+            {session.running >= session.maxParallel ? ` (max ${session.maxParallel})` : ""}
+          </span>
+        </>
+      ) : null}
       {session.conversationId ? (
         <>
           {sep}
@@ -377,5 +514,118 @@ export function StatusBar({ session }: { session: SessionState }) {
         </>
       ) : null}
     </footer>
+  );
+}
+
+// ------------------------------------------------------------ rails & resize
+
+/** The left panel collapsed: an expand button and the background-session counts. */
+export function LeftRail({ session, onExpand }: { session: SessionState; onExpand: () => void }) {
+  const count = (st: string) => session.sessions.filter((x) => x.status === st).length;
+  const needs = count("approval");
+  const done = count("finished");
+  const err = count("error");
+  const running = session.running;
+  const summary = [
+    needs ? `${needs} waiting for you` : "",
+    done ? `${done} finished` : "",
+    err ? `${err} with errors` : "",
+    running ? `${running} running` : "",
+  ].filter(Boolean).join(", ");
+  return (
+    <nav className="rail" aria-label="Conversations (collapsed)">
+      <button
+        type="button"
+        className="panel-toggle static"
+        aria-label={`Expand conversations panel (Ctrl+B)${summary ? `. ${summary}` : ""}`}
+        title="Expand (Ctrl+B)"
+        onClick={onExpand}
+      >
+        ›
+      </button>
+      {needs > 0 ? <span className="rail-badge approval" title={`${needs} waiting for you`}>{needs}</span> : null}
+      {err > 0 ? <span className="rail-badge error" title={`${err} with errors`}>{err}</span> : null}
+      {done > 0 ? <span className="rail-badge finished" title={`${done} finished`}>{done}</span> : null}
+      {running > 0 ? <span className="rail-badge running" title={`${running} running`}>{running}</span> : null}
+    </nav>
+  );
+}
+
+export function RightRail({ onExpand }: { onExpand: () => void }) {
+  return (
+    <aside className="rail right" aria-label="Session (collapsed)">
+      <button
+        type="button"
+        className="panel-toggle static"
+        aria-label="Expand session panel (Ctrl+Alt+B)"
+        title="Expand (Ctrl+Alt+B)"
+        onClick={onExpand}
+      >
+        ‹
+      </button>
+    </aside>
+  );
+}
+
+/** Drag (or arrow keys) to resize a side panel; the centre column stays fluid. */
+export function PanelResizer({
+  side,
+  width,
+  min,
+  max,
+  onChange,
+  onCommit,
+}: {
+  side: "left" | "right";
+  width: number;
+  min: number;
+  max: number;
+  onChange: (w: number) => void;
+  onCommit: (w: number) => void;
+}) {
+  const clamp = (w: number) => Math.min(max, Math.max(min, Math.round(w)));
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const el = e.currentTarget;
+    el.setPointerCapture(e.pointerId);
+    const startX = e.clientX;
+    const start = width;
+    let last = start;
+    const move = (ev: PointerEvent) => {
+      last = clamp(start + (side === "left" ? ev.clientX - startX : startX - ev.clientX));
+      onChange(last);
+    };
+    const up = () => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+      onCommit(last);
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+  };
+  return (
+    <div
+      className={`resizer ${side}`}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={side === "left" ? "Resize conversations panel" : "Resize session panel"}
+      aria-valuemin={min}
+      aria-valuemax={max}
+      aria-valuenow={width}
+      tabIndex={0}
+      onPointerDown={onPointerDown}
+      onDoubleClick={() => onCommit(clamp(side === "left" ? 280 : 290))}
+      onKeyDown={(e) => {
+        const step = e.shiftKey ? 40 : 12;
+        const dir = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+        if (!dir) return;
+        e.preventDefault();
+        const next = clamp(width + (side === "left" ? dir : -dir) * step);
+        onChange(next);
+        onCommit(next);
+      }}
+    />
   );
 }

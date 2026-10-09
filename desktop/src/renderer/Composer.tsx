@@ -54,6 +54,18 @@ export function Composer({
   // (and each copy became a real, billed turn). See session.send for the
   // matching guard in main.
   const inFlight = useRef(false);
+  const lastEscape = useRef(0);
+  // When the Stop button appeared: it takes Send's place, so a click that was
+  // meant for Send (a double-click, a click right after Enter) must not hit it.
+  const stopShownAt = useRef(0);
+  useEffect(() => {
+    stopShownAt.current = session.busy ? Date.now() : 0;
+  }, [session.busy, session.sessionKey]);
+  // A first Escape in one conversation must not arm a stop in the next one.
+  useEffect(() => {
+    lastEscape.current = 0;
+  }, [session.sessionKey]);
+  const [stopHint, setStopHint] = useState(false);
 
   const agent = session.agents.find((a) => a.sId === session.agentId);
   const loading = session.loadingConversationId !== null;
@@ -372,8 +384,25 @@ export function Composer({
     } else if (e.key === "Escape") {
       if (text) {
         setText("");
-      } else if (session.busy || session.loop) {
-        void window.dustm.cancel();
+      } else if (session.busy || session.loop || session.waitingForSlot) {
+        // Stopping the agent is deliberate: Escape twice within 1.5 s, from
+        // this box, with nothing else open and the key not already used
+        // (a popover, or a menu that just closed and handed focus back here).
+        const overlayOpen = !!document.querySelector('[role="dialog"], [role="menu"]');
+        if (e.repeat || e.defaultPrevented || overlayOpen) {
+          return;
+        }
+        e.preventDefault();
+        const now = Date.now();
+        if (now - lastEscape.current < 1500) {
+          lastEscape.current = 0;
+          setStopHint(false);
+          void window.dustm.cancel("esc", session.sessionKey);
+        } else {
+          lastEscape.current = now;
+          setStopHint(true);
+          setTimeout(() => setStopHint(false), 1500);
+        }
       }
     } else if (e.key === "ArrowUp" && !text && session.queue.length > 0) {
       e.preventDefault();
@@ -455,6 +484,11 @@ export function Composer({
       }}
       onDrop={onDrop}
     >
+      {stopHint ? (
+        <div className="band-busy" role="status">
+          Press Esc again to stop @{agent?.name ?? "the agent"}
+        </div>
+      ) : null}
       {session.loop ? (
         <div className="band-loop" role="status">
           <span>
@@ -483,7 +517,11 @@ export function Composer({
       {session.queue.map((q, i) => (
         <div className="queued" key={q.id}>
           <div className="hd">
-            <span className="grow">QUEUED · sends when @{agent?.name ?? "agent"} is free</span>
+            <span className="grow">
+              {session.waitingForSlot && i === 0
+                ? `WAITING FOR A FREE SLOT · ${session.running} of ${session.maxParallel} agents running`
+                : `QUEUED · sends when @${agent?.name ?? "agent"} is free`}
+            </span>
             {i === session.queue.length - 1 ? (
               <button
                 type="button"
@@ -582,7 +620,10 @@ export function Composer({
               className="send stop"
               aria-label="Stop the agent"
               title="Stop (Esc)"
-              onClick={() => void window.dustm.cancel()}
+              onClick={(e) => {
+                if (e.detail > 1 || Date.now() - stopShownAt.current < 600) return;
+                void window.dustm.cancel("button", session.sessionKey);
+              }}
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <rect x="6" y="6" width="12" height="12" rx="2" />
@@ -592,7 +633,7 @@ export function Composer({
           <button
             type="button"
             className="send"
-            aria-label={session.busy || session.compacting ? "Queue message" : "Send"}
+            aria-label={session.busy || session.compacting || session.waitingForSlot ? "Queue message" : "Send"}
             disabled={!text.trim() || !canSend}
             onClick={() => void submit()}
           >

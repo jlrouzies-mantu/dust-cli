@@ -4,6 +4,8 @@ import { writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { onSessionEvent } from "./bus";
+import { smokeMulti } from "./smokeMulti";
+import { setNotifySinkForTest } from "./notify";
 import { startDeviceAuth } from "../../../src/utils/deviceAuth";
 import { CLI_VERSION } from "../../../src/utils/version";
 
@@ -31,6 +33,7 @@ export interface SmokeOptions {
   btw: string | null;
   escape: boolean;
   audit: boolean;
+  multi: boolean;
   deleteProbe: boolean;
   out: string | null;
 }
@@ -47,6 +50,8 @@ export async function runSmoke(
     node: process.versions.node,
   };
   let code = 1;
+  // A smoke run must never put toasts on the user's desktop.
+  setNotifySinkForTest(() => undefined);
 
   const watchdog = setTimeout(() => {
     finish({ ...result, error: "smoke timed out after 120s" }, 1);
@@ -187,6 +192,9 @@ export async function runSmoke(
     if (options.audit) {
       result["audit"] = await smokeAudit(win);
     }
+    if (options.multi) {
+      result["multi"] = await smokeMulti(win);
+    }
     if (options.deleteProbe) {
       result["deleteProbe"] = await smokeDeleteProbe();
     }
@@ -208,7 +216,8 @@ export async function runSmoke(
       renderer.nodeIsolated &&
       consoleMessages.length === 0 &&
       (boot.auth.kind === "ready" ? (result["agentCount"] as number) > 0 : true) &&
-      (options.audit ? (result["audit"] as { pass: boolean }).pass : true);
+      (options.audit ? (result["audit"] as { pass: boolean }).pass : true) &&
+      (options.multi ? (result["multi"] as { pass: boolean }).pass : true);
     code = result["ok"] ? 0 : 1;
   } catch (error) {
     result["error"] = error instanceof Error ? error.message : String(error);
@@ -712,6 +721,7 @@ async function smokeCommands(win: BrowserWindow): Promise<unknown> {
     out["attachments"] = {
       badChipStatus: badChip.status,
       goodChipStatus: goodChip?.status,
+      goodChipError: goodChip?.error ?? null,
       callOrder: order.join(">"),
       chipsClearedAfterSend: session.getState().attachments.length === 0,
       pass:
@@ -829,6 +839,8 @@ async function smokeAudit(win: BrowserWindow): Promise<unknown> {
     streamNeverEnds = false;
     createDelayMs = 0;
     uploadFails = false;
+    // Leftovers of the previous case, background sessions included.
+    await session.teardownSession();
     session.stopLoop("audit reset", { quiet: true });
     if (session.getState().busy) {
       await session.cancel();
@@ -1011,18 +1023,28 @@ async function smokeAudit(win: BrowserWindow): Promise<unknown> {
       pass: chip?.status === "ready" && removedDeleted && calls.deleted.length === 0,
     };
 
-    // 7. Opening another conversation stops a running loop (it must not post
-    // into a different conversation than the one it was started in).
+    // 7. Opening another conversation does NOT stop a loop: it belongs to the
+    // session it was started in and keeps running in the background, never
+    // posting into the conversation now on screen.
     await fresh();
     await session.runCommand("loop", "30s x3 audit loop");
     await idle();
+    const loopKey = session.getSelectedKey();
     const loopBefore = session.getState().loop !== null;
     const loaded = await session.loadConversation("conv-loaded");
-    out["openingAnotherConversationStopsLoop"] = {
+    const background = session.getSessionState(loopKey);
+    out["openingAnotherConversationKeepsLoopInItsSession"] = {
       loopBefore,
       loaded: loaded.ok,
-      loopAfter: session.getState().loop,
-      pass: loopBefore && loaded.ok && session.getState().loop === null,
+      foregroundLoop: session.getState().loop,
+      backgroundLoopRuns: background?.loop?.runs ?? null,
+      pass:
+        loopBefore &&
+        loaded.ok &&
+        session.getState().loop === null &&
+        session.getSelectedKey() !== loopKey &&
+        background?.loop !== null &&
+        background?.loop !== undefined,
     };
 
     // 8. Cancel whose stream never confirms: the turn still ends.

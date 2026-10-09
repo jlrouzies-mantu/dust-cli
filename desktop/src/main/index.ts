@@ -5,6 +5,7 @@ import path from "node:path";
 import iconPath from "../../build/icon.png?asset";
 import { setReadyHandler, setSignedOutHandler } from "./auth";
 import { emit, onSessionEvent } from "./bus";
+import { setNotifyWindow } from "./notify";
 import { registerIpc, setCliAgent, setCliFolder, setTrusted } from "./ipc";
 import { initSession, resetSession, teardownSession } from "./session";
 import { loadSettings, updateSettings } from "./settings";
@@ -18,6 +19,8 @@ const argValue = (name: string): string | null => {
   const hit = argv.find((a) => a.startsWith(`${name}=`));
   return hit ? hit.slice(name.length + 1) : null;
 };
+// Without an explicit AppUserModelID Windows shows no toast for an unpackaged app.
+app.setAppUserModelId("com.mantu.dustm.desktop");
 const isDev = !app.isPackaged && !!process.env["ELECTRON_RENDERER_URL"];
 
 if (!smoke && !app.requestSingleInstanceLock()) {
@@ -52,6 +55,8 @@ async function createWindow(): Promise<BrowserWindow> {
       sandbox: true,
       webSecurity: true,
       spellcheck: false,
+      // Notification sounds are played by the page while the window is hidden or unfocused.
+      autoplayPolicy: "no-user-gesture-required",
       devTools: isDev,
     },
   });
@@ -81,6 +86,7 @@ async function createWindow(): Promise<BrowserWindow> {
     void win.loadFile(file);
   }
   setTrusted(win, prefix);
+  setNotifyWindow(win);
 
   win.on("close", () => {
     const b = win.getNormalBounds();
@@ -113,6 +119,7 @@ async function createWindow(): Promise<BrowserWindow> {
         btw: argValue("--smoke-btw"),
         escape: argv.includes("--smoke-escape"),
         audit: argv.includes("--smoke-audit"),
+        multi: argv.includes("--smoke-multi"),
         deleteProbe: argv.includes("--smoke-delete-probe"),
         out: argValue("--smoke-out") },
       consoleProblems

@@ -10,10 +10,18 @@ import {
   escapingCommandOperands,
   resolveInSandbox,
 } from "../../utils/sandbox.js";
+import type { ToolContext } from "../toolContext.js";
 import type { McpTool } from "../types/tools.js";
 
 export class RunCommandTool implements McpTool {
   name = "run_command";
+  private toolContext?: ToolContext;
+
+  /** Desktop only: per-conversation state instead of the module singletons (see toolContext.ts). */
+  setContext(context: ToolContext) {
+    this.toolContext = context;
+  }
+
   stake = "high" as const;
   description =
     "Executes a shell command directly on the user's local machine (the real OS and filesystem the CLI itself is " +
@@ -63,7 +71,7 @@ export class RunCommandTool implements McpTool {
     // code is not in a position to enforce (shell metacharacters, aliases,
     // scripts that shell out further). Research is done with read_file,
     // search_files and search_content instead; the refusal says so.
-    if (isPlanModeActive()) {
+    if (this.toolContext ? this.toolContext.isPlanMode() : isPlanModeActive()) {
       return {
         content: [{ type: "text" as const, text: planModeRefusal(this.name) }],
         isError: true,

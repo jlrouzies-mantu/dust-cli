@@ -43,6 +43,7 @@ const CSP_STRICT = [
   "script-src 'self'",
   "style-src 'self'",
   "font-src 'self'",
+  "media-src 'self'",
   "img-src 'self' data:",
   "connect-src 'none'",
   "base-uri 'none'",
@@ -54,6 +55,7 @@ const CSP_DEV = [
   "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self'",
+  "media-src 'self'",
   "img-src 'self' data:",
   "connect-src 'self' ws://localhost:* http://localhost:*",
   "base-uri 'none'",
@@ -82,6 +84,8 @@ export default defineConfig(() => ({
       // from desktop/node_modules (see package.json "dependencies"). Every
       // other dependency, including everything under ../src, is bundled.
       externalizeDeps: true,
+      // Sounds must stay real files: the CSP allows media from self only, not data:.
+      assetsInlineLimit: 0,
       rollupOptions: {
         input: { index: resolve(__dirname, "src/main/index.ts") },
       },
@@ -89,6 +93,8 @@ export default defineConfig(() => ({
   },
   preload: {
     build: {
+      // Sounds must stay real files: the CSP allows media from self only, not data:.
+      assetsInlineLimit: 0,
       rollupOptions: {
         input: { index: resolve(__dirname, "src/preload/index.ts") },
       },
@@ -98,6 +104,8 @@ export default defineConfig(() => ({
     root: resolve(__dirname, "src/renderer"),
     plugins: [react(), cspPlugin()],
     build: {
+      // Sounds must stay real files: the CSP allows media from self only, not data:.
+      assetsInlineLimit: 0,
       rollupOptions: {
         input: { index: resolve(__dirname, "src/renderer/index.html") },
       },

@@ -6,6 +6,7 @@ import {
   loadSkills,
   resolveSkill,
 } from "../../utils/skillStore.js";
+import type { ToolContext } from "../toolContext.js";
 import type { McpTool } from "../types/tools.js";
 
 /**
@@ -22,6 +23,13 @@ import type { McpTool } from "../types/tools.js";
  */
 export class ReadSkillTool implements McpTool {
   name = "read_skill";
+  private toolContext?: ToolContext;
+
+  /** Desktop only: per-conversation state instead of the module singletons (see toolContext.ts). */
+  setContext(context: ToolContext) {
+    this.toolContext = context;
+  }
+
 
   description =
     "Looks up the user's local skills - reusable instruction packages they authored on their own machine " +
@@ -47,7 +55,11 @@ export class ReadSkillTool implements McpTool {
 
   async execute({ names }: z.infer<typeof this.inputSchema>) {
     try {
-      const loaded = await loadSkills();
+      const loaded = await loadSkills(
+        this.toolContext
+          ? { includeClaudeSkills: this.toolContext.areClaudeSkillsEnabled() }
+          : undefined
+      );
       // A skill the user switched off in the /skills picker is out of scope
       // entirely - not merely absent from the catalogue. Letting it still be
       // fetched by name would make the toggle meaningless.

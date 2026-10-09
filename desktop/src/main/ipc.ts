@@ -143,7 +143,19 @@ export function registerIpc(): void {
   handle("dustm:load-conversation", (id: unknown) =>
     isString(id, 200) ? session.loadConversation(id) : bad("conversation")
   );
+  handle("dustm:select-session", (key: unknown) =>
+    isString(key, 100) ? session.selectSession(key) : bad("session")
+  );
+  handle("dustm:set-layout", (patch: unknown) =>
+    patch && typeof patch === "object" ? session.setLayout(patch as Record<string, unknown>) : bad("layout")
+  );
+  handle("dustm:set-notify", (patch: unknown) =>
+    patch && typeof patch === "object" ? session.setNotify(patch as Record<string, unknown>) : bad("notify")
+  );
   handle("dustm:new-conversation", () => session.newConversation());
+  handle("dustm:set-max-parallel", (n: unknown) =>
+    typeof n === "number" ? session.setMaxParallel(n) : bad("number")
+  );
   handle("dustm:load-earlier", () => session.loadEarlier());
   handle("dustm:select-agent", (id: unknown) =>
     isString(id, 200) ? session.selectAgent(id) : bad("agent")
@@ -152,7 +164,12 @@ export function registerIpc(): void {
   handle("dustm:send", (text: unknown) =>
     isString(text) ? session.send(text) : bad("message")
   );
-  handle("dustm:cancel", () => session.cancel());
+  handle("dustm:cancel", (source: unknown, sid: unknown) =>
+    session.cancel(
+      isString(source, 40) ? source : "unknown",
+      isString(sid, 100) ? sid : null
+    )
+  );
   handle("dustm:recall-queued", () => session.recallQueued());
 
   handle("dustm:set-mode", (mode: unknown) =>

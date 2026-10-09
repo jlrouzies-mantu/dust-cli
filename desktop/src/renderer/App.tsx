@@ -1,16 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { SessionState } from "../shared/ipc";
+import type { PanelLayout, SessionState } from "../shared/ipc";
 import { ApprovalDialog } from "./ApprovalDialog";
 import { Composer } from "./Composer";
-import { AgentPicker, CommandPalette, ModelPicker, ResumePicker, SkillsDialog } from "./Palette";
+import { AgentPicker, CommandPalette, ModelPicker, ParallelDialog, ResumePicker, SkillsDialog } from "./Palette";
 import type { Command } from "./Palette";
-import { Aside, Sidebar, StatusBar } from "./Panels";
+import { Aside, LeftRail, PanelResizer, RightRail, Sidebar, StatusBar } from "./Panels";
+import { SettingsDialog } from "./Settings";
 import { SignIn } from "./SignIn";
 import { Transcript } from "./Transcript";
 import { boot, toast, useApp } from "./store";
 
-type Overlay = null | "palette" | "model" | "agent" | "resume" | "skills";
+type Overlay = null | "palette" | "model" | "agent" | "resume" | "skills" | "parallel" | "settings";
 
 function TitleBar({ session, onPalette }: { session: SessionState | null; onPalette?: () => void }) {
   return (
@@ -46,10 +47,29 @@ function TitleBar({ session, onPalette }: { session: SessionState | null; onPale
 export function App() {
   const { booted, auth, session, items, firstItemIndex, approval, conversations, toast: toastState } = useApp();
   const [overlay, setOverlay] = useState<Overlay>(null);
+  // Panel layout: live while dragging, committed to settings on release.
+  const [layoutOverride, setLayoutOverride] = useState<Partial<PanelLayout>>({});
+  const layout: PanelLayout | null = session ? { ...session.layout, ...layoutOverride } : null;
+  const commitLayout = useCallback((patch: Partial<PanelLayout>) => {
+    setLayoutOverride((o) => ({ ...o, ...patch }));
+    void window.dustm.setLayout(patch);
+  }, []);
+  const layoutRef = useRef<PanelLayout | null>(null);
+  layoutRef.current = layout;
 
   useEffect(() => {
     void boot();
   }, []);
+
+  // The window title says when a background conversation needs you.
+  const needsYou = session ? session.sessions.filter((x) => x.status === "approval" && !x.selected).length : 0;
+  const finished = session ? session.sessions.filter((x) => (x.status === "finished" || x.status === "error") && !x.selected).length : 0;
+  useEffect(() => {
+    const parts: string[] = [];
+    if (needsYou > 0) parts.push(`${needsYou} waiting for you`);
+    if (finished > 0) parts.push(`${finished} finished`);
+    document.title = parts.length ? `dustm (${parts.join(", ")})` : "dustm";
+  }, [needsYou, finished]);
 
   const chooseFolder = useCallback(async () => {
     const res = await window.dustm.chooseFolder();
@@ -70,6 +90,18 @@ export function App() {
   // Global shortcuts. Shift+Tab lives in the composer on purpose.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Ctrl+B / Ctrl+Alt+B: collapse the left / right panel (no other binding uses B).
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "b" && layoutRef.current) {
+        e.preventDefault();
+        if (e.altKey) commitLayout({ rightCollapsed: !layoutRef.current.rightCollapsed });
+        else commitLayout({ leftCollapsed: !layoutRef.current.leftCollapsed });
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === ",") {
+        e.preventDefault();
+        if (auth.kind === "ready" && !approval) setOverlay((o) => (o === "settings" ? null : "settings"));
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         if (auth.kind === "ready" && !approval) {
@@ -79,7 +111,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [auth.kind, approval]);
+  }, [auth.kind, approval, commitLayout]);
 
   const commands = useMemo<Command[]>(
     () => [
@@ -98,9 +130,16 @@ export function App() {
       { id: "claude", label: "/claude-code-mode", hint: "Prime the agent with Claude Code memories", run: () => void window.dustm.runCommand("claude-code-mode", "") },
       { id: "tasks", label: "/tasks · Show tasks", hint: "Current task list", run: () => void window.dustm.runCommand("tasks", "") },
       { id: "attach", label: "/attach · Attach files", hint: "Or drop files, or paste an image", run: () => void window.dustm.attach.pickFiles() },
+      { id: "parallel", label: "/parallel · Max parallel agents", hint: "How many conversations may run at once", run: () => setOverlay("parallel") },
+      { id: "settings", label: "Settings · Notifications and sounds", hint: "Pop-up, sound and volume per event", keys: "Ctrl ,", run: () => setOverlay("settings") },
+      { id: "notify",
+        label: "Notifications: toggle desktop alerts",
+        hint: "Finished, needs approval, errors (when the conversation is not in view)",
+        run: () => void window.dustm.setNotify({ enabled: !session?.notify.enabled }),
+      },
       { id: "update", label: "Check for updates", disabled: true, run: () => undefined },
     ],
-    [chooseFolder]
+    [chooseFolder, session?.notify.enabled]
   );
 
   let appState: string = "loading";
@@ -120,8 +159,27 @@ export function App() {
     const streaming = last?.kind === "agent-text" && last.streaming;
     body = (
       <>
-        <div className="body">
-          <Sidebar session={session} conversations={conversations} />
+        <div
+          className="body"
+          style={{
+            gridTemplateColumns: `${layout?.leftCollapsed ? 44 : layout?.left ?? 280}px minmax(0, 1fr) ${layout?.rightCollapsed ? 44 : layout?.right ?? 290}px`,
+          }}
+        >
+          {layout?.leftCollapsed ? (
+            <LeftRail session={session} onExpand={() => commitLayout({ leftCollapsed: false })} />
+          ) : (
+            <div className="panel-wrap">
+              <Sidebar session={session} conversations={conversations} onSettings={() => setOverlay("settings")} onCollapse={() => commitLayout({ leftCollapsed: true })} />
+              <PanelResizer
+                side="left"
+                width={layout?.left ?? 280}
+                min={200}
+                max={480}
+                onChange={(w) => setLayoutOverride((o) => ({ ...o, left: w }))}
+                onCommit={(w) => commitLayout({ left: w })}
+              />
+            </div>
+          )}
           <main className="center" aria-label="Chat">
             {session.loadingConversationId ? (
               <div className="empty" role="status" aria-live="polite">
@@ -165,6 +223,7 @@ export function App() {
               </div>
             ) : (
               <Transcript
+                key={session.sessionKey}
                 items={items}
                 firstItemIndex={firstItemIndex}
                 context={{
@@ -193,7 +252,21 @@ export function App() {
               />
             </div>
           </main>
-          <Aside session={session} />
+          {layout?.rightCollapsed ? (
+            <RightRail onExpand={() => commitLayout({ rightCollapsed: false })} />
+          ) : (
+            <div className="panel-wrap">
+              <PanelResizer
+                side="right"
+                width={layout?.right ?? 290}
+                min={220}
+                max={480}
+                onChange={(w) => setLayoutOverride((o) => ({ ...o, right: w }))}
+                onCommit={(w) => commitLayout({ right: w })}
+              />
+              <Aside session={session} onCollapse={() => commitLayout({ rightCollapsed: true })} />
+            </div>
+          )}
         </div>
         <StatusBar session={session} />
       </>
@@ -212,6 +285,8 @@ export function App() {
       {overlay === "model" ? <ModelPicker onClose={() => setOverlay(null)} /> : null}
       {overlay === "resume" ? <ResumePicker onClose={() => setOverlay(null)} /> : null}
       {overlay === "skills" ? <SkillsDialog onClose={() => setOverlay(null)} /> : null}
+      {overlay === "settings" ? <SettingsDialog onClose={() => setOverlay(null)} /> : null}
+      {overlay === "parallel" ? <ParallelDialog onClose={() => setOverlay(null)} /> : null}
       {overlay === "agent" && session ? (
         <AgentPicker agents={session.agents} currentId={session.agentId} onClose={() => setOverlay(null)} />
       ) : null}

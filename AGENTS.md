@@ -379,30 +379,73 @@ last-synced commit (procedure step 3 above):
   - **Do not touch `Chat.tsx` for it.** `desktop/src/main/session.ts` is its own
     conversation loop (from `nonInteractive.ts` + Chat.tsx), so it must be kept in step
     by hand: when Chat.tsx's send/stream/approval behaviour changes, port the change.
-  - **The module-level singletons are owned by the main process, with named call
-    sites**, the same bug class as `taskStore`'s above: `setPlanMode` in `applyMode`
-    (and in `doInit`/`teardownSession`, which reset `mode` to `"normal"` in the same
-    breath - resetting only the singleton once showed "plan" while writes were
-    allowed), `setActiveConversationId` in `setConversation` (new, resume, create,
-    sign-out), `configureSandbox({ root })` + `process.chdir` in `setFolder`, and
-    `setClaudeSkillsEnabled` in `applyClaudeCodeMode`. A new path that changes mode,
-    conversation or folder must go through those, not around them.
-  - **Identity changes go through `teardownSession`** (wired from `auth.ts`'s
-    signed-out handler, which runs *before* `signOut` clears the tokens so the running
-    turn can still be cancelled server-side, and from `resetSession` before a new
-    sign-in): it stops the loop, cancels the turn, rejects pending dialogs, clears the
-    queue and attachments, and closes the fs MCP server. The fs server is registered
-    under one identity, so it is closed and re-registered on a sign-in change - that is
-    what `useFileSystemServer`'s optional `onConnected` callback (an additive parameter
-    the CLI does not pass) exists for. It is deliberately **not** re-registered on a
-    folder switch: every tool resolves paths at call time through the sandbox singleton
-    and `process.cwd()`, which `setFolder` updates.
-  - **Stale work never writes into the next conversation.** `session.ts` keeps an
-    `epoch`, bumped by new chat, opening a conversation and sign-out; a turn, an upload,
-    a compaction or a usage refresh that started under an older epoch drops its late
-    output. Opening another conversation also stops a running `/loop` (it must not post
-    into a different conversation) and resets the skills catalogue / priming state like
-    `/new` does. A new long-running operation needs the same check.
+  - **Sessions (parallel conversations).** `session.ts` holds a registry of `Session`
+    objects (one per conversation, plus a draft for a new chat); the window views one
+    (`selected`). Everything per-conversation lives on the Session (stream, queue, mode,
+    model/effort, agent, approvals, plan review, tasks, loop, attachments, skills/priming,
+    context usage, transcript `items`, `epoch`); only identity, agents, the folder, credits,
+    the cap and the registry are module-level. Main keeps every session's transcript
+    (`shared/transcript.ts`'s reducer is the one place events become items, used by main and
+    renderer) and sends the window only the **selected** session's events, tagged with
+    `sid`; switching sends one atomic `view` event (items, state, approval, plan). The
+    renderer also drops any tagged event whose `sid` is not the selected one (one already
+    in flight at a switch). Background sessions send only a light `sessions` badge event.
+    Keep that: do not emit a transcript/approval event for a non-selected session.
+  - **Per-call tool state: a ToolContext per session, never the singletons.** With parallel
+    turns one global plan mode / active conversation id / Claude-skills flag is wrong, so
+    the desktop does NOT call `setPlanMode`, `setActiveConversationId` or
+    `setClaudeSkillsEnabled` at all (they stay at their CLI defaults; `--smoke-multi`
+    asserts it). Each session registers its **own** fs MCP server (`ensureFsServer(s)`), and
+    Dust routes a tool call to the server ids in that message's `clientSideMCPServerIds`, so
+    the server a call arrives on identifies its conversation by construction. That server's
+    tools are built with `makeToolContext(s)` (`src/mcp/toolContext.ts`: `isPlanMode`,
+    `getConversationId`, `areClaudeSkillsEnabled`, `onTasksUpdated`), which the tools
+    consult instead of the singletons when a context was set (the CLI sets none, so it is
+    unchanged). Rejected alternatives: AsyncLocalStorage (the MCP transport's read loop is
+    started once at registration, so tool calls do not run inside a turn's async context) and
+    request metadata (not something we can verify offline). A new **writing** tool must read
+    plan mode through its context, gate in `execute`, and keep the notices described below;
+    a new tool that reads any of the three singletons must take the context the same way.
+    `--smoke-multi` proves a plan-mode session's `write_file`/`edit_file`/`run_command`
+    are refused while an auto-mode session's write goes through, both running.
+    The context **fails closed**: once its session is disposed (retired or torn down; the
+    transport closes asynchronously), `isPlanMode()` reports true and the diff/plan approval
+    callbacks refuse, so a late call is never run under stale permissions. Routing rests on
+    the transport polling Dust for requests by its own `serverId`; a heartbeat
+    re-registration mid-turn gives a new id, so that turn's later calls go unanswered
+    (they time out server-side) rather than reach another session.
+  - **Stops name their session.** The renderer passes the `sessionKey` it was showing to
+    `cancel(source, sid)`; main refuses when another session is on screen by then (a
+    notification click or switch in flight), so a stop can never land on the wrong turn.
+  - **Folder is app-global.** `setFolder` (`configureSandbox` + `process.chdir`) is
+    process-wide, so all sessions share one folder and it cannot change while any turn runs.
+    A per-session folder needs the sandbox and cwd made per-call first.
+  - **Identity changes go through `teardownSession`** (wired from `auth.ts`'s signed-out
+    handler, which runs *before* `signOut` clears the tokens so running turns can still be
+    cancelled server-side, and from `resetSession` before a new sign-in): for **every**
+    session it stops the loop, cancels the turn, rejects pending dialogs, clears the queue and
+    attachments and closes its fs MCP server, then installs a fresh empty session.
+  - **Retiring and the epoch.** Leaving an idle session disposes it (prefs - mode, model,
+    effort, agent - are kept by conversation id for a reopen); sessions that are running,
+    queued, waiting, awaiting approval, looping or unseen are kept. Each session's `epoch` is
+    bumped on dispose/teardown and a turn, upload, compaction or usage refresh that started
+    earlier drops its late output. Opening a conversation from history is superseded by any
+    newer switch via `loadSeq` (there is no switching lock). A new long-running operation
+    needs the same check.
+  - **Concurrency cap.** `maxParallel` (default 3, settings) bounds running turns;
+    `startOrWait`/`pumpSlots` queue the rest FIFO (`slotWait`, which counts as busy so a later
+    message queues behind it). A new send path goes through `dispatch`.
+  - **Stopping must be deliberate.** The composer stops on Esc pressed twice within 1.5 s
+    (ignores key repeat, `defaultPrevented` and an open dialog/menu); the Stop button ignores
+    clicks for 600 ms after appearing and `detail > 1`. `cancel(source)` logs its source.
+    The turn reads the stream by hand, raced against the abort signal, so an abort always ends
+    it, and the transcript says "Stopped by you.". Never call `cancel` from a view switch.
+  - **Notifications** (`notify.ts`): policy (`shouldNotify`, `mergeNotify`) is pure; toasts
+    are always `silent: true` and the sound is played by the page (`sound` event, autoplay
+    allowed, CSP `media-src 'self'`, sounds not inlined) so there is never a double sound;
+    toast text is agent + title + ~80 chars; bursts coalesce. `app.setAppUserModelId` is
+    required for Windows toasts. Sounds are generated by `npm run sounds`
+    (`scripts/gen-sounds.mjs`), no third-party assets.
   - **Both send sites** (`createConversation` and `postUserMessage` in `runTurn`) carry
     `buildModelSelection`'s result, and the plan preamble/reminder wraps every message
     while in plan mode. Only the user's plan approval (`resolvePlan`) leaves plan mode.
@@ -426,7 +469,7 @@ last-synced commit (procedure step 3 above):
   - **keytar** is N-API, so the prebuilt binary runs under Electron without a rebuild
     (`npmRebuild: false`); it is the only external module and is `asarUnpack`ed. If it
     ever stops being N-API, add `@electron/rebuild`.
-  - `--smoke` (with `--smoke-login`, `--smoke-chat`, `--smoke-attach`, `--smoke-btw`, `--smoke-dup`, `--smoke-commands`, `--smoke-escape`, `--smoke-audit`, `--smoke-delete-probe`, `--smoke-profile-load`, `--smoke-shot`, `--smoke-demo`) is
+  - `--smoke` (with `--smoke-multi` (parallel sessions, plan/auto isolation, background approval, cap, sign-out, mid-load switching, notifications, deliberate stop), `--smoke-login`, `--smoke-chat`, `--smoke-attach`, `--smoke-btw`, `--smoke-dup`, `--smoke-commands`, `--smoke-escape`, `--smoke-audit`, `--smoke-delete-probe`, `--smoke-profile-load`, `--smoke-shot`, `--smoke-demo`) is
     the verification path: it exercises the real IPC. `--smoke-chat`, `--smoke-btw` and
     `--smoke-login` cost credits / hit WorkOS, and `--smoke-delete-probe` creates and
     deletes one empty conversation, so they are opt-in. `--smoke-audit` (stubbed client;

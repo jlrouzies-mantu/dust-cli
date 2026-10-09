@@ -43,12 +43,11 @@ import {
   loadSkills,
   resolveSkill,
   saveDisabledSkillNames,
-  setClaudeSkillsEnabled,
   summarizeSkills,
 } from "../../../src/utils/skillStore";
 
-import { useFileSystemServer } from "../../../src/mcp/servers/fsServer";
-import { todoListEmitter } from "../../../src/mcp/tools/todoWrite";
+import { buildFsTools, useFileSystemServer } from "../../../src/mcp/servers/fsServer";
+import type { ToolContext } from "../../../src/mcp/toolContext";
 import { agentCache } from "../../../src/utils/agentCache";
 import AuthService from "../../../src/utils/authService";
 import type { ChatMode as CliChatMode } from "../../../src/utils/chatMode";
@@ -70,7 +69,6 @@ import {
   PLAN_MODE_BLOCKED_TOOLS,
   planModePreamble,
   planModeReminder,
-  setPlanMode,
 } from "../../../src/utils/planMode";
 import { saveApprovedPlan } from "../../../src/utils/planStore";
 import { retryResult } from "../../../src/utils/retry";
@@ -79,11 +77,7 @@ import {
   describeSandbox,
   resolveInSandbox,
 } from "../../../src/utils/sandbox";
-import {
-  formatTaskList,
-  loadTasks,
-  setActiveConversationId,
-} from "../../../src/utils/taskStore";
+import { formatTaskList, loadTasks } from "../../../src/utils/taskStore";
 import { toolsCache } from "../../../src/utils/toolsCache";
 import { appendTranscriptEntry } from "../../../src/utils/transcriptStore";
 import { CLI_VERSION, UPSTREAM_CLI_VERSION } from "../../../src/utils/version";
@@ -98,15 +92,23 @@ import type {
   Effort,
   ModelList,
   ModelRow,
+  NotifySettings,
+  PanelLayout,
   PlanChoice,
   Result,
+  SessionBadge,
+  SessionEvent,
   SessionState,
+  SessionStatus,
   SkillRow,
   TaskItem,
   TranscriptItem,
   Usage,
 } from "../shared/ipc";
+import { applyTranscriptEvent } from "../shared/transcript";
 import { sessionExpired } from "./auth";
+import { DEFAULT_NOTIFY, mergeNotify, notifySession, setAttention, setNotifyActivate } from "./notify";
+import type { NotifyKind } from "./notify";
 import { deleteConversationPrivate, fetchHistoryPage } from "./history";
 import { emit } from "./bus";
 import { loadSettings, updateSettings } from "./settings";
@@ -122,19 +124,33 @@ import {
  * src/ui/commands/chat/nonInteractive.ts and Chat.tsx (create or post a
  * message, stream the answer, answer tool approvals), minus the terminal UI.
  *
- * Module-level state is deliberate, for the reason AGENTS.md gives for
- * planMode.ts and taskStore.ts: the tools run in the MCP transport layer and
- * read those singletons, so this process owns the session and pushes state
- * into them. The call sites that must stay wired:
- *   - setPlanMode:              applyMode()           (every mode change), plus
- *                               doInit()/teardownSession(), which reset `mode`
- *                               to "normal" in the same breath
- *   - setActiveConversationId:  setConversation()     (new / resume / create /
- *                               sign-out)
- *   - configureSandbox:         setFolder()           (every folder change)
- *   - setClaudeSkillsEnabled:   applyClaudeCodeMode()
- *   - the fs MCP server:        ensureFsServer() / closeFsServer() (closed on
- *                               sign-out and before a new sign-in)
+ * SEVERAL CONVERSATIONS RUN AT ONCE. Everything that belongs to one
+ * conversation lives on a `Session` (stream, queue, mode, approvals, tasks,
+ * loop, attachments, skills/priming state, transcript...). The module-level
+ * state below is only what is genuinely app-wide: identity, agents, the
+ * working folder (the sandbox root and process.cwd() are process-global, so
+ * every session shares one folder), the concurrency cap and the registry.
+ * The window views exactly one session (`selected`); switching re-sends that
+ * session's transcript and state in one `view` event. Background sessions keep
+ * streaming into their own `items` and send nothing to the renderer except a
+ * lightweight badge list.
+ *
+ * Per-call tool state (plan mode, the conversation id todo_write persists
+ * against, whether Claude skills are on) is NOT read from the module-level
+ * singletons in planMode.ts / taskStore.ts / skillStore.ts any more: with
+ * parallel turns one global value would be wrong. Each session registers its
+ * own fs MCP server, and Dust routes a tool call to the server ids listed in
+ * that message's `clientSideMCPServerIds`, so the server a call arrives on
+ * identifies its conversation by construction. That server's tools are built
+ * with a `ToolContext` bound to the session (src/mcp/toolContext.ts). The
+ * singletons are never written from here and stay at their CLI defaults.
+ *
+ * The call sites that must stay wired:
+ *   - configureSandbox + chdir:  setFolder()   (every folder change; global)
+ *   - the fs MCP servers:        ensureFsServer(s) / closeFsServer(s) (closed on
+ *                                dispose, sign-out and before a new sign-in)
+ *   - per-session context:       makeToolContext(s) (used by BOTH the real
+ *                                server and the smoke-test tool set)
  * Missing one of them is a known bug class in this repo.
  */
 
@@ -142,22 +158,8 @@ type AgentConfiguration =
   GetAgentConfigurationsResponseType["agentConfigurations"][number];
 type Conversation = CreateConversationResponseType["conversation"];
 
-// ------------------------------------------------------------------ state
+// ------------------------------------------------------------------ types
 
-let me: MeResponseType["user"] | null = null;
-let workspaceName: string | null = null;
-let agents: AgentConfiguration[] = [];
-let agentId: string | null = null;
-let folder: string | null = null;
-let branch: string | null = null;
-let mode: ChatMode = "normal";
-let modelOverride: (ModelChoice & { label: string }) | null = null;
-let effort: Effort | null = null;
-let conversationId: string | null = null;
-let conversationTitle: string | null = null;
-let busy = false;
-let thinking = false;
-let actionLabel: string | null = null;
 // An uploaded file waiting to go out with a message.
 interface UploadedFile {
   id: string;
@@ -175,58 +177,198 @@ interface QueuedMessage {
   // skip rather than stack (loopController.ts).
   loop?: boolean;
 }
-let queue: QueuedMessage[] = [];
-// Attachments shown in the composer (uploading or ready) for the next send.
-let attachments: (AttachmentInfo & { fileId?: string })[] = [];
-let pendingAgent: { name: string; detail: string | null } | null = null;
-let loadingConversationId: string | null = null;
-let compacting: string | null = null;
-let btwStatus: string | null = null;
-// Cursor for "Load earlier messages" (see history.ts); null = nothing older.
-let earlierCursor: number | null = null;
-let loadingEarlier = false;
-const knownTitles = new Map<string, string>();
-let loop: LoopState | null = null;
-let loopTimer: ReturnType<typeof setInterval> | null = null;
-// /claude-code-mode and /skills state. These mirror the refs Chat.tsx keeps;
-// see the comments on the originals for why each exists.
-let claudeCodeMode = false;
-let claudeContext: ClaudeContext | null = null;
-let pendingClaudePriming = false;
-let pendingForcedSkills: Skill[] = [];
-let lastSentSkillCatalogue: string | null = null;
-let skillRevision = 0;
-let tasks: TaskItem[] = [];
-let usage: Usage = { context: null, credits: null };
-let notice: string | null = null;
 
-let fsServerId: string | null = null;
-let fsPromise: Promise<void> | null = null;
+/** What survives a session being retired while its conversation is idle. */
+interface Prefs {
+  mode: ChatMode;
+  modelOverride: (ModelChoice & { label: string }) | null;
+  effort: Effort | null;
+  claudeCodeMode: boolean;
+  claudeContext: ClaudeContext | null;
+  agentId: string | null;
+}
+
+interface Session {
+  key: string;
+  conversationId: string | null;
+  conversationTitle: string | null;
+  agentId: string | null;
+  mode: ChatMode;
+  modelOverride: (ModelChoice & { label: string }) | null;
+  effort: Effort | null;
+  busy: boolean;
+  thinking: boolean;
+  actionLabel: string | null;
+  queue: QueuedMessage[];
+  // Attachments shown in the composer (uploading or ready) for the next send.
+  attachments: (AttachmentInfo & { fileId?: string })[];
+  pendingAgent: { name: string; detail: string | null } | null;
+  compacting: string | null;
+  btwStatus: string | null;
+  // Cursor for "Load earlier messages" (see history.ts); null = nothing older.
+  earlierCursor: number | null;
+  loadingEarlier: boolean;
+  loop: LoopState | null;
+  loopTimer: ReturnType<typeof setInterval> | null;
+  // /claude-code-mode and /skills state. These mirror the refs Chat.tsx keeps;
+  // see the comments on the originals for why each exists.
+  claudeCodeMode: boolean;
+  claudeContext: ClaudeContext | null;
+  pendingClaudePriming: boolean;
+  pendingForcedSkills: Skill[];
+  lastSentSkillCatalogue: string | null;
+  skillRevision: number;
+  tasks: TaskItem[];
+  context: Usage["context"];
+  notice: string | null;
+  // The transcript, kept in main for every session so a background one has
+  // something to show when it is opened.
+  items: TranscriptItem[];
+  // Bumped when this session is retired or torn down. Work that started before
+  // (a turn, an upload, a compaction, a usage refresh) compares its captured
+  // value before writing, so a late result is dropped.
+  epoch: number;
+  disposed: boolean;
+  // Per-turn handles.
+  controller: AbortController | null;
+  activeClient: DustAPI | null;
+  activeAgentMessageId: string | null;
+  currentToolName: string;
+  // What the agent has said so far this turn (primes /btw mid-turn).
+  inFlightText: string;
+  cancelFallback: ReturnType<typeof setTimeout> | null;
+  approvals: Map<
+    string,
+    { request: ApprovalRequest; resolve: (d: ApprovalDecision) => void }
+  >;
+  planPending: {
+    id: string;
+    markdown: string;
+    resolve: (d: PlanDecision) => void;
+  } | null;
+  lastAccepted: { text: string; at: number } | null;
+  // Uploads run one at a time per session: the first may have to create the
+  // (empty) conversation the files belong to, as the CLI does, and two uploads
+  // racing would create two.
+  uploadChain: Promise<void>;
+  // The conversation the first upload had to create (as the CLI does: an
+  // upload needs a conversation id), until a message is posted into it. Until
+  // then it is empty, and it is deleted rather than left behind in the user's
+  // history if every upload fails, the chips are all removed, or the user moves
+  // on.
+  filesOnlyConversationId: string | null;
+  // This session's own fs MCP server (see the header comment).
+  fsServerId: string | null;
+  fsPromise: Promise<void> | null;
+  fsGeneration: number;
+  fsClose: (() => Promise<void>) | null;
+  // A message is waiting for a free slot under the concurrency cap.
+  slotWait: boolean;
+  // Finished or failed while another session was on screen; cleared on view.
+  unread: boolean;
+  errored: boolean;
+  // Smoke-test seam: this session's tool set, without a transport.
+  testTools: ReturnType<typeof buildFsTools> | null;
+  // The user asked to stop the running turn (so the note can say so).
+  stopRequested: boolean;
+}
+
+// ------------------------------------------------------------------ app state
+
+let me: MeResponseType["user"] | null = null;
+let workspaceName: string | null = null;
+let agents: AgentConfiguration[] = [];
+// The agent new conversations start with (the last one picked, remembered).
+let defaultAgentId: string | null = null;
+let folder: string | null = null;
+let branch: string | null = null;
+let globalNotice: string | null = null;
+let creditsUsage: Usage["credits"] = null;
+// Bumped on sign-out / identity change so a late credits fetch is dropped.
+let identityEpoch = 0;
 let initPromise: Promise<void> | null = null;
+const knownTitles = new Map<string, string>();
 
-// Bumped whenever the conversation on screen is replaced (new, open, sign-out).
-// Work that started before (a turn, an upload, a compaction) compares its
-// captured value before writing into the transcript or session, so a late
-// result never lands in the conversation that replaced it.
-let epoch = 0;
+const DEFAULT_MAX_PARALLEL = 3;
+const MAX_PARALLEL_LIMIT = 8;
+let maxParallel = DEFAULT_MAX_PARALLEL;
 
-// Per-turn handles.
-let controller: AbortController | null = null;
-let activeClient: DustAPI | null = null;
-let activeAgentMessageId: string | null = null;
-let currentToolName = "tool";
-// What the agent has said so far this turn (primes /btw mid-turn).
-let inFlightText = "";
+const sessions = new Map<string, Session>();
+let selected: Session | null = null;
+// Sessions with a message waiting for a free slot, oldest first.
+let slotWaiters: Session[] = [];
+// Preferences of retired idle sessions, by conversation id, so reopening a
+// conversation keeps its mode/model for as long as the app runs.
+const prefsByConversation = new Map<string, Prefs>();
+let sessionCounter = 0;
 
-const approvals = new Map<
-  string,
-  { request: ApprovalRequest; resolve: (d: ApprovalDecision) => void }
->();
-let planPending: {
-  id: string;
-  markdown: string;
-  resolve: (d: PlanDecision) => void;
-} | null = null;
+const DEFAULT_LAYOUT: PanelLayout = { left: 280, right: 290, leftCollapsed: false, rightCollapsed: false };
+const LAYOUT_LIMITS = { left: [200, 480], right: [220, 480] } as const;
+let panelLayout: PanelLayout = { ...DEFAULT_LAYOUT };
+let notifyCfg: NotifySettings = { ...DEFAULT_NOTIFY };
+
+// A clicked toast selects its conversation.
+setNotifyActivate((key) => {
+  selectSession(key);
+});
+
+function clampWidth(v: unknown, side: "left" | "right"): number {
+  const [lo, hi] = LAYOUT_LIMITS[side];
+  return typeof v === "number" && Number.isFinite(v) ? Math.min(hi, Math.max(lo, Math.round(v))) : DEFAULT_LAYOUT[side];
+}
+
+export function setLayout(patch: Record<string, unknown>): Result {
+  panelLayout = {
+    left: "left" in patch ? clampWidth(patch.left, "left") : panelLayout.left,
+    right: "right" in patch ? clampWidth(patch.right, "right") : panelLayout.right,
+    leftCollapsed: typeof patch.leftCollapsed === "boolean" ? patch.leftCollapsed : panelLayout.leftCollapsed,
+    rightCollapsed: typeof patch.rightCollapsed === "boolean" ? patch.rightCollapsed : panelLayout.rightCollapsed,
+  };
+  void updateSettings({ layout: panelLayout });
+  return { ok: true };
+}
+
+export function setNotify(patch: Record<string, unknown>): Result {
+  notifyCfg = mergeNotify(notifyCfg, patch);
+  void updateSettings({ notify: notifyCfg });
+  emitState();
+  return { ok: true };
+}
+
+export function getNotifySettings(): NotifySettings {
+  return notifyCfg;
+}
+
+/** Toast for `s` (policy and wording are in notify.ts). */
+function toast(s: Session, kind: NotifyKind, summary: string): void {
+  if (s.disposed || testClient === null && !me) return;
+  notifySession(
+    {
+      kind,
+      key: s.key,
+      agentName: agentOf(s)?.name ?? "dust",
+      conversationTitle: s.conversationTitle ?? "New chat",
+      summary,
+      selected: s === selected,
+    },
+    notifyCfg
+  );
+}
+
+function refreshAttention(): void {
+  let count = 0;
+  let needs = 0;
+  for (const s of sessions.values()) {
+    const st = statusOf(s);
+    if (st === "approval") { count++; needs++; }
+    else if ((st === "finished" || st === "error") && s !== selected) count++;
+  }
+  setAttention(count, needs);
+}
+// The conversation being opened from history, if any. Window-level: while it
+// is set the centre shows "Opening...". A newer switch supersedes it.
+let loadingConversationId: string | null = null;
+let loadSeq = 0;
 
 // Smoke-test seam (see smoke.ts): a stand-in for the Dust client so the
 // duplicate-send test can run turns without spending credits.
@@ -242,57 +384,303 @@ async function currentClient(): Promise<DustAPI | null> {
   return res.isOk() ? res.value : null;
 }
 
+// ------------------------------------------------------------------ sessions
+
+function createSession(from?: Session | null, prefs?: Prefs | null): Session {
+  const s: Session = {
+    key: `s${++sessionCounter}`,
+    conversationId: null,
+    conversationTitle: null,
+    agentId: prefs?.agentId ?? defaultAgentId,
+    // A session starts in normal mode: auto must never leak into a new
+    // conversation, and plan is something the user turns on per conversation.
+    mode: prefs?.mode ?? "normal",
+    // Model and effort are sticky preferences, copied (not shared).
+    modelOverride: prefs ? prefs.modelOverride : from?.modelOverride ?? null,
+    effort: prefs ? prefs.effort : from?.effort ?? null,
+    busy: false,
+    thinking: false,
+    actionLabel: null,
+    queue: [],
+    attachments: [],
+    pendingAgent: null,
+    compacting: null,
+    btwStatus: null,
+    earlierCursor: null,
+    loadingEarlier: false,
+    loop: null,
+    loopTimer: null,
+    claudeCodeMode: false,
+    claudeContext: null,
+    pendingClaudePriming: false,
+    pendingForcedSkills: [],
+    lastSentSkillCatalogue: null,
+    skillRevision: 0,
+    tasks: [],
+    context: null,
+    notice: null,
+    items: [],
+    epoch: 0,
+    disposed: false,
+    controller: null,
+    activeClient: null,
+    activeAgentMessageId: null,
+    currentToolName: "tool",
+    inFlightText: "",
+    cancelFallback: null,
+    approvals: new Map(),
+    planPending: null,
+    lastAccepted: null,
+    uploadChain: Promise.resolve(),
+    filesOnlyConversationId: null,
+    fsServerId: null,
+    fsPromise: null,
+    fsGeneration: 0,
+    fsClose: null,
+    slotWait: false,
+    unread: false,
+    errored: false,
+    testTools: null,
+    stopRequested: false,
+  };
+  const claudeSource = prefs ?? from;
+  if (claudeSource?.claudeCodeMode && claudeSource.claudeContext) {
+    s.claudeCodeMode = true;
+    s.claudeContext = claudeSource.claudeContext;
+    // A new conversation has not been primed yet.
+    s.pendingClaudePriming = true;
+  }
+  sessions.set(s.key, s);
+  return s;
+}
+
+/** The session on screen. Created lazily so getState() is always answerable. */
+function current(): Session {
+  if (!selected) {
+    selected = createSession(null);
+  }
+  return selected;
+}
+
+function findByConversation(id: string): Session | null {
+  for (const s of sessions.values()) {
+    if (s.conversationId === id) {
+      return s;
+    }
+  }
+  return null;
+}
+
+function runningCount(): number {
+  let n = 0;
+  for (const s of sessions.values()) {
+    if (s.busy) n++;
+  }
+  return n;
+}
+
+function anyBusy(): boolean {
+  for (const s of sessions.values()) {
+    if (s.busy || s.compacting) return true;
+  }
+  return false;
+}
+
+function statusOf(s: Session): SessionStatus {
+  if (s.approvals.size > 0 || s.planPending) return "approval";
+  if (s.busy || s.compacting) return "running";
+  if (s.slotWait) return "waiting-slot";
+  if (s.errored) return "error";
+  if (s.unread) return "finished";
+  return "idle";
+}
+
+function badgesOf(): SessionBadge[] {
+  return [...sessions.values()].map((s) => ({
+    key: s.key,
+    conversationId: s.conversationId,
+    title:
+      s.conversationTitle ??
+      (s.conversationId ? knownTitles.get(s.conversationId) : undefined) ??
+      "New chat",
+    status: statusOf(s),
+    selected: s === selected,
+  }));
+}
+
+/**
+ * Nothing running, queued, pending or unseen: safe to drop from memory. Unsent
+ * attachments do not keep a session alive: leaving a conversation discards
+ * them, as it always did (a conversation an upload created is deleted again).
+ */
+function isQuiescent(s: Session): boolean {
+  return (
+    !s.busy &&
+    !s.compacting &&
+    !s.slotWait &&
+    s.approvals.size === 0 &&
+    !s.planPending &&
+    !s.loop &&
+    s.queue.length === 0 &&
+    !s.unread &&
+    !s.errored &&
+    s.btwStatus === null &&
+    !s.loadingEarlier
+  );
+}
+
+/** Makes `next` the session on screen and sends the window its whole view. */
+function select(next: Session): void {
+  const prev = selected;
+  selected = next;
+  next.unread = false;
+  next.errored = false;
+  emitView();
+  if (prev && prev !== next && !prev.disposed && isQuiescent(prev)) {
+    disposeSession(prev);
+  }
+  // The usage numbers of a session that ran in the background are stale.
+  void refreshUsage(next);
+}
+
+function emitView(): void {
+  const s = current();
+  const first = s.approvals.values().next().value;
+  emit({
+    type: "view",
+    sid: s.key,
+    items: s.items,
+    state: getState(),
+    approval: first ? { request: first.request, pending: s.approvals.size } : null,
+    planId: s.planPending?.id ?? null,
+  });
+}
+
+/** Drops an idle session, keeping what is worth remembering for a reopen. */
+function disposeSession(s: Session): void {
+  if (s.disposed) {
+    return;
+  }
+  if (s.conversationId) {
+    prefsByConversation.set(s.conversationId, {
+      mode: s.mode,
+      modelOverride: s.modelOverride,
+      effort: s.effort,
+      claudeCodeMode: s.claudeCodeMode,
+      claudeContext: s.claudeContext,
+      agentId: s.agentId,
+    });
+  }
+  stopLoopOf(s, "closed", { quiet: true });
+  rejectAllPending(s);
+  discardFilesOnlyConversation(s);
+  s.attachments = [];
+  closeFsServer(s);
+  s.disposed = true;
+  s.epoch++;
+  sessions.delete(s.key);
+  slotWaiters = slotWaiters.filter((w) => w !== s);
+}
+
 // ------------------------------------------------------------------ state out
 
 export function getState(): SessionState {
+  return buildState(current());
+}
+
+/** The state of any live session (the smoke tests read background ones). */
+export function getSessionState(key: string): SessionState | null {
+  const s = sessions.get(key);
+  return s ? buildState(s) : null;
+}
+
+export function getSelectedKey(): string {
+  return current().key;
+}
+
+export function listSessionKeys(): string[] {
+  return [...sessions.keys()];
+}
+
+function buildState(s: Session): SessionState {
   return {
     version: CLI_VERSION,
     upstreamVersion: UPSTREAM_CLI_VERSION,
     workspaceName,
     userName: me?.fullName ?? null,
     agents: agents.map(toAgentInfo),
-    agentId,
+    agentId: s.agentId,
     folder,
     branch,
-    mode,
-    modelOverride: modelOverride
-      ? { modelId: modelOverride.modelId, label: modelOverride.label }
+    mode: s.mode,
+    modelOverride: s.modelOverride
+      ? { modelId: s.modelOverride.modelId, label: s.modelOverride.label }
       : null,
-    effort,
-    conversationId,
-    conversationTitle,
-    busy,
-    thinking,
-    actionLabel,
-    queue: queue.map((q) => ({ id: q.id, text: q.text })),
-    pendingAgent,
+    effort: s.effort,
+    conversationId: s.conversationId,
+    conversationTitle: s.conversationTitle,
+    busy: s.busy,
+    thinking: s.thinking,
+    actionLabel: s.actionLabel,
+    queue: s.queue.map((q) => ({ id: q.id, text: q.text })),
+    pendingAgent: s.pendingAgent,
     loadingConversationId,
-    compacting,
-    btwStatus,
-    loop: loop
+    compacting: s.compacting,
+    btwStatus: s.btwStatus,
+    loop: s.loop
       ? {
-          intervalMs: loop.intervalMs,
-          prompt: loop.prompt,
-          runs: loop.runs,
-          maxRuns: loop.maxRuns,
-          skipped: loop.skipped,
-          summary: describeLoop(loop),
+          intervalMs: s.loop.intervalMs,
+          prompt: s.loop.prompt,
+          runs: s.loop.runs,
+          maxRuns: s.loop.maxRuns,
+          skipped: s.loop.skipped,
+          summary: describeLoop(s.loop),
         }
       : null,
-    claudeCodeMode,
-    forcedSkills: pendingForcedSkills.map((k) => k.name),
-    attachments: attachments.map(({ fileId: _f, ...a }) => a),
-    hasEarlier: earlierCursor !== null,
-    loadingEarlier,
-    tasks,
-    usage,
+    claudeCodeMode: s.claudeCodeMode,
+    forcedSkills: s.pendingForcedSkills.map((k) => k.name),
+    attachments: s.attachments.map(({ fileId: _f, ...a }) => a),
+    hasEarlier: s.earlierCursor !== null,
+    loadingEarlier: s.loadingEarlier,
+    tasks: s.tasks,
+    usage: { context: s.context, credits: creditsUsage },
     sandbox: describeSandbox(),
-    notice,
+    notice: s.notice ?? globalNotice,
+    sessionKey: s.key,
+    sessions: badgesOf(),
+    running: runningCount(),
+    maxParallel,
+    waitingForSlot: s.slotWait,
+    layout: panelLayout,
+    notify: notifyCfg,
   };
 }
 
+/** Pushes the selected session's state to the window. */
 function emitState(): void {
-  emit({ type: "state", state: getState() });
+  refreshAttention();
+  emit({ type: "state", state: getState(), sid: current().key });
+}
+
+function emitSessions(): void {
+  refreshAttention();
+  emit({ type: "sessions", sessions: badgesOf(), running: runningCount() });
+}
+
+/**
+ * Something about `s` changed. The window gets the whole state when `s` is the
+ * one on screen, and only the badge list otherwise: a background session that
+ * streams and runs tools must not cost the renderer a full state per event.
+ */
+function stateChanged(s: Session): void {
+  if (s.disposed) {
+    return;
+  }
+  if (s === selected) {
+    emitState();
+  } else {
+    emitSessions();
+  }
 }
 
 function toAgentInfo(a: AgentConfiguration): AgentInfo {
@@ -306,77 +694,108 @@ function toAgentInfo(a: AgentConfiguration): AgentInfo {
   };
 }
 
-function selectedAgent(): AgentConfiguration | null {
-  return agents.find((a) => a.sId === agentId) ?? null;
+function agentOf(s: Session): AgentConfiguration | null {
+  return agents.find((a) => a.sId === s.agentId) ?? null;
 }
 
-function appendItem(item: TranscriptItem): void {
-  emit({ type: "append", item });
+/**
+ * Every transcript change goes through here: it is applied to the session's own
+ * list (always) and sent to the window only if the session is on screen.
+ */
+function tx(
+  s: Session,
+  event: Extract<
+    SessionEvent,
+    | { type: "append" }
+    | { type: "text-delta" }
+    | { type: "patch" }
+    | { type: "transcript-reset" }
+    | { type: "transcript-prepend" }
+  >
+): void {
+  s.items = applyTranscriptEvent(s.items, event);
+  if (s === selected && !s.disposed) {
+    emit({ ...event, sid: s.key });
+  }
 }
-const append = appendItem;
 
-function note(tone: "info" | "error", text: string): void {
-  append({ kind: "note", id: newId(), tone, text });
+function appendItem(s: Session, item: TranscriptItem): void {
+  tx(s, { type: "append", item });
+}
+
+function note(s: Session, tone: "info" | "error", text: string): void {
+  appendItem(s, { kind: "note", id: newId(), tone, text });
 }
 
 // ------------------------------------------------------------------ init
-
-todoListEmitter.on("update", (todos: TaskItem[]) => {
-  tasks = todos;
-  emitState();
-});
 
 /** Idempotent: loads user, agents, remembered folder and agent. */
 export function initSession(): Promise<void> {
   if (!initPromise) {
     initPromise = doInit().catch((error) => {
       initPromise = null;
-      notice = normalizeError(error).message;
+      globalNotice = normalizeError(error).message;
       emitState();
     });
   }
   return initPromise;
 }
 
+function teardownOne(s: Session): { client: DustAPI | null; convId: string | null; messageId: string | null } {
+  const out = {
+    client: s.busy ? s.activeClient : null,
+    convId: s.conversationId,
+    messageId: s.activeAgentMessageId,
+  };
+  s.epoch++;
+  s.disposed = true;
+  stopLoopOf(s, "signed out", { quiet: true });
+  s.queue = [];
+  rejectAllPending(s);
+  s.controller?.abort();
+  if (s.cancelFallback) {
+    clearTimeout(s.cancelFallback);
+    s.cancelFallback = null;
+  }
+  discardFilesOnlyConversation(s);
+  s.attachments = [];
+  closeFsServer(s);
+  return out;
+}
+
 /**
- * Stops everything tied to the current identity: the loop, the running turn
- * (server-side too, while the token still works), pending dialogs, queued
- * messages and attachments, the fs MCP server, and the singletons (plan mode
- * back to off together with `mode`, the conversation id). Called before a
- * sign-out clears the tokens, when a session is found expired, and before a
- * fresh sign-in starts a new session.
+ * Stops everything tied to the current identity, for EVERY session: each loop,
+ * each running turn (cancelled server-side too, while the token still works),
+ * pending dialogs, queued messages and attachments, each session's fs MCP
+ * server. Called before a sign-out clears the tokens, when a session is found
+ * expired, and before a fresh sign-in starts a new session.
  */
 export async function teardownSession(): Promise<void> {
   // Everything synchronous first, so a new session started right after this
   // call (resetSession -> initSession) can never be undone by our tail.
-  epoch++;
-  const client = busy ? activeClient : null;
-  const convId = conversationId;
-  const messageId = activeAgentMessageId;
-  stopLoop("signed out", { quiet: true });
-  queue = [];
-  rejectAllPending();
-  controller?.abort();
-  discardFilesOnlyConversation();
-  attachments = [];
-  closeFsServer();
-  resetConversationState();
-  setConversation(null, null);
-  earlierCursor = null;
-  tasks = [];
-  usage = { context: null, credits: null };
-  // `mode` and the plan-mode singleton move together, always (AGENTS.md):
-  // resetting only the singleton would show "plan" while writes are allowed.
-  mode = "normal";
-  setPlanMode(false);
-  emitState();
+  identityEpoch++;
+  const cancels = [...sessions.values()].map(teardownOne);
+  sessions.clear();
+  slotWaiters = [];
+  prefsByConversation.clear();
+  loadSeq++;
+  loadingConversationId = null;
+  creditsUsage = null;
+  // A fresh, empty session takes the place of the old ones, in normal mode.
+  selected = null;
+  const fresh = current();
+  emit({ type: "view", sid: fresh.key, items: [], state: getState(), approval: null, planId: null });
   // Aborting the local stream alone would leave the agent running (and
   // spending credits) server-side; this has to happen before the tokens go.
-  if (client && convId && messageId) {
-    await client
-      .cancelMessageGeneration({ conversationId: convId, messageIds: [messageId] })
-      .catch(() => undefined);
-  }
+  await Promise.all(
+    cancels.map(async ({ client, convId, messageId }) => {
+      if (client && convId && messageId) {
+        await client
+          .cancelMessageGeneration({ conversationId: convId, messageIds: [messageId] })
+          .catch(() => undefined);
+      }
+    })
+  );
 }
 
 /** Forget everything tied to the previous sign-in. */
@@ -385,11 +804,13 @@ export function resetSession(): void {
   initPromise = null;
   me = null;
   agents = [];
-  agentId = null;
+  defaultAgentId = null;
+  for (const s of sessions.values()) {
+    s.agentId = null;
+  }
   workspaceName = null;
-  modelOverride = null;
-  effort = null;
-  notice = null;
+  globalNotice = null;
+  knownTitles.clear();
   emit({ type: "transcript-reset", items: [] });
 }
 
@@ -441,15 +862,34 @@ async function doInit(): Promise<void> {
   const settings = await loadSettings();
   const remembered = agents.find((a) => a.sId === settings.agentId);
   const dustAgent = agents.find((a) => a.sId === "dust");
-  agentId = (remembered ?? dustAgent ?? agents[0])?.sId ?? null;
+  defaultAgentId = (remembered ?? dustAgent ?? agents[0])?.sId ?? null;
+  if (
+    typeof settings.maxParallel === "number" &&
+    Number.isInteger(settings.maxParallel) &&
+    settings.maxParallel >= 1 &&
+    settings.maxParallel <= MAX_PARALLEL_LIMIT
+  ) {
+    maxParallel = settings.maxParallel;
+  }
+  panelLayout = {
+    left: clampWidth(settings.layout?.left, "left"),
+    right: clampWidth(settings.layout?.right, "right"),
+    leftCollapsed: settings.layout?.leftCollapsed === true,
+    rightCollapsed: settings.layout?.rightCollapsed === true,
+  };
+  notifyCfg = mergeNotify(DEFAULT_NOTIFY, settings.notify);
+  // The session on screen (an empty one) takes the remembered agent.
+  for (const s of sessions.values()) {
+    if (!s.agentId) {
+      s.agentId = defaultAgentId;
+    }
+  }
+  current();
 
   if (settings.workingDir && isDirectory(settings.workingDir)) {
     setFolder(settings.workingDir, false);
   }
-  // Together, never one without the other (see teardownSession).
-  mode = "normal";
-  setPlanMode(false);
-  void refreshUsage();
+  void refreshUsage(current());
   emitState();
 }
 
@@ -489,11 +929,34 @@ function isDirectory(p: string): boolean {
   }
 }
 
+// ------------------------------------------------------------------ settings
+
+export function getMaxParallel(): number {
+  return maxParallel;
+}
+
+/** The cap on concurrently running turns. Raising it releases waiting sends. */
+export function setMaxParallel(n: number, persist = true): Result {
+  if (!Number.isInteger(n) || n < 1 || n > MAX_PARALLEL_LIMIT) {
+    return { ok: false, error: `Choose a number from 1 to ${MAX_PARALLEL_LIMIT}.` };
+  }
+  maxParallel = n;
+  if (persist) {
+    void updateSettings({ maxParallel: n });
+  }
+  pumpSlots();
+  emitState();
+  return { ok: true };
+}
+
 // ------------------------------------------------------------------ folder
 
+// The working folder is app-global for now: the sandbox root and process.cwd()
+// are process-wide, so every session shares it. A folder per session would
+// need those two made per call first (see AGENTS.md).
 export function setFolder(dir: string, persist = true): Result {
-  if (busy) {
-    return { ok: false, error: "Stop the current turn before changing folder." };
+  if (anyBusy()) {
+    return { ok: false, error: "Stop the running turns before changing folder." };
   }
   if (!isDirectory(dir)) {
     return { ok: false, error: "That folder does not exist." };
@@ -509,7 +972,7 @@ export function setFolder(dir: string, persist = true): Result {
     void updateSettings({ workingDir: dir });
   }
   void seedToolCache();
-  void ensureFsServer();
+  void ensureFsServer(current());
   emitState();
   return { ok: true };
 }
@@ -525,53 +988,96 @@ async function seedToolCache(): Promise<void> {
 
 // ------------------------------------------------------------------ fs server
 
-// The fs server is registered against one identity (the DustAPI client and the
-// workspace it captured). It does NOT need re-registering on a folder switch:
-// every tool resolves paths at call time through the sandbox singleton and
-// process.cwd(), both of which setFolder() updates. It DOES on a sign-out or a
-// new sign-in: the old transport would otherwise keep polling for tool calls
-// under the old identity. fsGeneration makes a registration that completes
-// after it was superseded close itself instead of becoming current.
-let fsGeneration = 0;
-let fsClose: (() => Promise<void>) | null = null;
+/**
+ * What a session's tools ask instead of the module-level singletons. This is
+ * the whole per-call mechanism: the tools of session A are built with A's
+ * context, the tools of session B with B's, so A being in plan mode cannot
+ * affect a call made on B's server.
+ */
+function makeToolContext(s: Session): ToolContext {
+  return {
+    // Fails closed: a call that reaches a retired or torn-down session's
+    // server (its transport closes asynchronously) is refused like a write in
+    // plan mode, never run under stale or default permissions.
+    isPlanMode: () => s.disposed || s.mode === "plan",
+    getConversationId: () => s.conversationId,
+    areClaudeSkillsEnabled: () => s.claudeCodeMode,
+    onTasksUpdated: (todos) => {
+      s.tasks = todos;
+      stateChanged(s);
+    },
+  };
+}
 
-function closeFsServer(): void {
-  fsGeneration++;
-  const close = fsClose;
-  fsClose = null;
-  fsServerId = null;
-  fsPromise = null;
+function closeFsServer(s: Session): void {
+  s.fsGeneration++;
+  const close = s.fsClose;
+  s.fsClose = null;
+  s.fsServerId = null;
+  s.fsPromise = null;
   if (close) {
     void close().catch(() => undefined);
   }
 }
 
 // Smoke-test seam: lets the harness observe that a sign-out closes the server.
-// Returns the real handle it displaced, which the harness must put back:
-// dropping it leaves the real transport running untracked and makes the next
-// ensureFsServer() register a second one.
+// Applies to the session on screen. Returns the real handle it displaced,
+// which the harness must put back: dropping it leaves the real transport
+// running untracked and makes the next ensureFsServer() register a second one.
 export function setFsServerForTest(
   id: string | null,
   close: (() => Promise<void>) | null
 ): { id: string | null; close: (() => Promise<void>) | null } {
-  const previous = { id: fsServerId, close: fsClose };
-  fsServerId = id;
-  fsClose = close;
+  const s = current();
+  const previous = { id: s.fsServerId, close: s.fsClose };
+  s.fsServerId = id;
+  s.fsClose = close;
   return previous;
 }
 
-function ensureFsServer(): Promise<void> {
-  if (fsServerId || testClient) {
+/**
+ * Smoke-test seam: the tools a session's server would serve, built with that
+ * session's real callbacks and context but no transport. Calling `write_file`
+ * on one session's set and on another's is how the isolation test proves a
+ * mode never leaks.
+ */
+export function sessionToolsForTest(key: string): Record<string, { execute: (args: never) => Promise<unknown> }> {
+  const s = sessions.get(key);
+  if (!s) {
+    throw new Error(`No session ${key}.`);
+  }
+  s.testTools ??= buildSessionTools(s);
+  return Object.fromEntries(s.testTools.map((t) => [t.name, t])) as never;
+}
+
+function buildSessionTools(s: Session): ReturnType<typeof buildFsTools> {
+  return buildFsTools({
+    diffApprovalCallback: (original, updated, filePath) =>
+      requestDiffApproval(s, original, updated, filePath),
+    planApprovalCallback: (plan) => requestPlanApproval(s, plan),
+    toolContext: makeToolContext(s),
+  });
+}
+
+// Each session registers its own server against the one identity (the DustAPI
+// client and workspace it captured). It does NOT need re-registering on a
+// folder switch: every tool resolves paths at call time through the sandbox
+// singleton and process.cwd(), both of which setFolder() updates. It DOES on a
+// sign-out or a new sign-in: the old transport would otherwise keep polling for
+// tool calls under the old identity. `fsGeneration` makes a registration that
+// completes after it was superseded close itself instead of becoming current.
+function ensureFsServer(s: Session): Promise<void> {
+  if (s.fsServerId || testClient || s.disposed) {
     return Promise.resolve();
   }
-  if (!fsPromise) {
-    const generation = fsGeneration;
-    const current = () => generation === fsGeneration;
+  if (!s.fsPromise) {
+    const generation = s.fsGeneration;
+    const isCurrent = () => generation === s.fsGeneration;
     const attempt = (async () => {
       const clientRes = await getDustClient();
       const dust = clientRes.isOk() ? clientRes.value : null;
-      if (!dust || !current()) {
-        if (current()) fsPromise = null;
+      if (!dust || !isCurrent()) {
+        if (isCurrent()) s.fsPromise = null;
         return;
       }
       const res = await useFileSystemServer(
@@ -579,118 +1085,141 @@ function ensureFsServer(): Promise<void> {
         (serverId) => {
           // A heartbeat re-registration of a superseded server must not
           // overwrite the current id.
-          if (current()) {
-            fsServerId = serverId;
+          if (isCurrent()) {
+            s.fsServerId = serverId;
           }
         },
-        requestDiffApproval,
+        (original, updated, filePath) =>
+          requestDiffApproval(s, original, updated, filePath),
         undefined,
-        requestPlanApproval,
+        (plan) => requestPlanApproval(s, plan),
         (close) => {
-          if (current()) {
-            fsClose = close;
+          if (isCurrent()) {
+            s.fsClose = close;
           } else {
             void close().catch(() => undefined);
           }
-        }
+        },
+        makeToolContext(s)
       );
-      if (res.isErr() && current()) {
-        notice = res.error.message;
-        fsPromise = null;
-        emitState();
+      if (res.isErr() && isCurrent()) {
+        s.notice = res.error.message;
+        s.fsPromise = null;
+        stateChanged(s);
       }
     })();
-    fsPromise = attempt;
+    s.fsPromise = attempt;
   }
-  return fsPromise;
+  return s.fsPromise;
 }
 
 // ------------------------------------------------------------------ mode
 
-function applyMode(next: ChatMode): void {
-  if (mode === next) {
+function applyMode(s: Session, next: ChatMode): void {
+  if (s.mode === next) {
     return;
   }
-  mode = next;
-  // The single point where UI state becomes tool behaviour (planMode.ts).
-  setPlanMode(next === "plan");
-  emitState();
+  // The single point where UI state becomes tool behaviour: the session's own
+  // tool context reads `s.mode` at call time. No module-level singleton is
+  // written (see the header comment).
+  s.mode = next;
+  stateChanged(s);
 }
 
 export function setMode(next: ChatMode): Result {
-  applyMode(next);
+  applyMode(current(), next);
   return { ok: true };
 }
 
 export function cycleMode(): Result {
-  applyMode(nextChatMode(mode as CliChatMode) as ChatMode);
+  const s = current();
+  applyMode(s, nextChatMode(s.mode as CliChatMode) as ChatMode);
   return { ok: true };
 }
 
 // ------------------------------------------------------------------ approvals
 
-function publishApprovals(): void {
-  const first = approvals.values().next().value;
-  emit({
-    type: "approval",
-    request: first ? first.request : null,
-    pending: approvals.size,
-  });
+function publishApprovals(s: Session): void {
+  if (s === selected && !s.disposed) {
+    const first = s.approvals.values().next().value;
+    emit({
+      type: "approval",
+      request: first ? first.request : null,
+      pending: s.approvals.size,
+      sid: s.key,
+    });
+  }
+  // The badge (yellow dot) changes with it.
+  stateChanged(s);
 }
 
-function ask(request: ApprovalRequest): Promise<ApprovalDecision> {
+// A background session's approval never pops over the view: it waits on its
+// own session, the sidebar shows a dot, and opening the session shows it (the
+// `view` event carries the first pending approval).
+function ask(s: Session, request: ApprovalRequest): Promise<ApprovalDecision> {
   return new Promise((resolve) => {
-    approvals.set(request.id, { request, resolve });
-    publishApprovals();
+    s.approvals.set(request.id, { request, resolve });
+    publishApprovals(s);
+    toast(s, "approval", request.tool);
   });
 }
 
 export function resolveApproval(id: string, decision: ApprovalDecision): Result {
-  const entry = approvals.get(id);
-  if (!entry) {
-    return { ok: false, error: "That approval is no longer pending." };
+  for (const s of sessions.values()) {
+    const entry = s.approvals.get(id);
+    if (entry) {
+      s.approvals.delete(id);
+      entry.resolve(decision);
+      publishApprovals(s);
+      return { ok: true };
+    }
   }
-  approvals.delete(id);
-  entry.resolve(decision);
-  publishApprovals();
-  return { ok: true };
+  return { ok: false, error: "That approval is no longer pending." };
 }
 
-function rejectAllPending(): void {
-  for (const [id, entry] of approvals) {
-    approvals.delete(id);
+function rejectAllPending(s: Session): void {
+  const had = s.approvals.size > 0;
+  for (const [id, entry] of s.approvals) {
+    s.approvals.delete(id);
     entry.resolve({ kind: "reject" });
   }
-  publishApprovals();
-  if (planPending) {
-    const pending = planPending;
-    planPending = null;
+  if (had) {
+    publishApprovals(s);
+  }
+  if (s.planPending) {
+    const pending = s.planPending;
+    s.planPending = null;
     pending.resolve({ kind: "reject" });
     // The card in the transcript must not stay "pending" with no way to act.
-    emit({ type: "patch", id: pending.id, patch: { outcome: "rejected" } as never });
-    emit({ type: "plan-clear" });
+    tx(s, { type: "patch", id: pending.id, patch: { outcome: "rejected" } as never });
+    if (s === selected && !s.disposed) {
+      emit({ type: "plan-clear", sid: s.key });
+    }
+    stateChanged(s);
   }
 }
 
 async function requestDiffApproval(
+  s: Session,
   original: string,
   updated: string,
   filePath: string
 ): Promise<boolean> {
   // A tool call that arrives with no turn running (a stale action from a
-  // cancelled or torn-down turn) has nobody to approve it: refuse it.
-  if (!busy) {
+  // cancelled or torn-down turn) has nobody to approve it: refuse it. A
+  // torn-down session can still be `busy` until its stream unwinds.
+  if (!s.busy || s.disposed) {
     return false;
   }
   const diff = buildDiff(filePath, original, updated);
-  const tool = currentToolName;
+  const tool = s.currentToolName;
 
-  if (mode === "auto") {
-    append({ kind: "diff", id: newId(), tool, diff });
+  if (s.mode === "auto") {
+    appendItem(s, { kind: "diff", id: newId(), tool, diff });
     return true;
   }
 
-  const decision = await ask({
+  const decision = await ask(s, {
     id: newId(),
     type: "edit",
     tool,
@@ -704,48 +1233,58 @@ async function requestDiffApproval(
     // the next message instead, so the reason isn't lost.
     const text = decision.note?.trim();
     if (text) {
-      queue.unshift({
+      s.queue.unshift({
         id: newId(),
         text: `About the edit to ${filePath} that I just rejected: ${text}`,
         files: [],
       });
-      emitState();
+      stateChanged(s);
     }
     return false;
   }
   if (decision.kind === "approve-all") {
-    applyMode("auto");
+    applyMode(s, "auto");
   }
-  append({ kind: "diff", id: newId(), tool, diff });
+  appendItem(s, { kind: "diff", id: newId(), tool, diff });
   return true;
 }
 
-async function requestPlanApproval(plan: string): Promise<PlanDecision> {
-  if (!busy) {
+async function requestPlanApproval(s: Session, plan: string): Promise<PlanDecision> {
+  if (!s.busy || s.disposed) {
     return { kind: "reject" };
   }
   // A second present_plan while one is pending replaces it; the first
   // caller must not be left waiting forever.
-  if (planPending) {
-    const previous = planPending;
-    planPending = null;
-    emit({ type: "patch", id: previous.id, patch: { outcome: "rejected" } as never });
+  if (s.planPending) {
+    const previous = s.planPending;
+    s.planPending = null;
+    tx(s, { type: "patch", id: previous.id, patch: { outcome: "rejected" } as never });
     previous.resolve({ kind: "reject" });
   }
   const id = newId();
-  append({ kind: "plan", id, markdown: plan, outcome: "pending" });
-  emit({ type: "plan-request", id, markdown: plan });
+  appendItem(s, { kind: "plan", id, markdown: plan, outcome: "pending" });
+  if (s === selected) {
+    emit({ type: "plan-request", id, markdown: plan, sid: s.key });
+  }
   return new Promise<PlanDecision>((resolve) => {
-    planPending = { id, markdown: plan, resolve };
+    s.planPending = { id, markdown: plan, resolve };
+    stateChanged(s);
+    toast(s, "approval", "plan review");
   });
 }
 
 export async function resolvePlan(id: string, choice: PlanChoice): Promise<Result> {
-  if (!planPending || planPending.id !== id) {
+  let s: Session | null = null;
+  for (const candidate of sessions.values()) {
+    if (candidate.planPending?.id === id) {
+      s = candidate;
+    }
+  }
+  if (!s || !s.planPending) {
     return { ok: false, error: "That plan is no longer pending." };
   }
-  const pending = planPending;
-  planPending = null;
+  const pending = s.planPending;
+  s.planPending = null;
 
   const decision: PlanDecision =
     choice.kind === "approve"
@@ -755,10 +1294,10 @@ export async function resolvePlan(id: string, choice: PlanChoice): Promise<Resul
   if (decision.kind === "approve") {
     // Leaving plan mode is the user's approval, here and nowhere else: the
     // agent cannot lift the restriction by calling present_plan itself.
-    applyMode(decision.then === "auto" ? "auto" : "normal");
-    await saveApprovedPlan(conversationId, pending.markdown);
+    applyMode(s, decision.then === "auto" ? "auto" : "normal");
+    await saveApprovedPlan(s.conversationId, pending.markdown);
   }
-  emit({
+  tx(s, {
     type: "patch",
     id,
     patch: {
@@ -771,13 +1310,17 @@ export async function resolvePlan(id: string, choice: PlanChoice): Promise<Resul
       comment: decision.kind === "reject" ? decision.comment : undefined,
     } as never,
   });
-  emit({ type: "plan-clear" });
+  if (s === selected) {
+    emit({ type: "plan-clear", sid: s.key });
+  }
   pending.resolve(decision);
+  stateChanged(s);
   return { ok: true };
 }
 
 /** Dust's own tool-approval step (distinct from the diff dialog). */
 async function handleToolApproval(
+  s: Session,
   event: AgentActionSpecificEvent
 ): Promise<boolean> {
   if (event.type !== "tool_approve_execution") {
@@ -786,7 +1329,7 @@ async function handleToolApproval(
   // In plan mode a blocked tool must reach the tool itself, whose refusal
   // explains plan mode and points at present_plan (see Chat.tsx).
   if (
-    mode === "plan" &&
+    s.mode === "plan" &&
     (PLAN_MODE_BLOCKED_TOOLS as readonly string[]).includes(
       event.metadata.toolName
     )
@@ -794,7 +1337,8 @@ async function handleToolApproval(
     return true;
   }
   // Auto mode approves every tool call whatever its stake, as in Chat.tsx.
-  if (mode === "auto") {
+  // It is this session's mode: another session's approvals are unaffected.
+  if (s.mode === "auto") {
     return true;
   }
   if (event.stake === "never_ask") {
@@ -811,7 +1355,7 @@ async function handleToolApproval(
     }
   }
 
-  const decision = await ask({
+  const decision = await ask(s, {
     id: newId(),
     type: "tool",
     tool: event.metadata.toolName,
@@ -832,15 +1376,17 @@ async function handleToolApproval(
 // same keypress delivered twice, not a second request. See the 2026-10 bug
 // where one Enter produced six real turns.
 const DUPLICATE_WINDOW_MS = 2000;
-let lastAccepted: { text: string; at: number } | null = null;
 
 // A compaction makes the conversation busy exactly like a running turn does
-// (AGENTS.md): every gate that asks "can a message go out now?" uses this.
-function isConversationBusy(): boolean {
-  return busy || compacting !== null;
+// (AGENTS.md): every gate that asks "can a message go out now?" uses this. A
+// message waiting for a free slot under the concurrency cap counts too, so a
+// later message queues behind it instead of overtaking it.
+function isConversationBusy(s: Session): boolean {
+  return s.busy || s.compacting !== null || s.slotWait;
 }
 
 export function send(text: string): Result {
+  const s = current();
   const trimmed = text.trim();
   if (!trimmed) {
     return { ok: false, error: "Empty message." };
@@ -848,10 +1394,10 @@ export function send(text: string): Result {
   if (!folder) {
     return { ok: false, error: "Choose a working folder first." };
   }
-  if (!selectedAgent()) {
+  if (!agentOf(s)) {
     return { ok: false, error: "No agent selected." };
   }
-  if (attachments.some((a) => a.status === "uploading")) {
+  if (s.attachments.some((a) => a.status === "uploading")) {
     return { ok: false, error: "Wait for the attachments to finish uploading." };
   }
   if (loadingConversationId) {
@@ -859,9 +1405,9 @@ export function send(text: string): Result {
   }
   const now = Date.now();
   if (
-    lastAccepted &&
-    lastAccepted.text === trimmed &&
-    now - lastAccepted.at < DUPLICATE_WINDOW_MS
+    s.lastAccepted &&
+    s.lastAccepted.text === trimmed &&
+    now - s.lastAccepted.at < DUPLICATE_WINDOW_MS
   ) {
     // Never silent: the composer gives the text back with this message, so a
     // repeat the user really meant is one more Enter away (after the window).
@@ -871,10 +1417,10 @@ export function send(text: string): Result {
       error: "Not sent: the same message went out less than 2 seconds ago. Send it again to repeat it.",
     };
   }
-  lastAccepted = { text: trimmed, at: now };
+  s.lastAccepted = { text: trimmed, at: now };
 
   // Failed uploads are dropped; ready ones travel with this message.
-  const files: UploadedFile[] = attachments
+  const files: UploadedFile[] = s.attachments
     .filter((a) => a.status === "ready" && a.fileId)
     .map((a) => ({
       id: a.id,
@@ -884,105 +1430,159 @@ export function send(text: string): Result {
       contentType: a.contentType,
       isImage: a.isImage,
     }));
-  attachments = [];
+  s.attachments = [];
   // A message is on its way into it, so the conversation the uploads created
   // is no longer a discard candidate (a /clear-files now must not delete it).
-  filesOnlyConversationId = null;
-  dispatch({ id: newId(), text: trimmed, files });
+  s.filesOnlyConversationId = null;
+  dispatch(s, { id: newId(), text: trimmed, files });
   return { ok: true };
 }
 
-function dispatch(message: QueuedMessage): void {
-  if (isConversationBusy()) {
-    queue.push(message);
-    emitState();
+function dispatch(s: Session, message: QueuedMessage): void {
+  s.queue.push(message);
+  if (isConversationBusy(s)) {
+    stateChanged(s);
     return;
   }
-  void runTurn(message);
+  startOrWait(s);
+}
+
+/**
+ * Runs `s`'s next queued message if a slot is free, otherwise parks the session
+ * in the FIFO of sessions waiting for one. Synchronous up to the point the turn
+ * marks itself busy, so no other send can slip in between.
+ */
+function startOrWait(s: Session): void {
+  if (s.disposed || s.busy || s.compacting !== null) {
+    return;
+  }
+  if (s.queue.length === 0) {
+    s.slotWait = false;
+    slotWaiters = slotWaiters.filter((w) => w !== s);
+    return;
+  }
+  const waitingAhead = slotWaiters.some((w) => w !== s);
+  if (runningCount() < maxParallel && !waitingAhead) {
+    s.slotWait = false;
+    slotWaiters = slotWaiters.filter((w) => w !== s);
+    const next = s.queue.shift();
+    if (next) {
+      void runTurn(s, next);
+    }
+    return;
+  }
+  if (!slotWaiters.includes(s)) {
+    slotWaiters.push(s);
+  }
+  s.slotWait = true;
+  stateChanged(s);
+}
+
+/** A slot freed (or the cap was raised): start waiting sessions, oldest first. */
+function pumpSlots(): void {
+  while (slotWaiters.length > 0 && runningCount() < maxParallel) {
+    const w = slotWaiters.shift() as Session;
+    w.slotWait = false;
+    if (w.disposed || w.busy || w.compacting !== null) {
+      continue;
+    }
+    const next = w.queue.shift();
+    if (next) {
+      void runTurn(w, next);
+    } else {
+      stateChanged(w);
+    }
+  }
 }
 
 // Called whenever something that made the conversation busy ends (a turn, a
-// compaction). Runs the next queued message, if any, synchronously so no
-// other send can slip in between the shift and the turn marking itself busy.
-function drainQueue(): void {
-  if (isConversationBusy()) {
+// compaction).
+function drainQueue(s: Session): void {
+  if (s.disposed || s.busy || s.compacting !== null) {
     return;
   }
-  const next = queue.shift();
-  if (next) {
-    void runTurn(next);
-  }
+  startOrWait(s);
+  pumpSlots();
 }
 
 export function recallQueued(): Result<string | null> {
+  const s = current();
   // A loop tick is not the user's text to edit; leave those to /loop stop.
-  let index = queue.length - 1;
-  while (index >= 0 && queue[index].loop) {
+  let index = s.queue.length - 1;
+  while (index >= 0 && s.queue[index].loop) {
     index--;
   }
   if (index < 0) {
     return { ok: true, value: null };
   }
-  const [last] = queue.splice(index, 1);
-  emitState();
+  const [last] = s.queue.splice(index, 1);
+  if (s.slotWait && s.queue.length === 0) {
+    s.slotWait = false;
+    slotWaiters = slotWaiters.filter((w) => w !== s);
+  }
+  stateChanged(s);
   return { ok: true, value: last.text };
 }
 
-function setConversation(id: string | null, title: string | null): void {
-  conversationId = id;
-  conversationTitle = title;
-  // Keeps todo_write / read_tasks persisting against the right conversation.
-  setActiveConversationId(id);
+function setConversation(s: Session, id: string | null, title: string | null): void {
+  s.conversationId = id;
+  s.conversationTitle = title;
 }
 
-function headerDetail(agent: AgentConfiguration): string | null {
-  const model = modelOverride?.modelId ?? agent.model?.modelId ?? null;
-  const parts = [model, effort].filter(Boolean) as string[];
+function headerDetail(s: Session, agent: AgentConfiguration): string | null {
+  const model = s.modelOverride?.modelId ?? agent.model?.modelId ?? null;
+  const parts = [model, s.effort].filter(Boolean) as string[];
   return parts.length ? parts.join(" · ") : null;
 }
 
-async function runTurn(message: QueuedMessage): Promise<void> {
+async function runTurn(s: Session, message: QueuedMessage): Promise<void> {
   const text = message.text;
-  const agent = selectedAgent();
+  const agent = agentOf(s);
   if (!agent || !me) {
     return;
   }
-  // Shadow the transcript writers: once the conversation is replaced (only a
-  // sign-out can do that mid-turn), this turn's late output is dropped.
-  const turnEpoch = epoch;
+  // Once the session is torn down (sign-out) or retired, this turn's late
+  // output is dropped.
+  const turnEpoch = s.epoch;
   const append = (item: TranscriptItem) => {
-    if (epoch === turnEpoch) appendItem(item);
+    if (s.epoch === turnEpoch) appendItem(s, item);
   };
-  const note = (tone: "info" | "error", line: string) =>
+  const noteHere = (tone: "info" | "error", line: string) =>
     append({ kind: "note", id: newId(), tone, text: line });
-  busy = true;
+  s.busy = true;
+  s.slotWait = false;
+  s.unread = false;
+  s.errored = false;
   // Nothing is drawn for the agent until it has something to show: a header
   // with nothing under it is what produced tall empty blocks. Until then the
   // renderer shows one compact "thinking" row from this.
-  pendingAgent = { name: agent.name, detail: headerDetail(agent) };
+  s.pendingAgent = { name: agent.name, detail: headerDetail(s, agent) };
   let headerShown = false;
   const ensureHeader = () => {
     if (headerShown) {
       return;
     }
     headerShown = true;
-    pendingAgent = null;
+    s.pendingAgent = null;
     append({
       kind: "agent-header",
       id: newId(),
       agentName: agent.name,
-      detail: headerDetail(agent),
+      detail: headerDetail(s, agent),
     });
-    emitState();
+    stateChanged(s);
   };
-  thinking = false;
-  actionLabel = null;
-  notice = null;
+  s.thinking = false;
+  s.actionLabel = null;
+  s.notice = null;
   const turnController = new AbortController();
-  controller = turnController;
+  s.controller = turnController;
   const signal = turnController.signal;
-  activeAgentMessageId = null;
-  emitState();
+  s.activeAgentMessageId = null;
+  stateChanged(s);
+  let failed = false;
+  let endReason = "finished";
+  s.stopRequested = false;
 
   append({
     kind: "user",
@@ -1001,19 +1601,19 @@ async function runTurn(message: QueuedMessage): Promise<void> {
   const flush = () => {
     flushTimer = null;
     if (blockId && pendingText) {
-      emit({ type: "text-delta", id: blockId, text: pendingText });
+      tx(s, { type: "text-delta", id: blockId, text: pendingText });
       pendingText = "";
     }
   };
-  const pushText = (s: string) => {
+  const pushText = (chunk: string) => {
     ensureHeader();
     if (!blockId) {
       blockId = newId();
       append({ kind: "agent-text", id: blockId, text: "", streaming: true });
     }
-    pendingText += s;
-    streamed += s;
-    inFlightText = streamed;
+    pendingText += chunk;
+    streamed += chunk;
+    s.inFlightText = streamed;
     if (!flushTimer) {
       flushTimer = setTimeout(flush, 50);
     }
@@ -1024,7 +1624,7 @@ async function runTurn(message: QueuedMessage): Promise<void> {
     }
     flush();
     if (blockId) {
-      emit({
+      tx(s, {
         type: "patch",
         id: blockId,
         patch: { streaming: false } as never,
@@ -1042,14 +1642,15 @@ async function runTurn(message: QueuedMessage): Promise<void> {
       await sessionExpired("Your session expired. Sign in again.");
       throw new Error("Not signed in.");
     }
-    activeClient = dust;
+    s.activeClient = dust;
 
-    // File tools need the fs MCP server attached before the first message.
-    await ensureFsServer();
+    // File tools need this session's fs MCP server attached before the first
+    // message.
+    await ensureFsServer(s);
 
     // Plan mode is restated on every message while it is on.
     let sentText =
-      mode === "plan"
+      s.mode === "plan"
         ? `${planModePreamble()}\n\n${text}\n\n${planModeReminder()}`
         : text;
 
@@ -1057,17 +1658,17 @@ async function runTurn(message: QueuedMessage): Promise<void> {
     // re-read every send and only injected when it differs from the last one
     // sent; forced bodies from /skills <name> ride along once. Gated on the fs
     // MCP server being attached, since without it read_skill is not callable.
-    const forcedSkillsThisTurn = pendingForcedSkills;
+    const forcedSkillsThisTurn = s.pendingForcedSkills;
     let skillsBlockIncluded = false;
     let freshSkillCatalogue: string | null | undefined;
-    if (fsServerId) {
-      const skillSet = await loadSkills({ includeClaudeSkills: claudeCodeMode });
+    if (s.fsServerId) {
+      const skillSet = await loadSkills({ includeClaudeSkills: s.claudeCodeMode });
       freshSkillCatalogue = buildSkillCatalogue(skillSet);
       const block = buildSkillsBlock({
         catalogue:
-          freshSkillCatalogue !== lastSentSkillCatalogue ? freshSkillCatalogue : null,
+          freshSkillCatalogue !== s.lastSentSkillCatalogue ? freshSkillCatalogue : null,
         inlined: forcedSkillsThisTurn,
-        revision: skillRevision + 1,
+        revision: s.skillRevision + 1,
       });
       if (block) {
         sentText = `${block}\n\n${sentText}`;
@@ -1077,7 +1678,7 @@ async function runTurn(message: QueuedMessage): Promise<void> {
       const block = buildSkillsBlock({
         catalogue: null,
         inlined: forcedSkillsThisTurn,
-        revision: skillRevision + 1,
+        revision: s.skillRevision + 1,
       });
       if (block) {
         sentText = `${block}\n\n${sentText}`;
@@ -1088,14 +1689,14 @@ async function runTurn(message: QueuedMessage): Promise<void> {
     // Claude Code mode's one-time priming. The latch is only cleared once
     // the API has accepted the message (below), so a failed send does not
     // lose the memories for the rest of the conversation.
-    const primingThisMessage = pendingClaudePriming && claudeContext !== null;
-    if (primingThisMessage && claudeContext) {
-      sentText = `${buildPrimingBlock(claudeContext)}\n\n${sentText}`;
+    const primingThisMessage = s.pendingClaudePriming && s.claudeContext !== null;
+    if (primingThisMessage && s.claudeContext) {
+      sentText = `${buildPrimingBlock(s.claudeContext)}\n\n${sentText}`;
     }
 
     const modelSelection = buildModelSelection(
-      modelOverride,
-      effort,
+      s.modelOverride,
+      s.effort,
       agent.model
         ? { modelId: agent.model.modelId, providerId: agent.model.providerId }
         : null
@@ -1106,13 +1707,15 @@ async function runTurn(message: QueuedMessage): Promise<void> {
       fullName: me.fullName,
       email: me.email,
       origin: "cli" as const,
-      clientSideMCPServerIds: fsServerId ? [fsServerId] : null,
+      // THIS session's server only: Dust routes this message's tool calls
+      // there, which is what makes per-session plan mode exact.
+      clientSideMCPServerIds: s.fsServerId ? [s.fsServerId] : null,
     };
 
     let conversation: Conversation;
     let userMessageId: string;
 
-    if (!conversationId) {
+    if (!s.conversationId) {
       const convRes = await dust.createConversation({
         title: text.substring(0, 50) + (text.length > 50 ? "..." : ""),
         visibility: "unlisted",
@@ -1134,12 +1737,13 @@ async function runTurn(message: QueuedMessage): Promise<void> {
         throw new Error("No message created");
       }
       userMessageId = convRes.value.message.sId;
-      if (epoch !== turnEpoch) {
+      if (s.epoch !== turnEpoch) {
         throw new Error("Signed out.");
       }
-      setConversation(conversation.sId, conversation.title ?? text.slice(0, 50));
+      setConversation(s, conversation.sId, conversation.title ?? text.slice(0, 50));
       emit({ type: "conversations-changed" });
     } else {
+      const conversationId = s.conversationId;
       // Files attached to this message become content fragments first, the
       // same order the CLI uses.
       for (const file of message.files) {
@@ -1175,16 +1779,16 @@ async function runTurn(message: QueuedMessage): Promise<void> {
     // The message is on the server now, so the one-shot state can be
     // committed (committing earlier would desync it on a failed send).
     if (primingThisMessage) {
-      pendingClaudePriming = false;
+      s.pendingClaudePriming = false;
     }
     if (skillsBlockIncluded) {
-      skillRevision += 1;
+      s.skillRevision += 1;
     }
     if (freshSkillCatalogue !== undefined) {
-      lastSentSkillCatalogue = freshSkillCatalogue;
+      s.lastSentSkillCatalogue = freshSkillCatalogue;
     }
-    pendingForcedSkills = [];
-    emitState();
+    s.pendingForcedSkills = [];
+    stateChanged(s);
 
     if (!testClient) void appendTranscriptEntry(conversation.sId, {
       role: "user",
@@ -1199,24 +1803,42 @@ async function runTurn(message: QueuedMessage): Promise<void> {
       throw new Error(`Failed to stream agent answer: ${streamRes.error.message}`);
     }
 
-    for await (const event of streamRes.value.eventStream) {
-      if (epoch !== turnEpoch) {
+    // The stream is read by hand and raced against the abort signal: after an
+    // abort the SDK's stream can fail to end (it logs "Failed processing event
+    // stream" and keeps retrying), which once left a turn "Thinking" forever.
+    // An abort must end the turn whatever the iterator does.
+    const iterator = streamRes.value.eventStream[Symbol.asyncIterator]();
+    const aborted = new Promise<"aborted">((resolve) => {
+      if (signal.aborted) resolve("aborted");
+      else signal.addEventListener("abort", () => resolve("aborted"), { once: true });
+    });
+    while (true) {
+      const step = await Promise.race([iterator.next(), aborted]);
+      if (step === "aborted") {
+        void Promise.resolve(iterator.return?.()).catch(() => undefined);
+        throw new Error("aborted");
+      }
+      if (step.done) {
+        break;
+      }
+      const event = step.value;
+      if (s.epoch !== turnEpoch) {
         break; // torn down (sign-out); teardownSession cancelled server-side
       }
-      if (!activeAgentMessageId && "messageId" in event && event.messageId) {
-        activeAgentMessageId = event.messageId;
+      if (!s.activeAgentMessageId && "messageId" in event && event.messageId) {
+        s.activeAgentMessageId = event.messageId;
       }
 
       if (event.type === "generation_tokens") {
         if (event.classification === "tokens") {
-          if (thinking) {
-            thinking = false;
-            emitState();
+          if (s.thinking) {
+            s.thinking = false;
+            stateChanged(s);
           }
           pushText(event.text);
-        } else if (event.classification === "chain_of_thought" && !thinking) {
-          thinking = true;
-          emitState();
+        } else if (event.classification === "chain_of_thought" && !s.thinking) {
+          s.thinking = true;
+          stateChanged(s);
         }
       } else if (event.type === "agent_error") {
         throw new Error(`Agent error: ${event.error.message}`);
@@ -1224,7 +1846,8 @@ async function runTurn(message: QueuedMessage): Promise<void> {
         throw new Error(`User message error: ${event.error.message}`);
       } else if (event.type === "agent_generation_cancelled") {
         closeBlock();
-        note("info", "Stopped.");
+        endReason = "stopped (server confirmed the cancel)";
+        noteHere("info", s.stopRequested ? "Stopped by you." : "Stopped.");
         break;
       } else if (event.type === "agent_message_success") {
         closeBlock();
@@ -1241,12 +1864,12 @@ async function runTurn(message: QueuedMessage): Promise<void> {
       } else if (event.type === "tool_params") {
         ensureHeader();
         closeBlock();
-        thinking = false;
+        s.thinking = false;
         const name = event.action.toolName;
-        currentToolName = name;
+        s.currentToolName = name;
         const startedAt = Date.now();
         toolStarts.set(event.action.sId, startedAt);
-        actionLabel = event.action.displayLabels?.running ?? "Running a tool";
+        s.actionLabel = event.action.displayLabels?.running ?? "Running a tool";
         append({
           kind: "tool",
           id: event.action.sId,
@@ -1259,11 +1882,11 @@ async function runTurn(message: QueuedMessage): Promise<void> {
           startedAt,
           durationMs: null,
         });
-        emitState();
+        stateChanged(s);
       } else if (event.type === "agent_action_success") {
         const started = toolStarts.get(event.action.sId);
-        actionLabel = null;
-        emit({
+        s.actionLabel = null;
+        tx(s, {
           type: "patch",
           id: event.action.sId,
           patch: {
@@ -1273,16 +1896,16 @@ async function runTurn(message: QueuedMessage): Promise<void> {
               (started ? Date.now() - started : null),
           } as never,
         });
-        emitState();
+        stateChanged(s);
         // A completed tool call is a natural checkpoint for the numbers.
         if (Date.now() - lastUsageRefresh > 8000) {
           lastUsageRefresh = Date.now();
-          void refreshUsage();
+          void refreshUsage(s);
         }
       } else if (event.type === "tool_approve_execution") {
-        const approved = await handleToolApproval(event);
+        const approved = await handleToolApproval(s, event);
         if (!approved) {
-          emit({
+          tx(s, {
             type: "patch",
             id: event.actionId,
             patch: { status: "rejected" } as never,
@@ -1297,15 +1920,16 @@ async function runTurn(message: QueuedMessage): Promise<void> {
       }
     }
     closeBlock();
-    void refreshUsage();
+    void refreshUsage(s);
   } catch (error) {
     closeBlock();
-    if (epoch !== turnEpoch) {
+    if (s.epoch !== turnEpoch) {
       // Torn down mid-turn: nothing to report into a conversation that is gone.
     } else if (signal.aborted) {
-      note("info", "Stopped.");
+      endReason = s.stopRequested ? "stopped by the user" : "aborted";
+      noteHere("info", s.stopRequested ? "Stopped by you." : "Stopped.");
     } else {
-      const recovered = streamed ? null : await tryRecover();
+      const recovered = streamed ? null : await tryRecover(s);
       if (recovered) {
         append({
           kind: "agent-text",
@@ -1314,46 +1938,65 @@ async function runTurn(message: QueuedMessage): Promise<void> {
           streaming: false,
         });
       } else {
-        const message = normalizeError(error).message;
-        note(
+        failed = true;
+        endReason = "error";
+        const errorText = normalizeError(error).message;
+        noteHere(
           "error",
-          conversationId
-            ? `${message}\n\nConversation: ${conversationId}`
-            : message
+          s.conversationId
+            ? `${errorText}\n\nConversation: ${s.conversationId}`
+            : errorText
         );
-        if (/token|unauthor|401|not signed in/i.test(message)) {
+        if (/token|unauthor|401|not signed in/i.test(errorText)) {
           void sessionExpired("Your session expired. Sign in again.");
         }
       }
     }
   } finally {
-    if (cancelFallback) {
-      clearTimeout(cancelFallback);
-      cancelFallback = null;
+    if (s.cancelFallback) {
+      clearTimeout(s.cancelFallback);
+      s.cancelFallback = null;
     }
-    // A torn-down turn can finish after a new session has started a turn of
-    // its own; the per-turn globals then belong to that one.
-    if (controller === turnController) {
-      busy = false;
-      thinking = false;
-      actionLabel = null;
-      pendingAgent = null;
-      inFlightText = "";
-      controller = null;
-      activeClient = null;
-      activeAgentMessageId = null;
-      rejectAllPending();
-      emitState();
+    // A torn-down turn can finish after the session was replaced; its handles
+    // then belong to nobody.
+    if (s.controller === turnController) {
+      // Why the turn ended, for the log (a turn that stops by itself is the
+      // one thing the user cannot otherwise explain).
+      console.log(`[dustm] session ${s.key} turn ended: ${endReason}`);
+      s.busy = false;
+      s.thinking = false;
+      s.actionLabel = null;
+      s.pendingAgent = null;
+      s.inFlightText = "";
+      s.controller = null;
+      s.activeClient = null;
+      s.activeAgentMessageId = null;
+      rejectAllPending(s);
+      if (!s.disposed && s !== selected) {
+        // Finished while another conversation was on screen: the sidebar
+        // marks it until it is looked at.
+        if (failed) s.errored = true;
+        else s.unread = true;
+        // Nothing needs the tools until the next turn.
+        closeFsServer(s);
+      }
+      stateChanged(s);
       emit({ type: "conversations-changed" });
-      // Anything typed while the agent was busy goes out now, in order.
-      drainQueue();
+      if (!signal.aborted && s.epoch === turnEpoch) {
+        toast(s, failed ? "error" : "finished", failed ? "the turn failed" : streamed);
+      }
+      // A slot is free: whoever has waited longest goes first, then this
+      // session's own queue (anything typed while the agent was busy).
+      drainQueue(s);
     }
+    pumpSlots();
   }
 }
 
 // The @dust-tt/client SSE "done" sentinel can exhaust its reconnect budget
 // even though the answer landed; check the server before reporting failure.
-async function tryRecover(): Promise<string | null> {
+async function tryRecover(s: Session): Promise<string | null> {
+  const conversationId = s.conversationId;
   if (!conversationId) {
     return null;
   }
@@ -1382,31 +2025,49 @@ async function tryRecover(): Promise<string | null> {
 // stream that the SDK keeps retrying), the local stream is aborted after this
 // long so the app cannot stay "busy" with the queue stuck behind it.
 export const CANCEL_FALLBACK_MS = 8000;
-let cancelFallback: ReturnType<typeof setTimeout> | null = null;
 
-export async function cancel(): Promise<Result> {
+export async function cancel(source = "internal", sid: string | null = null): Promise<Result> {
+  const s = current();
+  // The renderer says which session it was showing. If another one is on
+  // screen by the time this arrives (a notification click, a switch in
+  // flight), the stop was not meant for it: refuse rather than stop the
+  // wrong turn. Main-internal callers pass no sid.
+  if (sid !== null && sid !== s.key) {
+    console.log(`[dustm] cancel by ${source} ignored: aimed at ${sid}, ${s.key} is on screen`);
+    return { ok: false, error: "That conversation is no longer on screen." };
+  }
   // Like Esc in the CLI, stopping also ends a running loop.
-  stopLoop("stopped");
-  if (!busy) {
+  stopLoopOf(s, "stopped");
+  console.log(`[dustm] session ${s.key} cancel requested by ${source} (busy=${s.busy})`);
+  if (s.busy) s.stopRequested = true;
+  if (!s.busy) {
+    if (s.slotWait) {
+      // Waiting for a slot: stopping drops what was waiting.
+      s.queue = [];
+      s.slotWait = false;
+      slotWaiters = slotWaiters.filter((w) => w !== s);
+      note(s, "info", "Removed the message that was waiting for a free slot.");
+      stateChanged(s);
+    }
     return { ok: true };
   }
   // Pending dialogs would otherwise hold the stream open forever.
-  rejectAllPending();
-  const turnController = controller;
-  if (activeClient && conversationId && activeAgentMessageId) {
-    actionLabel = "Stopping...";
-    emitState();
+  rejectAllPending(s);
+  const turnController = s.controller;
+  if (s.activeClient && s.conversationId && s.activeAgentMessageId) {
+    s.actionLabel = "Stopping...";
+    stateChanged(s);
     // A real server-side cancel: aborting the local stream alone would leave
     // the agent running (and spending credits) in the background.
-    const res = await activeClient.cancelMessageGeneration({
-      conversationId,
-      messageIds: [activeAgentMessageId],
+    const res = await s.activeClient.cancelMessageGeneration({
+      conversationId: s.conversationId,
+      messageIds: [s.activeAgentMessageId],
     });
     if (!res.isErr()) {
-      if (!cancelFallback && turnController) {
-        cancelFallback = setTimeout(() => {
-          cancelFallback = null;
-          if (controller === turnController) {
+      if (!s.cancelFallback && turnController) {
+        s.cancelFallback = setTimeout(() => {
+          s.cancelFallback = null;
+          if (s.controller === turnController) {
             turnController.abort();
           }
         }, CANCEL_FALLBACK_MS);
@@ -1447,35 +2108,57 @@ export async function listConversations(): Promise<Result<ConversationSummary[]>
 // Timings of the last conversation load, for the profile smoke path.
 export const lastLoadTimings: Record<string, number> = {};
 
+/** Switches to a live session (a draft, or one running in the background). */
+export function selectSession(key: string): Result {
+  const target = sessions.get(key);
+  if (!target) {
+    return { ok: false, error: "That session is gone." };
+  }
+  // Any load in flight is superseded: its result is dropped via loadSeq.
+  loadSeq++;
+  loadingConversationId = null;
+  if (target === selected) {
+    emitState();
+    return { ok: true };
+  }
+  select(target);
+  return { ok: true };
+}
+
 /**
- * Opens a past conversation. One load at a time: while one is in flight the
- * UI disables the other conversations, New chat and the composer, and a
- * second call is refused here as well (we chose "block", not "supersede").
+ * Opens a conversation. If a session for it is already live (running in the
+ * background, waiting on an approval...) it is simply selected - nothing is
+ * refetched. Otherwise the history is fetched, and while that is in flight any
+ * newer switch supersedes it: the stale result is dropped (loadSeq), instead of
+ * the UI being locked until it lands.
  */
 export async function loadConversation(id: string): Promise<Result> {
-  if (busy) {
-    return { ok: false, error: "Stop the current turn first." };
-  }
-  if (compacting) {
-    return { ok: false, error: "Wait for the compaction to finish." };
-  }
-  if (loadingConversationId) {
-    return { ok: false, error: "Another conversation is still opening." };
+  const seq = ++loadSeq;
+  const existing = findByConversation(id);
+  if (existing) {
+    loadingConversationId = null;
+    if (existing === selected) {
+      emitState();
+    } else {
+      select(existing);
+    }
+    return { ok: true };
   }
   loadingConversationId = id;
   emitState();
   try {
     const t0 = performance.now();
-    const agentName = selectedAgent()?.name ?? "dust";
+    const agentName = agentOf(current())?.name ?? "dust";
     // Fast path: only the newest messages (history.ts explains why).
     const page = testClient ? null : await fetchHistoryPage(id, { limit: 30, agentName });
     let items: TranscriptItem[];
     let title: string | null;
+    let cursor: number | null;
     let t1 = performance.now();
     if (page) {
       items = page.items;
       title = knownTitles.get(id) ?? null;
-      earlierCursor = page.hasMore ? page.cursor : null;
+      cursor = page.hasMore ? page.cursor : null;
     } else {
       // Fallback: the public full load.
       const dust = await currentClient();
@@ -1489,21 +2172,28 @@ export async function loadConversation(id: string): Promise<Result> {
       }
       items = itemsFromConversation(res.value, agentName);
       title = res.value.title ?? null;
-      earlierCursor = null;
+      cursor = null;
     }
     const t2 = performance.now();
     const loadedTasks = await loadTasks(id);
-    epoch++;
-    discardFilesOnlyConversation();
-    resetConversationState();
-    setConversation(id, title);
-    tasks = loadedTasks;
-    usage = { ...usage, context: null };
-    queue = [];
-    attachments = [];
-    emit({ type: "transcript-reset", items });
-    // After the reset, so the note is visible in the conversation just opened.
-    stopLoop("you opened another conversation");
+    if (seq !== loadSeq) {
+      return { ok: true }; // superseded by a newer switch: drop the stale result
+    }
+    // Another path (a turn creating this very conversation) may have made a
+    // live session for it while the history was in flight.
+    const raced = findByConversation(id);
+    if (raced) {
+      loadingConversationId = null;
+      select(raced);
+      return { ok: true };
+    }
+    const next = createSession(current(), prefsByConversation.get(id) ?? null);
+    setConversation(next, id, title);
+    next.items = items;
+    next.earlierCursor = cursor;
+    next.tasks = loadedTasks;
+    loadingConversationId = null;
+    select(next);
     const t3 = performance.now();
     Object.assign(lastLoadTimings, {
       path: page ? 1 : 0,
@@ -1512,82 +2202,67 @@ export async function loadConversation(id: string): Promise<Result> {
       emitMs: Math.round(t3 - t2),
       items: items.length,
     });
-    void refreshUsage();
     return { ok: true };
   } finally {
-    loadingConversationId = null;
-    emitState();
+    if (seq === loadSeq && loadingConversationId === id) {
+      loadingConversationId = null;
+      emitState();
+    }
   }
 }
 
 /** Fetches the page of messages before the oldest one on screen. */
 export async function loadEarlier(): Promise<Result> {
-  const id = conversationId;
-  if (!id || earlierCursor === null || loadingEarlier) {
+  const s = current();
+  const id = s.conversationId;
+  if (!id || s.earlierCursor === null || s.loadingEarlier) {
     return { ok: true };
   }
-  loadingEarlier = true;
-  emitState();
+  s.loadingEarlier = true;
+  stateChanged(s);
   try {
     const page = await fetchHistoryPage(id, {
       limit: 30,
-      beforeRank: earlierCursor,
-      agentName: selectedAgent()?.name ?? "dust",
+      beforeRank: s.earlierCursor,
+      agentName: agentOf(s)?.name ?? "dust",
     });
     if (!page) {
       return { ok: false, error: "Could not load earlier messages." };
     }
-    if (conversationId !== id) {
-      return { ok: true }; // the user moved on; drop the stale page
+    if (s.disposed || s.conversationId !== id) {
+      return { ok: true }; // the session moved on; drop the stale page
     }
-    earlierCursor = page.hasMore ? page.cursor : null;
-    emit({ type: "transcript-prepend", items: page.items });
+    s.earlierCursor = page.hasMore ? page.cursor : null;
+    tx(s, { type: "transcript-prepend", items: page.items });
     return { ok: true };
   } finally {
-    loadingEarlier = false;
-    emitState();
+    s.loadingEarlier = false;
+    stateChanged(s);
   }
 }
 
-// Everything that belongs to the conversation being discarded and must not
-// leak into the next one. Mirrors Chat.tsx's startNewConversation.
-// Used for /new, for opening another conversation (which, unlike in the CLI,
-// can happen mid-session here) and for sign-out.
-function resetConversationState(loopReason?: string): void {
-  // Memories the agent was primed with are gone with the old conversation, so
-  // re-arm using the context already read (not a fresh disk read). An opened
-  // conversation gets them too: it may never have been primed.
-  if (claudeCodeMode && claudeContext) {
-    pendingClaudePriming = true;
-  }
-  // The catalogue-freshness comparison starts over (an opened conversation may
-  // never have received the catalogue); a forced skill was a one-off for the
-  // discarded conversation and is dropped, not carried.
-  lastSentSkillCatalogue = null;
-  skillRevision = 0;
-  pendingForcedSkills = [];
-  attachments = [];
-  // A loop is bound to the conversation it was started in: it must not
-  // carry on posting into a different one.
-  if (loopReason) {
-    stopLoop(loopReason);
-  }
-}
-
+/**
+ * /new and /clear: a fresh draft session becomes the view. The session it
+ * replaces on screen is NOT touched: if it is running it keeps going in the
+ * background; if it is idle it is retired (select() does that).
+ */
 export function newConversation(): Result {
-  if (isConversationBusy() || loadingConversationId) {
-    return { ok: false, error: "Wait for the current work to finish." };
+  // A fresh switch supersedes any load in flight.
+  loadSeq++;
+  loadingConversationId = null;
+  const cur = current();
+  if (
+    !cur.conversationId &&
+    cur.items.length === 0 &&
+    cur.attachments.length === 0 &&
+    !cur.busy &&
+    !cur.slotWait
+  ) {
+    // Already on an empty draft.
+    emitView();
+    return { ok: true };
   }
-  epoch++;
-  discardFilesOnlyConversation();
-  setConversation(null, null);
-  earlierCursor = null;
-  tasks = [];
-  queue = [];
-  usage = { ...usage, context: null };
-  resetConversationState("/new started a fresh conversation");
-  emit({ type: "transcript-reset", items: [] });
-  emitState();
+  select(createSession(cur));
   return { ok: true };
 }
 
@@ -1595,7 +2270,10 @@ export function selectAgent(id: string, persist = true): Result {
   if (!agents.some((a) => a.sId === id)) {
     return { ok: false, error: "Unknown agent." };
   }
-  agentId = id;
+  // Per session: switching agent while looking at B must not change who A is
+  // talking to. It is also the default for the next new conversation.
+  current().agentId = id;
+  defaultAgentId = id;
   if (persist) {
     void updateSettings({ agentId: id });
   }
@@ -1618,7 +2296,7 @@ async function catalogue(): Promise<{
 
 export async function listModels(): Promise<Result<ModelList>> {
   const { models, source, degraded } = await catalogue();
-  const agentModelId = selectedAgent()?.model?.modelId ?? null;
+  const agentModelId = agentOf(current())?.model?.modelId ?? null;
   const rows: ModelRow[] = models.map((m) => {
     const tags: string[] = [];
     if (degraded.has(m.modelId)) tags.push("degraded");
@@ -1645,9 +2323,10 @@ export async function listModels(): Promise<Result<ModelList>> {
 }
 
 export async function setModel(query: string | null): Promise<Result> {
+  const s = current();
   if (query === null) {
-    modelOverride = null;
-    emitState();
+    s.modelOverride = null;
+    stateChanged(s);
     return { ok: true };
   }
   const { models } = await catalogue();
@@ -1657,8 +2336,8 @@ export async function setModel(query: string | null): Promise<Result> {
   if (!choice) {
     return { ok: false, error: `Unknown model "${query}".` };
   }
-  modelOverride = choice;
-  emitState();
+  s.modelOverride = choice;
+  stateChanged(s);
   return { ok: true };
 }
 
@@ -1667,42 +2346,49 @@ export function setEffort(next: Effort | null): Result {
   if (next !== null && !allowed.includes(next)) {
     return { ok: false, error: "Unknown effort." };
   }
-  effort = next;
-  emitState();
+  const s = current();
+  s.effort = next;
+  stateChanged(s);
   return { ok: true };
 }
 
 // ------------------------------------------------------------------ usage
 
-async function refreshUsage(): Promise<void> {
+async function refreshUsage(s: Session): Promise<void> {
   if (testClient) {
     return;
   }
-  const forConversation = conversationId;
-  const forEpoch = epoch;
+  const forConversation = s.conversationId;
+  const forEpoch = s.epoch;
+  const forIdentity = identityEpoch;
   const [context, credits] = await Promise.all([
     forConversation ? getContextUsage(forConversation) : Promise.resolve(null),
     getConsumedCredits(),
   ]);
-  if (forEpoch !== epoch || forConversation !== conversationId) {
-    // The conversation changed (or the session was torn down) while this was
-    // in flight: its context figure belongs to the old one. Dropped whole;
-    // the next refresh brings the credits.
+  if (forIdentity !== identityEpoch) {
+    return; // signed out meanwhile
+  }
+  // Credits are account-wide, so they are kept whatever became of the session.
+  if (credits) {
+    creditsUsage = { consumed: credits.consumed, limit: credits.limit };
+  }
+  if (s.disposed || forEpoch !== s.epoch || forConversation !== s.conversationId) {
+    // The session was retired or moved to another conversation while this was
+    // in flight: its context figure belongs to the old one.
+    if (selected) stateChanged(selected);
     return;
   }
-  usage = {
-    context: context
-      ? {
-          used: context.contextUsage,
-          size: context.contextSize,
-          modelId: context.modelId,
-        }
-      : usage.context,
-    credits: credits
-      ? { consumed: credits.consumed, limit: credits.limit }
-      : usage.credits,
-  };
-  emitState();
+  if (context) {
+    s.context = {
+      used: context.contextUsage,
+      size: context.contextSize,
+      modelId: context.modelId,
+    };
+  }
+  stateChanged(s);
+  if (s !== selected && selected) {
+    stateChanged(selected);
+  }
 }
 
 // ------------------------------------------------------------------ commands
@@ -1711,71 +2397,68 @@ async function refreshUsage(): Promise<void> {
 // handled in the renderer: /help /switch /resume /model /effort /attach
 // /plan /auto /new /clear /exit). Each is a port of the matching handler in
 // src/ui/commands/Chat.tsx, reusing the shared modules and keeping the rules
-// AGENTS.md states for them.
+// AGENTS.md states for them. Each acts on the session on screen.
 
-function noteLines(lines: string[]): void {
-  note("info", lines.join("\n"));
+function noteLines(s: Session, lines: string[]): void {
+  note(s, "info", lines.join("\n"));
 }
-const noteLinesNow = noteLines;
 
 export async function runCommand(name: string, args: string): Promise<Result> {
+  const s = current();
   switch (name) {
     case "compact":
-      return runCompact(args);
+      return runCompact(s, args);
     case "btw":
-      return runBtw(args);
+      return runBtw(s, args);
     case "loop":
-      return runLoop(args);
+      return runLoop(s, args);
     case "skills":
-      return runSkills(args);
+      return runSkills(s, args);
     case "claude-code-mode":
-      return toggleClaudeCodeMode();
+      return toggleClaudeCodeMode(s);
     case "tasks":
-      return runTasks();
+      return runTasks(s);
     case "clear-files":
-      attachments = [];
-      discardIfNothingAttached();
-      emitState();
+      s.attachments = [];
+      discardIfNothingAttached(s);
+      stateChanged(s);
       return { ok: true };
     default:
       return { ok: false, error: `Unknown command /${name}.` };
   }
 }
 
-async function runTasks(): Promise<Result> {
-  if (!conversationId) {
-    noteLines([
+async function runTasks(s: Session): Promise<Result> {
+  if (!s.conversationId) {
+    noteLines(s, [
       "Tasks: none yet.",
       "  todo_write creates the list the first time the agent calls it.",
     ]);
     return { ok: true };
   }
-  const list = await loadTasks(conversationId);
-  noteLines(["Tasks:", ...formatTaskList(list).split("\n")]);
+  const list = await loadTasks(s.conversationId);
+  noteLines(s, ["Tasks:", ...formatTaskList(list).split("\n")]);
   return { ok: true };
 }
 
 // ---------------------------------------------------------------- /compact
 
-function runCompact(args: string): Result {
-  const id = conversationId;
+function runCompact(s: Session, args: string): Result {
+  const id = s.conversationId;
   if (!id) {
-    noteLines([
+    noteLines(s, [
       "Nothing to compact - this conversation hasn't started yet.",
       "  Send a message first.",
     ]);
     return { ok: true };
   }
-  if (compacting) {
-    noteLines(["A compaction is already running - give it a moment."]);
+  if (s.compacting) {
+    noteLines(s, ["A compaction is already running - give it a moment."]);
     return { ok: true };
   }
-  if (loadingConversationId) {
-    noteLines(["A conversation is opening - run /compact once it has."]);
-    return { ok: true };
-  }
-  if (busy) {
-    noteLines([
+  // Busy gating is per conversation: another session's turn is irrelevant.
+  if (s.busy) {
+    noteLines(s, [
       "The agent is still working - a turn has to finish before compacting.",
       "  Wait for it (or stop it), then run /compact again.",
     ]);
@@ -1784,30 +2467,30 @@ function runCompact(args: string): Result {
   // Marked busy before any await, so a message typed meanwhile queues
   // instead of racing the compaction server-side (the bug this shipped with
   // in the CLI: see AGENTS.md).
-  compacting = "Compacting…";
-  emitState();
-  const compactEpoch = epoch;
+  s.compacting = "Compacting…";
+  stateChanged(s);
+  const compactEpoch = s.epoch;
   void (async () => {
-    // A sign-out mid-compaction replaces the conversation; its outcome must
-    // not be written into whatever comes next.
-    const noteLines = (lines: string[]) => {
-      if (epoch === compactEpoch) noteLinesNow(lines);
+    // A sign-out mid-compaction replaces the session; its outcome must not be
+    // written into whatever comes next.
+    const say = (lines: string[]) => {
+      if (s.epoch === compactEpoch) noteLines(s, lines);
     };
     try {
       const query = args.trim() || undefined;
       const { models } = await catalogue();
       if (query && !resolveModel(query, models)) {
-        noteLines([
+        say([
           `Unknown model "${query}".`,
           "  /compact takes the same model ids /model does.",
         ]);
         return;
       }
       const before = await getContextUsage(id);
-      const agent = selectedAgent();
+      const agent = agentOf(s);
       const chosen = resolveCompactionModel({
         query,
-        override: modelOverride,
+        override: s.modelOverride,
         conversationModel: before,
         agentModel: agent?.model
           ? { modelId: agent.model.modelId, providerId: agent.model.providerId }
@@ -1815,7 +2498,7 @@ function runCompact(args: string): Result {
         catalogue: models,
       });
       if (!chosen) {
-        noteLines([
+        say([
           "No model to summarize with.",
           "  Compaction has to name a concrete provider/model pair. This agent",
           "  runs on an `auto` selector, which only resolves to one per message,",
@@ -1824,8 +2507,8 @@ function runCompact(args: string): Result {
         ]);
         return;
       }
-      compacting = `Compacting with ${chosen.label}…`;
-      emitState();
+      s.compacting = `Compacting with ${chosen.label}…`;
+      stateChanged(s);
       const started = await startCompaction({
         conversationId: id,
         model: { providerId: chosen.providerId, modelId: chosen.modelId },
@@ -1833,7 +2516,7 @@ function runCompact(args: string): Result {
       if (!started.ok) {
         // The server's wording is shown verbatim: each 409 tells the user a
         // different thing to do.
-        noteLines([
+        say([
           `Compaction failed: ${started.message}`,
           ...(started.detail ? [`  ${started.detail}`] : []),
         ]);
@@ -1844,21 +2527,21 @@ function runCompact(args: string): Result {
         compactionMessageId: started.compactionMessageId,
       });
       if (outcome.status === "timeout") {
-        noteLines([
+        say([
           "Compaction is taking longer than expected - still running server-side.",
           "  The context figure will drop when it lands.",
         ]);
         return;
       }
       if (outcome.status === "failed") {
-        noteLines([
+        say([
           "Compaction failed server-side. Nothing was changed.",
           "  Long conversations may keep degrading; /new starts a fresh one.",
         ]);
         return;
       }
       const after = await getContextUsage(id);
-      noteLines([
+      say([
         "Compacted.",
         ...(before && after
           ? [
@@ -1870,13 +2553,14 @@ function runCompact(args: string): Result {
         "  Everything above is still on screen, but the agent now sees",
         "  a summary of it rather than the full text.",
       ]);
-      void refreshUsage();
+      void refreshUsage(s);
     } catch (error) {
-      noteLines([`Compaction failed: ${normalizeError(error).message}`]);
+      say([`Compaction failed: ${normalizeError(error).message}`]);
     } finally {
-      compacting = null;
-      emitState();
-      drainQueue();
+      s.compacting = null;
+      if (s !== selected && !s.disposed) s.unread = true;
+      stateChanged(s);
+      drainQueue(s);
     }
   })();
   return { ok: true };
@@ -1884,37 +2568,37 @@ function runCompact(args: string): Result {
 
 // -------------------------------------------------------------------- /btw
 
-function runBtw(args: string): Result {
+function runBtw(s: Session, args: string): Result {
   const question = args.trim();
   if (!question) {
-    noteLines([
+    noteLines(s, [
       "Usage: /btw <question>",
       "  Asks the agent a quick side question. The answer is shown here but",
       "  never added to the conversation, and it works while a turn is running.",
     ]);
     return { ok: true };
   }
-  const agent = selectedAgent();
+  const agent = agentOf(s);
   if (!agent || !me) {
-    noteLines(["/btw: no agent selected yet."]);
+    noteLines(s, ["/btw: no agent selected yet."]);
     return { ok: true };
   }
-  if (btwStatus !== null) {
-    noteLines(["A /btw question is already being answered - give it a moment."]);
+  if (s.btwStatus !== null) {
+    noteLines(s, ["A /btw question is already being answered - give it a moment."]);
     return { ok: true };
   }
   const modelSelection = buildModelSelection(
-    modelOverride,
-    effort,
+    s.modelOverride,
+    s.effort,
     agent.model
       ? { modelId: agent.model.modelId, providerId: agent.model.providerId }
       : null
   );
   const user = { username: me.username, fullName: me.fullName, email: me.email };
   const id = newId();
-  btwStatus = `btw: asking @${agent.name}…`;
-  append({ kind: "btw", id, question, status: "pending", answer: "" });
-  emitState();
+  s.btwStatus = `btw: asking @${agent.name}…`;
+  appendItem(s, { kind: "btw", id, question, status: "pending", answer: "" });
+  stateChanged(s);
 
   // Deliberately NOT part of isConversationBusy (utils/btw.ts): it runs in a
   // separate conversation, so it cannot race the main turn, and blocking the
@@ -1925,12 +2609,12 @@ function runBtw(args: string): Result {
       const result = await askBtw({
         question,
         agentId: agent.sId,
-        mainConversationId: conversationId,
-        inFlightAnswer: busy ? inFlightText : undefined,
+        mainConversationId: s.conversationId,
+        inFlightAnswer: s.busy ? s.inFlightText : undefined,
         user,
         modelSelection,
       });
-      emit({
+      tx(s, {
         type: "patch",
         id,
         patch: (result.ok
@@ -1938,14 +2622,15 @@ function runBtw(args: string): Result {
           : { status: "error", answer: `/btw failed: ${result.message}` }) as never,
       });
     } catch (error) {
-      emit({
+      tx(s, {
         type: "patch",
         id,
         patch: { status: "error", answer: normalizeError(error).message } as never,
       });
     } finally {
-      btwStatus = null;
-      emitState();
+      s.btwStatus = null;
+      if (s !== selected && !s.disposed) s.unread = true;
+      stateChanged(s);
     }
   })();
   return { ok: true };
@@ -1953,20 +2638,21 @@ function runBtw(args: string): Result {
 
 // ------------------------------------------------------------------- /loop
 
-function runLoop(args: string): Result {
+function runLoop(s: Session, args: string): Result {
   const parsed = parseLoopCommand(args);
   if (!parsed.ok) {
-    noteLines([`↻ ${parsed.error}`]);
+    noteLines(s, [`↻ ${parsed.error}`]);
     return { ok: true };
   }
   const command = parsed.value;
 
   if (command.kind === "status") {
     noteLines(
-      loop
+      s,
+      s.loop
         ? [
-            `↻ Looping ${describeLoop(loop)}`,
-            `  Prompt: ${loop.prompt}`,
+            `↻ Looping ${describeLoop(s.loop)}`,
+            `  Prompt: ${s.loop.prompt}`,
             "  /loop stop to cancel.",
           ]
         : [
@@ -1978,27 +2664,27 @@ function runLoop(args: string): Result {
     return { ok: true };
   }
   if (command.kind === "stop") {
-    if (!stopLoop("cancelled")) {
-      noteLines(["↻ No loop running."]);
+    if (!stopLoopOf(s, "cancelled")) {
+      noteLines(s, ["↻ No loop running."]);
     }
     return { ok: true };
   }
-  if (loop) {
-    noteLines([
+  if (s.loop) {
+    noteLines(s, [
       "↻ A loop is already running - /loop stop it first.",
-      `  Currently: ${describeLoop(loop)}`,
+      `  Currently: ${describeLoop(s.loop)}`,
     ]);
     return { ok: true };
   }
-  if (!folder || !selectedAgent()) {
-    noteLines(["↻ Choose a working folder (and an agent) before starting a loop."]);
+  if (!folder || !agentOf(s)) {
+    noteLines(s, ["↻ Choose a working folder (and an agent) before starting a loop."]);
     return { ok: true };
   }
 
   // The limits (30s floor, run ceiling) live in loopController.ts and are
   // enforced by parseLoopCommand: they exist to stop an unattended loop
   // spending a credit balance.
-  loop = {
+  s.loop = {
     id: `loop_${Date.now()}`,
     intervalMs: command.intervalMs,
     prompt: command.prompt,
@@ -2006,64 +2692,75 @@ function runLoop(args: string): Result {
     maxRuns: command.maxRuns,
     skipped: 0,
   };
-  noteLines([
+  noteLines(s, [
     `↻ Looping every ${formatInterval(command.intervalMs)}, up to ${command.maxRuns} runs.`,
     `  Prompt: ${command.prompt}`,
     "  Runs once now, then on the interval. Stop or /loop stop to cancel.",
   ]);
-  loopTimer = setInterval(tickLoop, command.intervalMs);
-  tickLoop();
+  s.loopTimer = setInterval(() => tickLoop(s), command.intervalMs);
+  tickLoop(s);
   return { ok: true };
 }
 
 // A tick never starts a turn directly: it goes through dispatch() like any
-// message, so it queues behind a running turn. A tick that fires while its
-// predecessor is still unsent or running is skipped, not stacked.
-function tickLoop(): void {
-  const current = loop;
-  if (!current) {
+// message, so it queues behind a running turn (and, under the concurrency cap,
+// waits for a slot). A tick that fires while its predecessor is still unsent
+// or running is skipped, not stacked. The loop belongs to its session: it keeps
+// running while another conversation is on screen.
+function tickLoop(s: Session): void {
+  const running = s.loop;
+  if (!running || s.disposed) {
     return;
   }
-  if (current.runs >= current.maxRuns) {
-    stopLoop(`reached its ${current.maxRuns}-run limit`);
+  if (running.runs >= running.maxRuns) {
+    stopLoopOf(s, `reached its ${running.maxRuns}-run limit`);
     return;
   }
-  if (isConversationBusy() || loadingConversationId || queue.some((m) => m.loop)) {
-    loop = { ...current, skipped: current.skipped + 1 };
-    emitState();
+  if (isConversationBusy(s) || s.queue.some((m) => m.loop)) {
+    s.loop = { ...running, skipped: running.skipped + 1 };
+    stateChanged(s);
     return;
   }
-  loop = { ...current, runs: current.runs + 1 };
-  dispatch({ id: newId(), text: current.prompt, files: [], loop: true });
-  emitState();
+  s.loop = { ...running, runs: running.runs + 1 };
+  dispatch(s, { id: newId(), text: running.prompt, files: [], loop: true });
+  stateChanged(s);
 }
 
-export function stopLoop(reason: string, options: { quiet?: boolean } = {}): boolean {
-  const current = loop;
-  if (!current) {
+function stopLoopOf(s: Session, reason: string, options: { quiet?: boolean } = {}): boolean {
+  const running = s.loop;
+  if (!running) {
     return false;
   }
-  loop = null;
-  if (loopTimer) {
-    clearInterval(loopTimer);
-    loopTimer = null;
+  s.loop = null;
+  if (s.loopTimer) {
+    clearInterval(s.loopTimer);
+    s.loopTimer = null;
   }
   // Pending loop ticks go with it.
-  queue = queue.filter((m) => !m.loop);
+  s.queue = s.queue.filter((m) => !m.loop);
+  if (s.slotWait && s.queue.length === 0) {
+    s.slotWait = false;
+    slotWaiters = slotWaiters.filter((w) => w !== s);
+  }
   if (options.quiet) {
-    emitState();
+    stateChanged(s);
     return true;
   }
-  noteLines([
+  noteLines(s, [
     `↻ Loop stopped - ${reason}.`,
-    `  Ran ${current.runs} of ${current.maxRuns}${
-      current.skipped > 0
-        ? `, skipped ${current.skipped} tick${current.skipped === 1 ? "" : "s"} while the agent was busy`
+    `  Ran ${running.runs} of ${running.maxRuns}${
+      running.skipped > 0
+        ? `, skipped ${running.skipped} tick${running.skipped === 1 ? "" : "s"} while the agent was busy`
         : ""
     }.`,
   ]);
-  emitState();
+  stateChanged(s);
   return true;
+}
+
+/** Stops the loop of the session on screen (smoke seam and /loop stop). */
+export function stopLoop(reason: string, options: { quiet?: boolean } = {}): boolean {
+  return stopLoopOf(current(), reason, options);
 }
 
 // ----------------------------------------------------------------- skills
@@ -2071,7 +2768,8 @@ export function stopLoop(reason: string, options: { quiet?: boolean } = {}): boo
 export async function listSkills(): Promise<
   Result<{ skills: SkillRow[]; claudeCodeMode: boolean; summary: string[] }>
 > {
-  const set = await loadSkills({ includeClaudeSkills: claudeCodeMode });
+  const s = current();
+  const set = await loadSkills({ includeClaudeSkills: s.claudeCodeMode });
   return {
     ok: true,
     value: {
@@ -2081,7 +2779,7 @@ export async function listSkills(): Promise<
         source: k.source,
         enabled: k.enabled,
       })),
-      claudeCodeMode,
+      claudeCodeMode: s.claudeCodeMode,
       summary: summarizeSkills(set),
     },
   };
@@ -2089,7 +2787,8 @@ export async function listSkills(): Promise<
 
 /** Commits the checklist: whatever is not checked is the disabled set. */
 export async function setSkillsEnabled(enabledNames: string[]): Promise<Result> {
-  const set = await loadSkills({ includeClaudeSkills: claudeCodeMode });
+  const s = current();
+  const set = await loadSkills({ includeClaudeSkills: s.claudeCodeMode });
   const enabled = new Set(enabledNames);
   const disabled = new Set(
     set.skills.map((k) => k.name).filter((n) => !enabled.has(n))
@@ -2099,30 +2798,30 @@ export async function setSkillsEnabled(enabledNames: string[]): Promise<Result> 
   // worse than saying so.
   const result = await saveDisabledSkillNames(disabled);
   if (!result.ok) {
-    noteLines([
+    noteLines(s, [
       `Could not save which skills are enabled: ${result.error}`,
       "  The change applies to this session only.",
     ]);
     return { ok: false, error: result.error };
   }
-  noteLines([
+  noteLines(s, [
     `Skills: ${set.skills.length - disabled.size} of ${set.skills.length} enabled.`,
     ...(disabled.size > 0 ? [`  Off: ${[...disabled].sort().join(", ")}`] : []),
   ]);
   return { ok: true };
 }
 
-async function runSkills(args: string): Promise<Result> {
+async function runSkills(s: Session, args: string): Promise<Result> {
   const query = args.trim();
-  const set = await loadSkills({ includeClaudeSkills: claudeCodeMode });
+  const set = await loadSkills({ includeClaudeSkills: s.claudeCodeMode });
   if (!query) {
-    noteLines(["Skills:", ...summarizeSkills(set)]);
+    noteLines(s, ["Skills:", ...summarizeSkills(set)]);
     return { ok: true };
   }
   const lookup = resolveSkill(set, query);
   if (lookup.kind === "not-found") {
     const available = set.skills.map((k) => k.name);
-    noteLines([
+    noteLines(s, [
       `No skill named "${query}".`,
       ...(available.length > 0
         ? [`Available: ${available.join(", ")}`]
@@ -2131,7 +2830,7 @@ async function runSkills(args: string): Promise<Result> {
     return { ok: true };
   }
   if (lookup.kind === "ambiguous") {
-    noteLines([
+    noteLines(s, [
       `"${query}" matches more than one skill - be more specific:`,
       ...lookup.candidates.map((c) => `  ${c.name} (${c.source})`),
     ]);
@@ -2139,43 +2838,43 @@ async function runSkills(args: string): Promise<Result> {
   }
   const skill = lookup.skill;
   // Deduped by name so repeating /skills <name> doesn't queue the body twice.
-  pendingForcedSkills = [
-    ...pendingForcedSkills.filter((k) => k.name !== skill.name),
+  s.pendingForcedSkills = [
+    ...s.pendingForcedSkills.filter((k) => k.name !== skill.name),
     skill,
   ];
   noteLines(
-    pendingForcedSkills.length === 1
+    s,
+    s.pendingForcedSkills.length === 1
       ? [
           `${skill.name} will be sent in full with your next message.`,
           `  ${skill.filePath} · ${formatFileSize(skill.body.length)}`,
         ]
       : [
-          `Forcing ${pendingForcedSkills.length} skills into your next message: ${pendingForcedSkills
+          `Forcing ${s.pendingForcedSkills.length} skills into your next message: ${s.pendingForcedSkills
             .map((k) => k.name)
             .join(", ")}`,
         ]
   );
-  emitState();
+  stateChanged(s);
   return { ok: true };
 }
 
 // ------------------------------------------------------- /claude-code-mode
 
-// The ONE place the skills singleton is set (areClaudeSkillsEnabled() is read
-// by read_skill in the MCP layer; see AGENTS.md). Any new path that flips the
-// mode must call this rather than setting the singleton itself.
-function applyClaudeCodeMode(on: boolean): void {
-  claudeCodeMode = on;
-  setClaudeSkillsEnabled(on);
-  emitState();
+// The ONE place a session's claudeCodeMode is set. read_skill reads it through
+// that session's ToolContext (areClaudeSkillsEnabled), not through the
+// module-level singleton in skillStore.ts, which this app never writes.
+function applyClaudeCodeMode(s: Session, on: boolean): void {
+  s.claudeCodeMode = on;
+  stateChanged(s);
 }
 
-async function toggleClaudeCodeMode(): Promise<Result> {
-  if (claudeCodeMode) {
-    applyClaudeCodeMode(false);
-    claudeContext = null;
-    pendingClaudePriming = false;
-    noteLines([
+async function toggleClaudeCodeMode(s: Session): Promise<Result> {
+  if (s.claudeCodeMode) {
+    applyClaudeCodeMode(s, false);
+    s.claudeContext = null;
+    s.pendingClaudePriming = false;
+    noteLines(s, [
       "◊ Claude Code mode off - memories already sent stay in this conversation's history.",
       "  Run /new for a conversation without them.",
     ]);
@@ -2184,16 +2883,16 @@ async function toggleClaudeCodeMode(): Promise<Result> {
   const context = await loadClaudeContext();
   const summary = summarizeContext(context);
   if (!hasAnyContext(context)) {
-    noteLines([
+    noteLines(s, [
       "◊ Claude Code mode not enabled - no memories or instruction files found.",
       ...summary.map((line) => `  ${line}`),
     ]);
     return { ok: true };
   }
-  claudeContext = context;
-  pendingClaudePriming = true;
-  applyClaudeCodeMode(true);
-  noteLines([
+  s.claudeContext = context;
+  s.pendingClaudePriming = true;
+  applyClaudeCodeMode(s, true);
+  noteLines(s, [
     "◊ Claude Code mode on - the agent will be primed with:",
     ...summary.map((line) => `  · ${line}`),
     "  Sent once, with your next message. It is not shown in the transcript.",
@@ -2210,25 +2909,14 @@ const IMAGE_MIME_EXT: Record<string, string> = {
   "image/webp": "webp",
 };
 
-// Uploads run one at a time: the first may have to create the (empty)
-// conversation the files belong to, as the CLI does, and two uploads racing
-// would create two.
-let uploadChain: Promise<void> = Promise.resolve();
-
-// The conversation the first upload had to create (as the CLI does: an upload
-// needs a conversation id), until a message is posted into it. Until then it
-// is empty, and it is deleted rather than left behind in the user's history
-// if every upload fails, the chips are all removed, or the user moves on.
-let filesOnlyConversationId: string | null = null;
-
-function discardFilesOnlyConversation(): void {
-  const id = filesOnlyConversationId;
+function discardFilesOnlyConversation(s: Session): void {
+  const id = s.filesOnlyConversationId;
   if (!id) {
     return;
   }
-  filesOnlyConversationId = null;
-  if (conversationId === id) {
-    setConversation(null, null);
+  s.filesOnlyConversationId = null;
+  if (s.conversationId === id) {
+    setConversation(s, null, null);
   }
   void deleteEmptyConversation(id).then(() => emit({ type: "conversations-changed" }));
 }
@@ -2245,24 +2933,25 @@ async function deleteEmptyConversation(id: string): Promise<void> {
 }
 
 /** Drops the files-only conversation once nothing is left to send with it. */
-function discardIfNothingAttached(): void {
+function discardIfNothingAttached(s: Session): void {
   if (
-    filesOnlyConversationId &&
-    !attachments.some((a) => a.status === "ready" || a.status === "uploading")
+    s.filesOnlyConversationId &&
+    !s.attachments.some((a) => a.status === "ready" || a.status === "uploading")
   ) {
-    discardFilesOnlyConversation();
+    discardFilesOnlyConversation(s);
   }
 }
 
 async function ensureConversationForFiles(
+  s: Session,
   dust: DustAPI,
   title: string,
   uploadEpoch: number
 ): Promise<string> {
-  if (conversationId) {
-    return conversationId;
+  if (s.conversationId) {
+    return s.conversationId;
   }
-  if (busy) {
+  if (s.busy) {
     // The first message is creating the conversation right now; creating a
     // second one here would split the files from the message.
     throw new Error("The conversation is still being created. Attach it again in a moment.");
@@ -2276,29 +2965,30 @@ async function ensureConversationForFiles(
     throw new Error(`Failed to create conversation: ${res.error.message}`);
   }
   const created = res.value.conversation.sId;
-  if (uploadEpoch !== epoch) {
-    // The user started a new chat or opened another conversation while this
-    // was being created: it must not hijack the one now on screen.
+  if (uploadEpoch !== s.epoch) {
+    // The session was retired while this was being created: it must not
+    // leave a stray conversation behind.
     void deleteEmptyConversation(created);
     throw new Error("Cancelled: the conversation changed.");
   }
-  filesOnlyConversationId = created;
-  setConversation(created, title);
+  s.filesOnlyConversationId = created;
+  setConversation(s, created, title);
   emit({ type: "conversations-changed" });
   return created;
 }
 
 function queueUpload(
+  s: Session,
   entry: AttachmentInfo & { fileId?: string },
   read: () => Promise<Buffer>
 ): void {
-  attachments = [...attachments, entry];
-  emitState();
-  const uploadEpoch = epoch;
-  uploadChain = uploadChain.then(async () => {
+  s.attachments = [...s.attachments, entry];
+  stateChanged(s);
+  const uploadEpoch = s.epoch;
+  s.uploadChain = s.uploadChain.then(async () => {
     try {
-      if (!attachments.includes(entry) || uploadEpoch !== epoch) {
-        return; // removed, or the conversation changed, before its turn came
+      if (!s.attachments.includes(entry) || uploadEpoch !== s.epoch) {
+        return; // removed, or the session was replaced, before its turn came
       }
       const data = await read();
       const dust = await currentClient();
@@ -2306,6 +2996,7 @@ function queueUpload(
         throw new Error("Not signed in.");
       }
       const convId = await ensureConversationForFiles(
+        s,
         dust,
         `File Upload: ${entry.name}`.slice(0, 50),
         uploadEpoch
@@ -2324,8 +3015,8 @@ function queueUpload(
       if (up.isErr()) {
         throw new Error(`Upload failed: ${up.error.message}`);
       }
-      if (uploadEpoch !== epoch) {
-        return; // uploaded into a conversation the user has left
+      if (uploadEpoch !== s.epoch) {
+        return; // uploaded into a session that was retired
       }
       entry.fileId = up.value.id;
       entry.size = data.length;
@@ -2334,14 +3025,15 @@ function queueUpload(
       entry.status = "error";
       entry.error = normalizeError(error).message;
     }
-    if (uploadEpoch === epoch) {
-      discardIfNothingAttached();
+    if (uploadEpoch === s.epoch) {
+      discardIfNothingAttached(s);
     }
-    emitState();
+    stateChanged(s);
   });
 }
 
 export async function attachPaths(paths: string[]): Promise<Result> {
+  const s = current();
   for (const p of paths.slice(0, 20)) {
     if (typeof p !== "string" || !p) {
       continue;
@@ -2360,6 +3052,7 @@ export async function attachPaths(paths: string[]): Promise<Result> {
       }
       const info = infoRes.value;
       queueUpload(
+        s,
         {
           id: newId(),
           name: info.name,
@@ -2371,8 +3064,8 @@ export async function attachPaths(paths: string[]): Promise<Result> {
         () => readFile(p)
       );
     } catch (error) {
-      attachments = [
-        ...attachments,
+      s.attachments = [
+        ...s.attachments,
         {
           id: newId(),
           name,
@@ -2383,7 +3076,7 @@ export async function attachPaths(paths: string[]): Promise<Result> {
           error: normalizeError(error).message,
         },
       ];
-      emitState();
+      stateChanged(s);
     }
   }
   return { ok: true };
@@ -2402,6 +3095,7 @@ export function attachImage(bytes: Uint8Array, mime: string): Result {
   }
   const buffer = Buffer.from(bytes);
   queueUpload(
+    current(),
     {
       id: newId(),
       name: `pasted-image-${Date.now()}.${ext}`,
@@ -2433,9 +3127,10 @@ export async function attachClipboard(): Promise<Result<boolean>> {
 }
 
 export function removeAttachment(id: string): Result {
-  attachments = attachments.filter((a) => a.id !== id);
-  discardIfNothingAttached();
-  emitState();
+  const s = current();
+  s.attachments = s.attachments.filter((a) => a.id !== id);
+  discardIfNothingAttached(s);
+  stateChanged(s);
   return { ok: true };
 }
 

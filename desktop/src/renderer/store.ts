@@ -1,5 +1,7 @@
 import { useSyncExternalStore } from "react";
 
+import { applyTranscriptEvent } from "../shared/transcript";
+import { playSound } from "./sounds";
 import type {
   ApprovalRequest,
   AuthStatus,
@@ -63,23 +65,19 @@ export function useApp(): AppSnapshot {
   return useSyncExternalStore(subscribe, getSnapshot);
 }
 
-function patchItem(
-  items: TranscriptItem[],
-  id: string,
-  fn: (item: TranscriptItem) => TranscriptItem
-): TranscriptItem[] {
-  // The item being updated is almost always at or near the end.
-  for (let i = items.length - 1; i >= 0 && i >= items.length - 400; i--) {
-    if (items[i].id === id) {
-      const next = items.slice();
-      next[i] = fn(items[i]);
-      return next;
-    }
-  }
-  return items;
-}
-
 export function handleEvent(event: SessionEvent): void {
+  // Main only sends the selected session's events, but one already in flight
+  // when the user switched can still arrive: it belongs to a session that is
+  // no longer on screen and must not render into this one.
+  if (
+    event.type !== "view" &&
+    "sid" in event &&
+    event.sid !== undefined &&
+    snapshot.session &&
+    event.sid !== snapshot.session.sessionKey
+  ) {
+    return;
+  }
   switch (event.type) {
     case "auth":
       set({ auth: event.status });
@@ -89,6 +87,22 @@ export function handleEvent(event: SessionEvent): void {
       return;
     case "state":
       set({ session: event.state });
+      return;
+    case "sessions":
+      // Background sessions changed: badges and the running count only.
+      if (snapshot.session) {
+        set({ session: { ...snapshot.session, sessions: event.sessions, running: event.running } });
+      }
+      return;
+    case "view":
+      // Switching sessions: transcript, state, dialog and plan all at once.
+      set({
+        session: event.state,
+        items: event.items,
+        firstItemIndex: FIRST_INDEX,
+        approval: event.approval,
+        planId: event.planId,
+      });
       return;
     case "transcript-reset":
       set({ items: event.items, firstItemIndex: FIRST_INDEX, planId: null });
@@ -100,23 +114,10 @@ export function handleEvent(event: SessionEvent): void {
       });
       return;
     case "append":
-      set({ items: [...snapshot.items, event.item] });
-      return;
     case "text-delta":
-      set({
-        items: patchItem(snapshot.items, event.id, (it) =>
-          it.kind === "agent-text" ? { ...it, text: it.text + event.text } : it
-        ),
-      });
-      return;
     case "patch":
-      set({
-        items: patchItem(
-          snapshot.items,
-          event.id,
-          (it) => ({ ...it, ...event.patch }) as TranscriptItem
-        ),
-      });
+      // The same reducer main uses for the session's own list.
+      set({ items: applyTranscriptEvent(snapshot.items, event) });
       return;
     case "approval":
       set({
@@ -130,6 +131,9 @@ export function handleEvent(event: SessionEvent): void {
       return;
     case "plan-clear":
       set({ planId: null });
+      return;
+    case "sound":
+      void playSound(event.sound, event.volume);
       return;
     case "conversations-changed":
       void refreshConversations();
@@ -184,6 +188,17 @@ export async function boot(): Promise<void> {
   // hidden, so nothing is laid out).
   (globalThis as Record<string, unknown>).__dustmItemKinds = () =>
     snapshot.items.map((i) => i.kind);
+  // What is actually on screen for the selected session (smoke --smoke-multi).
+  (globalThis as Record<string, unknown>).__dustmItemTexts = () =>
+    snapshot.items.map((i) => (i.kind === "user" || i.kind === "agent-text" || i.kind === "note" ? i.text : ""));
+  (globalThis as Record<string, unknown>).__dustmView = () => ({
+    key: snapshot.session?.sessionKey ?? null,
+    approval: snapshot.approval?.request.id ?? null,
+    running: snapshot.session?.running ?? 0,
+    title: document.title,
+    statusbar: document.querySelector(".statusbar")?.textContent ?? "",
+    sidebar: document.querySelector(".convo-list")?.textContent ?? "",
+  });
   const { auth, state } = await window.dustm.bootstrap();
   set({ booted: true, auth, session: state });
   void refreshConversations();

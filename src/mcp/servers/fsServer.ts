@@ -18,36 +18,25 @@ import { SearchFilesTool } from "../tools/searchFiles.js";
 import { TodoWriteTool } from "../tools/todoWrite.js";
 import { WriteFileTool } from "../tools/writeFile.js";
 import { WriteMemoryTool } from "../tools/writeMemory.js";
+import type { ToolContext } from "../toolContext.js";
 import { CLIMcpTransport } from "./cliTransport.js";
 
-// Add local development tools to the MCP server
-export const useFileSystemServer = async (
-  dustAPI: DustAPI,
-  onServerIdReceived: (serverId: string) => void,
+/**
+ * The fs MCP server's tools, wired to the given callbacks. Split out of
+ * useFileSystemServer so a caller can obtain the exact tool set a server would
+ * serve without connecting a transport (the desktop smoke tests call the tools
+ * of two conversations directly to prove plan mode does not leak between them).
+ */
+export const buildFsTools = (options: {
   diffApprovalCallback?: (
     originalContent: string,
     updatedContent: string,
     filePath: string
-  ) => Promise<boolean>,
-  onRetry?: (attempt: number, maxAttempts: number, error: unknown) => void,
-  // Omitted by non-interactive callers, which have no one to ask - see
-  // PresentPlanTool for why it refuses rather than self-approving.
-  planApprovalCallback?: (plan: string) => Promise<PlanDecision>,
-  // Optional, unused by the CLI (which keeps one server for the life of the
-  // process). Hands back a way to shut this server down - its transport's
-  // read loop and heartbeat - for a front end that must drop it when the
-  // signed-in identity changes (the desktop app).
-  onConnected?: (close: () => Promise<void>) => void
-): Promise<Result<void, Error>> => {
-  // Check if using API key authentication - MCP servers require OAuth
-  const apiKey = await dustAPI.getApiKey();
-  if (apiKey?.startsWith("sk-")) {
-    return new Err(
-      new Error(
-        "File system access requires OAuth authentication. API keys don't support MCP server registration. Please use 'dustm login' to authenticate with OAuth for file system features."
-      )
-    );
-  }
+  ) => Promise<boolean>;
+  planApprovalCallback?: (plan: string) => Promise<PlanDecision>;
+  toolContext?: ToolContext;
+}) => {
+  const { diffApprovalCallback, planApprovalCallback, toolContext } = options;
 
   const readFileTool = new ReadFileTool();
   const fetchUrlTool = new FetchUrlTool();
@@ -105,6 +94,57 @@ export const useFileSystemServer = async (
     // doing anything when called outside it.
     presentPlanTool,
   ];
+
+  if (toolContext) {
+    editFileTool.setContext(toolContext);
+    writeFileTool.setContext(toolContext);
+    runCommandTool.setContext(toolContext);
+    presentPlanTool.setContext(toolContext);
+    todoWriteTool.setContext(toolContext);
+    readTasksTool.setContext(toolContext);
+    readSkillTool.setContext(toolContext);
+  }
+
+  return tools;
+};
+
+// Add local development tools to the MCP server
+export const useFileSystemServer = async (
+  dustAPI: DustAPI,
+  onServerIdReceived: (serverId: string) => void,
+  diffApprovalCallback?: (
+    originalContent: string,
+    updatedContent: string,
+    filePath: string
+  ) => Promise<boolean>,
+  onRetry?: (attempt: number, maxAttempts: number, error: unknown) => void,
+  // Omitted by non-interactive callers, which have no one to ask - see
+  // PresentPlanTool for why it refuses rather than self-approving.
+  planApprovalCallback?: (plan: string) => Promise<PlanDecision>,
+  // Optional, unused by the CLI (which keeps one server for the life of the
+  // process). Hands back a way to shut this server down - its transport's
+  // read loop and heartbeat - for a front end that must drop it when the
+  // signed-in identity changes (the desktop app).
+  onConnected?: (close: () => Promise<void>) => void,
+  // Optional, unused by the CLI: per-conversation answers for the tools that
+  // would otherwise read module-level singletons (see toolContext.ts).
+  toolContext?: ToolContext
+): Promise<Result<void, Error>> => {
+  // Check if using API key authentication - MCP servers require OAuth
+  const apiKey = await dustAPI.getApiKey();
+  if (apiKey?.startsWith("sk-")) {
+    return new Err(
+      new Error(
+        "File system access requires OAuth authentication. API keys don't support MCP server registration. Please use 'dustm login' to authenticate with OAuth for file system features."
+      )
+    );
+  }
+
+  const tools = buildFsTools({
+    diffApprovalCallback,
+    planApprovalCallback,
+    toolContext,
+  });
 
   // Transient connection failures shouldn't dead-end the user immediately -
   // retry with fresh server/transport instances a few times before giving

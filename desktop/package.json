@@ -17,7 +17,8 @@
     "smoke": "electron . --smoke",
     "package": "npm run build && electron-builder --win",
     "package:dir": "npm run build && electron-builder --win --dir",
-    "icons": "node scripts/gen-icons.mjs"
+    "icons": "node scripts/gen-icons.mjs",
+    "sounds": "node scripts/gen-sounds.mjs"
   },
   "dependencies": {
     "keytar": "^7.9.0"

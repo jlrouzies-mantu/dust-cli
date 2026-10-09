@@ -675,3 +675,56 @@ export function SkillsDialog({ onClose }: { onClose: () => void }) {
     </Modal>
   );
 }
+
+// ------------------------------------------------------------ parallel agents
+
+/** How many turns may run at once across all conversations (1-8, remembered). */
+export function ParallelDialog({ onClose }: { onClose: () => void }) {
+  const { session } = useApp();
+  const current = session?.maxParallel ?? 3;
+  const choose = async (n: number) => {
+    const res = await window.dustm.setMaxParallel(n);
+    if (!res.ok) {
+      toast(res.error ?? "Could not change the limit.");
+      return;
+    }
+    onClose();
+  };
+  return (
+    <Modal
+      label="Maximum parallel agents"
+      className="palette"
+      top
+      onEscape={onClose}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          onClose();
+        }
+      }}
+    >
+      <div className="pal-top" />
+      <div style={{ padding: "14px 18px 18px" }}>
+        <h2 style={{ margin: "0 0 6px", fontSize: 15 }}>Max parallel agents</h2>
+        <p className="plain-note" style={{ margin: "0 0 12px" }}>
+          How many conversations may have an agent working at once. A message sent beyond the limit
+          waits for a free slot.
+        </p>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
+            <button
+              key={n}
+              type="button"
+              className="small-btn"
+              aria-pressed={n === current}
+              style={n === current ? { borderColor: "var(--yellow)", color: "#fff" } : undefined}
+              onClick={() => void choose(n)}
+            >
+              {n}
+            </button>
+          ))}
+        </div>
+      </div>
+    </Modal>
+  );
+}

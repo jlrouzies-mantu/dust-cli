@@ -259,6 +259,8 @@ interface Session {
   filesOnlyConversationId: string | null;
   // This session's own fs MCP server (see the header comment).
   fsServerId: string | null;
+  /** The server id the running turn was sent with (its tool calls are routed there). */
+  turnFsServerId: string | null;
   fsPromise: Promise<void> | null;
   fsGeneration: number;
   fsClose: (() => Promise<void>) | null;
@@ -434,6 +436,7 @@ function createSession(from?: Session | null, prefs?: Prefs | null): Session {
     uploadChain: Promise.resolve(),
     filesOnlyConversationId: null,
     fsServerId: null,
+    turnFsServerId: null,
     fsPromise: null,
     fsGeneration: 0,
     fsClose: null,
@@ -1087,6 +1090,17 @@ function ensureFsServer(s: Session): Promise<void> {
           // overwrite the current id.
           if (isCurrent()) {
             s.fsServerId = serverId;
+            // A re-registration mid-turn gives a new id, and Dust keeps
+            // routing this turn's tool calls to the old one: they would go
+            // unanswered until Dust times out. Say so instead of hanging.
+            if (s.busy && s.turnFsServerId && s.turnFsServerId !== serverId) {
+              s.turnFsServerId = null;
+              note(
+                s,
+                "error",
+                "The local file tools reconnected during this turn, so its remaining tool calls cannot be answered. Stop (Esc Esc) and resend; the next message uses the new connection."
+              );
+            }
           }
         },
         (original, updated, filePath) =>
@@ -1711,6 +1725,7 @@ async function runTurn(s: Session, message: QueuedMessage): Promise<void> {
       // there, which is what makes per-session plan mode exact.
       clientSideMCPServerIds: s.fsServerId ? [s.fsServerId] : null,
     };
+    s.turnFsServerId = s.fsServerId;
 
     let conversation: Conversation;
     let userMessageId: string;

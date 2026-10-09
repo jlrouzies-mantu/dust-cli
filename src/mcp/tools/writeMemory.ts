@@ -11,6 +11,12 @@ import {
   serializeMemoryFile,
 } from "../../utils/claudeMemory.js";
 import { normalizeError } from "../../utils/errors.js";
+import {
+  PLAN_MODE_TOOL_NOTICE,
+  isPlanModeActive,
+  planModeRefusal,
+} from "../../utils/planMode.js";
+import type { ToolContext } from "../toolContext.js";
 import type { McpTool } from "../types/tools.js";
 
 const MEMORY_INDEX_FILENAME = "MEMORY.md";
@@ -77,6 +83,13 @@ async function updateMemoryIndex(
 export class WriteMemoryTool implements McpTool {
   name = "write_memory";
 
+  private toolContext?: ToolContext;
+
+  /** Desktop only: per-conversation state instead of the module singletons (see toolContext.ts). */
+  setContext(context: ToolContext) {
+    this.toolContext = context;
+  }
+
   private diffApprovalCallback?: (
     originalContent: string,
     updatedContent: string,
@@ -104,7 +117,8 @@ export class WriteMemoryTool implements McpTool {
     "Before creating a memory, call read_memory (with no arguments, for the cheap catalogue) to check " +
     "whether one already covers the same ground - update that one instead of adding a near-duplicate. " +
     "Every memory you add is context cost in every future session, so prefer updating over accumulating. " +
-    "The user is shown a preview and must approve every write.";
+    "The user is shown a preview and must approve every write." +
+    PLAN_MODE_TOOL_NOTICE;
 
   inputSchema = z.object({
     name: z
@@ -163,6 +177,16 @@ export class WriteMemoryTool implements McpTool {
     scope,
   }: z.infer<typeof this.inputSchema>) {
     try {
+      // Plan mode first: a memory lives outside the repo but is still a write.
+      if (this.toolContext ? this.toolContext.isPlanMode() : isPlanModeActive()) {
+        return {
+          content: [
+            { type: "text" as const, text: planModeRefusal(this.name) },
+          ],
+          isError: true,
+        };
+      }
+
       // A memory name becomes a filename, so anything outside the slug
       // pattern is rejected outright - that also means a name can never
       // traverse out of the memory directory.

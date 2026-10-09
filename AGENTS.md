@@ -413,7 +413,8 @@ last-synced commit (procedure step 3 above):
     callbacks refuse, so a late call is never run under stale permissions. Routing rests on
     the transport polling Dust for requests by its own `serverId`; a heartbeat
     re-registration mid-turn gives a new id, so that turn's later calls go unanswered
-    (they time out server-side) rather than reach another session.
+    (they time out server-side) rather than reach another session. The session remembers the
+    id its turn was sent with (`turnFsServerId`) and posts an error note when it changes mid-turn.
   - **Stops name their session.** The renderer passes the `sessionKey` it was showing to
     `cancel(source, sid)`; main refuses when another session is on screen by then (a
     notification click or switch in flight), so a stop can never land on the wrong turn.

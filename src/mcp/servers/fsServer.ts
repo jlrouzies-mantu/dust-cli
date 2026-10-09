@@ -103,6 +103,7 @@ export const buildFsTools = (options: {
     todoWriteTool.setContext(toolContext);
     readTasksTool.setContext(toolContext);
     readSkillTool.setContext(toolContext);
+    writeMemoryTool.setContext(toolContext);
   }
 
   return tools;

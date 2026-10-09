@@ -2,7 +2,7 @@ import { assertNever } from "@dust-tt/client";
 import chalk from "chalk";
 import { Box, Static, Text } from "ink";
 import Spinner from "ink-spinner";
-// biome-ignore lint/plugin/noBulkLodash: existing usage
+// oxlint-disable-next-line dust/noBulkLodash -- existing usage
 import _ from "lodash";
 import type { FC } from "react";
 import React, {
@@ -62,6 +62,7 @@ import {
 import type { LoopState } from "../../utils/loopController.js";
 import { loopBlockTitle } from "../../utils/loopController.js";
 import { clearTerminal } from "../../utils/terminal.js";
+import { describeSandbox } from "../../utils/sandbox.js";
 import { CLI_VERSION, UPSTREAM_CLI_VERSION } from "../../utils/version.js";
 import type { Command } from "../commands/types.js";
 import { CommandSelector } from "./CommandSelector.js";
@@ -953,6 +954,7 @@ const StaticConversationItem: FC<StaticConversationItemProps> = ({
               <Text dimColor>
                 Dust CLI v{CLI_VERSION} (upstream v{UPSTREAM_CLI_VERSION})
               </Text>
+              <Text dimColor>{describeSandbox()}</Text>
               <Text dimColor>
                 Chatting with{" "}
                 <Text bold dimColor>

@@ -210,6 +210,32 @@ export function Transcript({
 }) {
   const ref = useRef<VirtuosoHandle>(null);
   const [atBottom, setAtBottom] = useState(true);
+  const atBottomRef = useRef(true);
+  atBottomRef.current = atBottom;
+
+  // followOutput only follows the last *item*; the "Thinking…" row lives in
+  // the Footer, below it, so it stayed just out of view after a send. Scroll
+  // to the true bottom (footer included) after layout: always when the user
+  // has just sent a message, and when the footer appears or changes while the
+  // view is already at the bottom.
+  const lastItem = items[items.length - 1];
+  const footerShown = context.busy && !context.streaming;
+  const footerKey = footerShown ? `${context.pendingAgent?.name ?? ""}|${context.label ?? ""}` : "";
+  const sentId = lastItem?.kind === "user" ? lastItem.id : null;
+  useEffect(() => {
+    if (!sentId) return;
+    const raf = requestAnimationFrame(() =>
+      ref.current?.scrollTo({ top: Number.MAX_SAFE_INTEGER, behavior: "auto" })
+    );
+    return () => cancelAnimationFrame(raf);
+  }, [sentId]);
+  useEffect(() => {
+    if (!footerKey || !atBottomRef.current) return;
+    const raf = requestAnimationFrame(() =>
+      ref.current?.scrollTo({ top: Number.MAX_SAFE_INTEGER, behavior: "auto" })
+    );
+    return () => cancelAnimationFrame(raf);
+  }, [footerKey]);
 
   const itemContent = useCallback(
     (_i: number, item: TranscriptItem) => (

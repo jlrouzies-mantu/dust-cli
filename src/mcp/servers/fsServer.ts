@@ -32,7 +32,12 @@ export const useFileSystemServer = async (
   onRetry?: (attempt: number, maxAttempts: number, error: unknown) => void,
   // Omitted by non-interactive callers, which have no one to ask - see
   // PresentPlanTool for why it refuses rather than self-approving.
-  planApprovalCallback?: (plan: string) => Promise<PlanDecision>
+  planApprovalCallback?: (plan: string) => Promise<PlanDecision>,
+  // Optional, unused by the CLI (which keeps one server for the life of the
+  // process). Hands back a way to shut this server down - its transport's
+  // read loop and heartbeat - for a front end that must drop it when the
+  // signed-in identity changes (the desktop app).
+  onConnected?: (close: () => Promise<void>) => void
 ): Promise<Result<void, Error>> => {
   // Check if using API key authentication - MCP servers require OAuth
   const apiKey = await dustAPI.getApiKey();
@@ -132,6 +137,7 @@ export const useFileSystemServer = async (
 
     try {
       await server.connect(transport);
+      onConnected?.(() => server.close());
       return new Ok(undefined);
     } catch (error) {
       console.error("[MCP Connection Failed]", error);

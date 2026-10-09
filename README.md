@@ -40,6 +40,7 @@
   - [Fetching a URL](#fetching-a-url)
   - [Claude Code mode](#claude-code-mode)
   - [Headless Authentication](#headless-authentication)
+- [Desktop app (preview)](#desktop-app-preview)
 - [Development](#development)
   - [Versioning](#versioning)
 - [Relationship to Upstream](#relationship-to-upstream)
@@ -204,7 +205,7 @@ When no command is given, `chat` is used by default.
 | &nbsp;&nbsp;`--agent "<name>"` / `-a` | Search for and use an agent by name |
 | &nbsp;&nbsp;`--sId <sId>` / `-s` | Specify an agent's sId directly |
 | &nbsp;&nbsp;`--resume <conversationId>` / `-r` | Resume a past conversation |
-| &nbsp;&nbsp;`--auto` | Automatically accept all file-edit operations without prompting |
+| &nbsp;&nbsp;`--auto` | Start in auto mode: file edits and every tool approval (including `run_command`) go through without prompting |
 | &nbsp;&nbsp;`--plan` | Start in plan mode: research only until you approve a plan — see [Modes](#modes) |
 | &nbsp;&nbsp;`--allow-path <path>` | Let the file system tools reach a path outside the current folder (repeatable) — see [File system scope](#file-system-scope) |
 | &nbsp;&nbsp;`--dangerously-disable-sandbox` | Let the file system tools reach anywhere on the machine |
@@ -298,7 +299,7 @@ Not yet wired into the headless `--loop` path — that's arguably where an unatt
 | Mode | Status bar | Behaviour |
 |---|---|---|
 | Normal | `□ normal` (grey) | You approve each file edit |
-| Auto-edit | `»» auto-edit` (amber) | Edits apply without prompting (same as `/auto`, `--auto`) |
+| Auto-edit | `»» auto-edit` (amber) | Nothing prompts: edits apply and every tool approval Dust asks for is granted, whatever its stake, `run_command` included (same as `/auto`, `--auto`). Use it only for an agent and folder you trust |
 | Plan | `■ plan` (teal) | Research only — `write_file`, `edit_file` and `run_command` are all blocked until you approve a plan (same as `/plan`, `--plan`) |
 
 The mode is **always** in the status bar, normal included, and leads the line so it holds the most stable position. An absent indicator would be ambiguous — nothing engaged, or just scrolled off? The glyphs are a progression of how much the agent may do unsupervised (hollow → forward → sealed) rather than a pause/play metaphor, and the three colours are their own set: they mark a standing permission level, not pending work, so they deliberately don't borrow the gold/purple/blue of the Queued, Steered and Looping blocks.
@@ -693,6 +694,42 @@ dustm chat --agent "MyAgent" --message "hello"
 or via flags: `dustm chat --wId ws_abc123 --key sk_your_api_key_here`.
 
 **Note:** this auth path only works for chat/messages — the local filesystem/shell tool-use subsystem (`--with-tools`) requires a full OAuth session (`dustm login`), not a workspace API key.
+
+## Desktop app (preview)
+
+`desktop/` holds **dustm Desktop**, an Electron window over the same core as the CLI. It exists for machines where the terminal is slow with the Ink UI: the front end is React with a virtualised transcript, so a long session stays responsive. It drives the same Dust agent and the same local tools (read/write/edit files, run commands, tasks, plan mode, `/model`, `/effort`), reusing the CLI's modules from `src/` directly rather than copying them.
+
+**Sign-in is shared with the CLI.** The app signs in with the same WorkOS device-code flow as `dustm login` and stores the tokens in the same keychain entries, so signing in through either one signs in both (and signing out of either signs out both). Unauthenticated, the app shows a sign-in screen with the code, an "Open browser" button and the workspace picker; "Sign out" is in the sidebar's account menu.
+
+```bash
+npm install                 # repo root: the desktop build bundles ../src, which needs its dependencies
+cd desktop
+npm install                 # Node 24.16.0, see .nvmrc
+npm run dev                 # window with hot reload (talks to the real Dust API)
+npm run build               # production build into desktop/out
+npm run typecheck
+npm run package:dir         # unpacked app in desktop/release/win-unpacked (fast check)
+npm run package             # Windows NSIS installer in desktop/release
+npx electron . --smoke      # headless check: boots, loads the UI, checks auth + agents, prints JSON
+```
+
+npm 12 blocks dependency install scripts by default; `desktop/package.json` lists the ones that are allowed (`keytar`, `electron`, `esbuild`, `electron-winstaller`) under `allowScripts`. If `electron` was installed without its binary, run `node node_modules/electron/install.js` once.
+
+Pick a working folder on first launch (remembered afterwards). It becomes the file-tool sandbox root, with the same rules as the CLI's [File system scope](#file-system-scope). `--folder=<path>` overrides it for one run.
+
+What works: sign-in and workspace choice, agent picker (default `@dust`, or `/switch`), new / resume (`/resume`) / list / **search-by-title** conversations, streaming with tool rows, a one-line thinking indicator and stop, a queue for messages typed while the agent is busy, `/model` and `/effort` (live workspace list with context sizes, built-in fallback), Shift+Tab mode cycle (normal, auto-edit, plan), edit and tool approval dialogs, plan review, tasks, context and credits meters, and a command palette (Ctrl+K).
+
+**Every CLI slash command** is available under the same name: type `/` for a filterable menu (Tab completes, Enter runs). That covers `/help /switch /new /clear /resume /attach /clear-files /loop /claude-code-mode /auto /plan /tasks /skills /model /compact /effort /btw /exit`, plus desktop-only `/normal` and `/folder`. `/compact`, `/btw`, `/skills`, `/claude-code-mode` and `/loop` use the same shared modules as the CLI and keep their rules (a compaction makes the conversation busy for every send path, `/btw` never posts into the conversation, the loop limits live in `loopController.ts`). `@` opens the CLI's file-mention picker (paths relative to the working folder, inserted as `@path`; files only, as in the CLI).
+
+**Attachments:** the paperclip, `/attach`, drag-and-drop onto the composer, and Ctrl+V for clipboard images all upload through the CLI's own path (files are uploaded to the conversation, then sent as content fragments before your message). Chips above the box show progress and can be removed before sending. The renderer never reads files and cannot name one: main does the reading and uploading, and only files you picked, dropped or pasted can be attached. As in the CLI, the first attachment of a new chat creates the (empty) conversation the files are uploaded to; unlike the CLI, that conversation is deleted again if the upload fails, you remove the attachments, or you start another chat before sending.
+
+**Opening a conversation** loads only the newest messages (about 0.5 s on a 150-message, 11 MB conversation, versus 2-5 s for the whole thing) and shows "Load earlier messages" for the rest. It uses the same private messages endpoint as `/compact`; if that endpoint ever changes, or you are signed in with a workspace API key (which it does not accept), it falls back to the full public load. Tool rows are only shown for messages in the full-load fallback. Opening another conversation stops a running `/loop`.
+
+Agent replies are rendered as Markdown, but images in them are shown as links rather than loaded. Signing out (or the session expiring) stops the running turn server-side, the loop and the local file tools.
+
+The app icon and sidebar logo are the CLI's D U S T block logo in its colours; `npm run icons` (in `desktop/`) regenerates `build/icon.ico` and `build/icon.png` from `scripts/gen-icons.mjs`.
+
+Current limits: auto-update (not built), a code-signed installer (unsigned), and `@` agent mentions (the CLI has none either). "Reject with a note" on an edit sends the note as the agent's next message (the tool itself only learns "rejected"). Plan review offers "approve and implement in auto-edit" and "approve and wait", the two outcomes the CLI's `present_plan` supports. `/exit` closes the window. Clipboard-image paste uses the paste event first and the CLI's PowerShell/osascript reader as a fallback (macOS untested, as in the CLI).
 
 ## Development
 

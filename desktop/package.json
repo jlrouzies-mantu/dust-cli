@@ -1,0 +1,54 @@
+{
+  "name": "dustm-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "dustm Desktop (preview): an Electron front end over the dustm CLI core.",
+  "author": "Mantu",
+  "license": "MIT",
+  "main": "./out/main/index.js",
+  "engines": {
+    "node": ">=24.16.0"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "smoke": "electron . --smoke",
+    "package": "npm run build && electron-builder --win",
+    "package:dir": "npm run build && electron-builder --win --dir",
+    "icons": "node scripts/gen-icons.mjs"
+  },
+  "dependencies": {
+    "keytar": "^7.9.0"
+  },
+  "devDependencies": {
+    "@fontsource/ibm-plex-sans": "^5.2.0",
+    "@fontsource/jetbrains-mono": "^5.2.0",
+    "@fontsource/sora": "^5.2.0",
+    "@types/node": "^24.12.2",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "diff": "^8.0.4",
+    "dotenv-flow": "^4.1.0",
+    "electron": "^44.0.0",
+    "electron-builder": "^26.0.0",
+    "electron-vite": "^5.0.0",
+    "glob": "^10.5.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "react-virtuoso": "^4.12.0",
+    "remark-gfm": "^4.0.1",
+    "typescript": "~5.9.0",
+    "vite": "^7.0.0"
+  },
+  "allowScripts": {
+    "keytar@7.9.0": true,
+    "electron@44.7.0": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.2": true,
+    "electron-winstaller@5.4.0": true
+  }
+}

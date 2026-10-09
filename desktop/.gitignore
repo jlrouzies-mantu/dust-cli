@@ -1,0 +1,8 @@
+node_modules/
+out/
+dist/
+release/
+
+# The root .gitignore drops every build/ folder, but here build/ holds the
+# generated app icons electron-builder needs (npm run icons regenerates them).
+!build/

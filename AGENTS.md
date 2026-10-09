@@ -359,6 +359,124 @@ last-synced commit (procedure step 3 above):
     not part of `isConversationBusy` in `Chat.tsx`) - it's a different
     conversation, so it can't race the main turn server-side, and blocking
     the queue on it would defeat asking mid-turn.
+- `src/utils/deviceAuth.ts` - UI-free WorkOS device-code sign-in (start, cancellable
+  poll, region from the token's claim, workspace list/select) used by the desktop app.
+  It **deliberately duplicates** `src/ui/commands/Auth.tsx` and
+  `src/ui/components/WorkspaceSelector.tsx`, which were left untouched so the CLI's
+  behaviour could not change. Until `Auth.tsx` is switched over to this module, a
+  change to the flow (endpoints, scope, region claim, storage calls) has to be made in
+  both places. `DeviceAuthSession.deviceCode` is the secret half and must never be sent
+  to a renderer; only `DeviceAuthPublicInfo` may cross.
+- `desktop/` - **dustm Desktop (preview)**: Electron + electron-vite + React, its own
+  `package.json`, not part of the root build (root `tsconfig.json` only includes
+  `src/**/*`, and must keep doing so). Rules a future agent must keep:
+  - **Reuse, never copy.** The main process imports the CLI's modules from `../src/...`
+    (auth, token storage, dust client, fsServer + its MCP transport, planMode/chatMode,
+    taskStore, modelSelection, workspaceModels, usage/credits, sandbox, retry,
+    transcriptStore). The renderer may import only *pure* modules (`brand.ts`,
+    `chatMode.ts`, `planMode.ts` constants, `formatContextSize`); anything touching
+    Node, `keytar` or the network stays in main.
+  - **Do not touch `Chat.tsx` for it.** `desktop/src/main/session.ts` is its own
+    conversation loop (from `nonInteractive.ts` + Chat.tsx), so it must be kept in step
+    by hand: when Chat.tsx's send/stream/approval behaviour changes, port the change.
+  - **The module-level singletons are owned by the main process, with named call
+    sites**, the same bug class as `taskStore`'s above: `setPlanMode` in `applyMode`
+    (and in `doInit`/`teardownSession`, which reset `mode` to `"normal"` in the same
+    breath - resetting only the singleton once showed "plan" while writes were
+    allowed), `setActiveConversationId` in `setConversation` (new, resume, create,
+    sign-out), `configureSandbox({ root })` + `process.chdir` in `setFolder`, and
+    `setClaudeSkillsEnabled` in `applyClaudeCodeMode`. A new path that changes mode,
+    conversation or folder must go through those, not around them.
+  - **Identity changes go through `teardownSession`** (wired from `auth.ts`'s
+    signed-out handler, which runs *before* `signOut` clears the tokens so the running
+    turn can still be cancelled server-side, and from `resetSession` before a new
+    sign-in): it stops the loop, cancels the turn, rejects pending dialogs, clears the
+    queue and attachments, and closes the fs MCP server. The fs server is registered
+    under one identity, so it is closed and re-registered on a sign-in change - that is
+    what `useFileSystemServer`'s optional `onConnected` callback (an additive parameter
+    the CLI does not pass) exists for. It is deliberately **not** re-registered on a
+    folder switch: every tool resolves paths at call time through the sandbox singleton
+    and `process.cwd()`, which `setFolder` updates.
+  - **Stale work never writes into the next conversation.** `session.ts` keeps an
+    `epoch`, bumped by new chat, opening a conversation and sign-out; a turn, an upload,
+    a compaction or a usage refresh that started under an older epoch drops its late
+    output. Opening another conversation also stops a running `/loop` (it must not post
+    into a different conversation) and resets the skills catalogue / priming state like
+    `/new` does. A new long-running operation needs the same check.
+  - **Both send sites** (`createConversation` and `postUserMessage` in `runTurn`) carry
+    `buildModelSelection`'s result, and the plan preamble/reminder wraps every message
+    while in plan mode. Only the user's plan approval (`resolvePlan`) leaves plan mode.
+  - **Renderer isolation:** `contextIsolation` on, `nodeIntegration` off, `sandbox` on,
+    one preload exposing the typed `DustmApi` (`src/shared/ipc.ts`), strict CSP
+    (injected into `index.html` by `electron.vite.config.ts`; relaxed only for the dev
+    server), every IPC handler validates its sender frame and arguments (`ipc.ts`).
+    Tokens and the device code never cross IPC: the renderer sees only the user code and
+    verification URL. Sign-in's "Open browser" opens the URL main holds; `openExternal`
+    (markdown links, window.open) does take a renderer-supplied URL, so `openHttps`
+    refuses anything that is not `https:` - keep every `shell.openExternal` behind it.
+    Agent markdown never renders an `<img>` (`Markdown.tsx` shows images as links): the
+    packaged page is `file://`, so the CSP's `img-src 'self'` would admit `file:` URLs,
+    and on Windows a UNC one opens an SMB connection. Adding an IPC method means: type
+    in `shared/ipc.ts`, handler with validation in `ipc.ts`, one line in `preload`.
+  - **Build-time injection mirrors tsup:** `electron.vite.config.ts` defines
+    `__CLI_VERSION__` and the repo root's `.env.production` values for the main bundle.
+    It uses production env even in `npm run dev` (the CLI's `.env.development` points at
+    a local server); `DUSTM_DESKTOP_ENV=development` opts in. If `tsup.config.ts`
+    changes what it injects, change this too.
+  - **keytar** is N-API, so the prebuilt binary runs under Electron without a rebuild
+    (`npmRebuild: false`); it is the only external module and is `asarUnpack`ed. If it
+    ever stops being N-API, add `@electron/rebuild`.
+  - `--smoke` (with `--smoke-login`, `--smoke-chat`, `--smoke-attach`, `--smoke-btw`, `--smoke-dup`, `--smoke-commands`, `--smoke-escape`, `--smoke-audit`, `--smoke-delete-probe`, `--smoke-profile-load`, `--smoke-shot`, `--smoke-demo`) is
+    the verification path: it exercises the real IPC. `--smoke-chat`, `--smoke-btw` and
+    `--smoke-login` cost credits / hit WorkOS, and `--smoke-delete-probe` creates and
+    deletes one empty conversation, so they are opt-in. `--smoke-audit` (stubbed client;
+    self-contained - its own temp folder and fixture, and every case resets state
+    first, so neither `--folder` nor case order matters) holds the regression cases for sign-out mid-turn, the upload race
+    and empty-conversation cleanup, loop vs. opening a conversation, cancel fallback,
+    history parsing, markdown images, the attach bridge and a real OS file drop. Keep
+    the smoke output free of tokens and of the user code.
+  - **Commands that live in main** (`session.runCommand`: compact, btw, loop, skills,
+    claude-code-mode, tasks, clear-files) are ports of the matching Chat.tsx handlers.
+    Keep them in step. Rules carried over: `isConversationBusy() = busy || compacting`
+    gates **every** send path (`send`, `dispatch`, `drainQueue`, loop ticks) - a new send
+    path needs it; `/btw` is never part of it and never posts to the conversation;
+    `applyClaudeCodeMode` is the one place `setClaudeSkillsEnabled` is called; the skills
+    block / Claude priming / forced skills are committed only after the API accepts the
+    message; loop limits stay in `loopController.ts`; a loop tick goes through `dispatch`
+    and is skipped, not stacked, while busy. Pure-UI commands (help, switch, resume, model,
+    effort, attach, auto, plan, normal, folder, exit, new/clear) are in `Composer.tsx`.
+  - **Duplicate sends:** `Composer.submit` clears the input synchronously and holds an
+    in-flight ref, ignores `e.repeat`, and `session.send` refuses an identical message
+    within 2 s - with an error the composer shows (and the text given back), never
+    silently. Queue drains and loop ticks do not pass through that guard. One Enter once
+    produced six real turns because the input was only cleared after the IPC call
+    returned. `--smoke-dup` and `--smoke-audit` are the regression tests.
+  - **Windowed history** (`history.ts`): opening a conversation fetches the newest 30
+    messages from the private `/messages` endpoint (same standing as contextUsage /
+    compactionService) and pages back with `lastValue=<rank>`. The public full load took
+    2-9 s (11 MB) and is only the fallback (also taken straight away under an `sk-` API
+    key, which the private endpoints do not accept). Pages are de-duplicated at the
+    boundary by rank; content fragments are shown as the next user message's
+    attachments; unknown message types are skipped. Do not switch back to the full load
+    for speed reasons without re-profiling (`--smoke-profile-load`).
+  - **Attachments**: main reads and uploads. The renderer cannot name a path: the
+    preload's `attach.files` takes `File` objects and derives paths itself with
+    `webUtils.getPathForFile` (a script-built `File` has none), then main re-checks each
+    (absolute, regular file, supported type, size). Pasted image bytes are capped at 50 MB
+    at the IPC boundary. Upload needs a conversation, so the first attachment creates an
+    empty one (as the CLI does) - but unlike the CLI, that conversation is deleted again
+    (private `DELETE /api/w/{wId}/assistant/conversations/{cId}`, best effort) if every
+    upload fails, the chips are removed, or the user moves on before sending; once a
+    message is sent into it, it is never touched.
+  - The app icon is generated (`npm run icons`, `scripts/gen-icons.mjs`) from the CLI
+    logo's glyphs and colours; if `Conversation.tsx`'s welcome logo or `brand.ts` colours
+    change, update `gen-icons.mjs` and `src/renderer/Logo.tsx` together.
+  - Still not built: auto-update. If you add a writing tool, the plan-mode rules above
+    still apply; the desktop plan side panel reads `PLAN_MODE_ALLOWED_TOOLS` /
+    `PLAN_MODE_BLOCKED_TOOLS` so it stays truthful.
+  - Node 24.16.0 lockstep: `desktop/.nvmrc` and `desktop/package.json` `engines` belong
+    to the "Keeping the Node.js version in lockstep" list below.
+  - No release workflow yet; do not wire it into `release.yml` without being asked.
 - `src/types/marked-terminal.d.ts` - type shim
 - Everything under `.github/`, `scripts/`, `img/`, plus `AGENTS.md` and
   `README.md` themselves
@@ -397,6 +515,7 @@ together (currently pinned to `24.16.0` everywhere):
 
 - `package.json` (`engines.node`)
 - `.nvmrc`
+- `desktop/package.json` (`engines.node`) and `desktop/.nvmrc`
 - `.github/workflows/ci.yml` and `.github/workflows/release.yml` (`node-version`)
 - `scripts/Install-DustCLI.ps1` and `scripts/Install-LocalMode.ps1` (`$NodeVersion`)
 - `scripts/install-dustcli.sh` (`NODE_VERSION`)

@@ -1,0 +1,30 @@
+# Windows packaging for dustm Desktop (preview). No CI / release.yml wiring yet.
+appId: com.mantu.dustm.desktop
+productName: dustm Desktop
+copyright: Mantu
+directories:
+  output: release
+files:
+  - out/**
+  - package.json
+asar: true
+# keytar is the only native module. It is N-API (ABI-stable), so the prebuilt
+# keytar.node that npm installs runs under Electron as is: no rebuild step.
+# It has to live outside the asar to be loadable.
+npmRebuild: false
+asarUnpack:
+  - "**/node_modules/keytar/**"
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+nsis:
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  installerHeaderIcon: build/icon.ico
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  artifactName: dustm-desktop-${version}-setup.${ext}

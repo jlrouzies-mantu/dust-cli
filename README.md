@@ -122,6 +122,10 @@
 
 ## Screenshots
 
+**dustm Desktop (preview)** — the same agent and local tools in a desktop window: conversations on the left, tool calls and diffs inline, tasks, context and credits on the right (see [Desktop app (preview)](#desktop-app-preview)):
+
+![dustm Desktop](./img/desktop.png)
+
 **Markdown rendering** — headings, lists, task lists, links, inline code, tables, and syntax-highlighted code blocks:
 
 <p align="center">

@@ -275,6 +275,7 @@ async function smokeChat(win: BrowserWindow, text: string, attach: string | null
  */
 export async function runDemo(win: BrowserWindow, name: string): Promise<void> {
   const { emit } = await import("./bus");
+  (await import("./session")).setDemoMask(true);
   const id = (n: string) => `demo-${n}`;
   const diff = {
     path: "src/ui/commands/Chat.tsx",

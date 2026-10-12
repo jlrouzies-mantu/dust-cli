@@ -55,6 +55,8 @@ export interface ConversationSummary {
   title: string;
   /** Epoch ms of last activity. */
   updated: number;
+  /** The agent last used in it, when known (sent or seen in its history here). */
+  agentName: string | null;
 }
 
 export interface ModelRow {
@@ -118,6 +120,7 @@ export interface SessionBadge {
   title: string;
   status: SessionStatus;
   selected: boolean;
+  agentName: string | null;
 }
 
 export interface SessionState {

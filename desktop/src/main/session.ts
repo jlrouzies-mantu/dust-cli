@@ -302,6 +302,38 @@ let slotWaiters: Session[] = [];
 // Preferences of retired idle sessions, by conversation id, so reopening a
 // conversation keeps its mode/model for as long as the app runs.
 const prefsByConversation = new Map<string, Prefs>();
+
+// The agent each conversation was last used with (persisted in settings). The
+// conversation list from Dust carries no agent, so without this every row
+// would show whichever agent is selected now.
+const MAX_CONVERSATION_AGENTS = 500;
+let conversationAgents: Map<string, { sId?: string; name: string }> | null = null;
+
+async function loadConversationAgents(): Promise<Map<string, { sId?: string; name: string }>> {
+  if (!conversationAgents) {
+    const saved = (await loadSettings()).conversationAgents ?? {};
+    conversationAgents = new Map(Object.entries(saved));
+  }
+  return conversationAgents;
+}
+
+function rememberAgent(conversationId: string, agent: { sId?: string; name: string }): void {
+  void loadConversationAgents().then((map) => {
+    const prev = map.get(conversationId);
+    if (prev && prev.name === agent.name && prev.sId === (agent.sId ?? prev.sId)) {
+      return;
+    }
+    // Re-insert so the newest entries survive the cap.
+    map.delete(conversationId);
+    map.set(conversationId, { sId: agent.sId ?? (prev?.name === agent.name ? prev.sId : undefined), name: agent.name });
+    while (map.size > MAX_CONVERSATION_AGENTS) {
+      const oldest = map.keys().next().value;
+      if (oldest === undefined) break;
+      map.delete(oldest);
+    }
+    void updateSettings({ conversationAgents: Object.fromEntries(map) });
+  });
+}
 let sessionCounter = 0;
 
 const DEFAULT_LAYOUT: PanelLayout = { left: 280, right: 290, leftCollapsed: false, rightCollapsed: false };
@@ -508,6 +540,7 @@ function badgesOf(): SessionBadge[] {
       "New chat",
     status: statusOf(s),
     selected: s === selected,
+    agentName: agentOf(s)?.name ?? null,
   }));
 }
 
@@ -1791,6 +1824,7 @@ async function runTurn(s: Session, message: QueuedMessage): Promise<void> {
       }
       conversation = convRes.value;
     }
+    rememberAgent(conversation.sId, { sId: agent.sId, name: agent.name });
     // The message is on the server now, so the one-shot state can be
     // committed (committing earlier would desync it on a failed send).
     if (primingThisMessage) {
@@ -2105,12 +2139,14 @@ export async function listConversations(): Promise<Result<ConversationSummary[]>
   if (res.isErr()) {
     return { ok: false, error: `Failed to fetch conversations: ${res.error.message}` };
   }
+  const known = await loadConversationAgents();
   const list = res.value
     .filter((c) => c.visibility !== "deleted")
     .map((c) => ({
       sId: c.sId,
       title: c.title || "Untitled",
       updated: c.updated ?? c.created,
+      agentName: known.get(c.sId)?.name ?? null,
     }))
     .sort((a, b) => b.updated - a.updated)
     .slice(0, 200);
@@ -2191,6 +2227,7 @@ export async function loadConversation(id: string): Promise<Result> {
     }
     const t2 = performance.now();
     const loadedTasks = await loadTasks(id);
+    await loadConversationAgents(); // before the seq check: no await after it
     if (seq !== loadSeq) {
       return { ok: true }; // superseded by a newer switch: drop the stale result
     }
@@ -2202,8 +2239,24 @@ export async function loadConversation(id: string): Promise<Result> {
       select(raced);
       return { ok: true };
     }
-    const next = createSession(current(), prefsByConversation.get(id) ?? null);
+    const prefs = prefsByConversation.get(id) ?? null;
+    const next = createSession(current(), prefs);
     setConversation(next, id, title);
+    // Continue with the agent the conversation was using: the newest agent
+    // reply in the history, else what this app remembered. Unknown or no
+    // longer available agents keep the current selection.
+    const lastHeader = [...items].reverse().find((i) => i.kind === "agent-header");
+    const seenName = lastHeader && lastHeader.kind === "agent-header" ? lastHeader.agentName : null;
+    const remembered = conversationAgents?.get(id) ?? null;
+    const used =
+      (seenName ? agents.find((a) => a.name === seenName) : undefined) ??
+      (remembered?.sId ? agents.find((a) => a.sId === remembered.sId) : undefined);
+    if (!prefs && used) {
+      next.agentId = used.sId;
+    }
+    if (seenName) {
+      rememberAgent(id, { sId: used?.sId, name: seenName });
+    }
     next.items = items;
     next.earlierCursor = cursor;
     next.tasks = loadedTasks;

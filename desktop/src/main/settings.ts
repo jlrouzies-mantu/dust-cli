@@ -14,6 +14,11 @@ export interface Settings {
   layout?: Partial<import("../shared/ipc").PanelLayout>;
   notify?: Partial<import("../shared/ipc").NotifySettings>;
   windowBounds?: { width: number; height: number; x?: number; y?: number };
+  /**
+   * The agent each conversation was last used with, by conversation id. Dust's
+   * conversation list does not say, so the sidebar shows what this app saw.
+   */
+  conversationAgents?: Record<string, { sId?: string; name: string }>;
 }
 
 function file(): string {

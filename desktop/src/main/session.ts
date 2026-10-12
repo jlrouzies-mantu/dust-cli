@@ -5,6 +5,7 @@ import type {
   GetAgentConfigurationsResponseType,
   MeResponseType,
 } from "@dust-tt/client";
+import { app } from "electron";
 import { globIterate } from "glob";
 import { readFile } from "node:fs/promises";
 import { statSync } from "node:fs";
@@ -640,6 +641,7 @@ export function listSessionKeys(): string[] {
 
 function buildState(s: Session): SessionState {
   return {
+    desktopVersion: app.getVersion(),
     version: CLI_VERSION,
     upstreamVersion: UPSTREAM_CLI_VERSION,
     workspaceName,

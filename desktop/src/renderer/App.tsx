@@ -21,7 +21,7 @@ function TitleBar({ session, onPalette }: { session: SessionState | null; onPale
         <span className="fork">MANTU FORK</span>
         {session ? (
           <span className="ver">
-            v{session.version} (upstream v{session.upstreamVersion})
+            Desktop v{session.desktopVersion} · CLI v{session.version} (upstream v{session.upstreamVersion})
           </span>
         ) : null}
         <span className="spacer" />

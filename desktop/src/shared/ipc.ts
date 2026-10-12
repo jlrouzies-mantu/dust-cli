@@ -124,6 +124,9 @@ export interface SessionBadge {
 }
 
 export interface SessionState {
+  /** dustm Desktop app version (desktop/package.json, or the release tag). */
+  desktopVersion: string;
+  /** CLI core version the app was built from. */
   version: string;
   upstreamVersion: string;
   workspaceName: string | null;

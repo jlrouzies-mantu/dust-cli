@@ -117,8 +117,22 @@ function Invoke-CollapsedStep {
         $frame = ($frame + 1) % $PulseSteps
     }
 
-    $output = Receive-Job -Job $job -ErrorAction SilentlyContinue 2>&1
+    # Single Receive-Job call, since it drains the job's output buffer -
+    # calling it twice (e.g. once to try, once in a catch block) can silently
+    # lose output. 2>&1 merges error records into the same stream so a
+    # failure's captured output (printed before it threw) isn't lost either.
+    # -ErrorAction Continue (not SilentlyContinue) is what makes that work:
+    # SilentlyContinue discards the job's error records before the redirect
+    # can capture them, which is why a failed step used to print an empty
+    # "--- output ---" block followed by "unknown error". Continue also keeps
+    # this script's own $ErrorActionPreference = "Stop" from throwing right
+    # here, so the diagnosis below still gets printed.
+    $output = Receive-Job -Job $job -ErrorAction Continue 2>&1
     $succeeded = $job.State -eq "Completed"
+    # The exception that actually killed the job lives on the child job and
+    # disappears with Remove-Job, so read it first - it's the fallback for a
+    # step that died without printing anything.
+    $failureReason = if ($job.ChildJobs.Count -gt 0) { $job.ChildJobs[0].JobStateInfo.Reason.Message } else { $null }
     Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
 
     if ($succeeded) {
@@ -128,7 +142,7 @@ function Invoke-CollapsedStep {
     else {
         Write-Host "`r$ClearLine$AnsiFgRed[FAILED]$AnsiReset  $Title"
         Write-Host "$AnsiFgRed  --- output ---$AnsiReset"
-        $lastErrorMessage = "unknown error"
+        $lastErrorMessage = $null
         $output | ForEach-Object {
             if ($_ -is [System.Management.Automation.ErrorRecord]) {
                 $lastErrorMessage = $_.Exception.Message
@@ -136,6 +150,8 @@ function Invoke-CollapsedStep {
             Write-Host "$AnsiFgGray    $_$AnsiReset"
         }
         Write-Host "$AnsiFgRed  --------------$AnsiReset"
+        if (-not $lastErrorMessage) { $lastErrorMessage = $failureReason }
+        if (-not $lastErrorMessage) { $lastErrorMessage = "unknown error" }
         throw "$Title failed: $lastErrorMessage"
     }
 }
@@ -202,11 +218,143 @@ function Write-ErrorMsg {
     Write-Host "  [FAILED] $Message" -ForegroundColor Red
 }
 
+# ---- Install-target choice and shared Desktop helpers ----
+
+$script:StepNo = 0
+$script:StepTotal = 0
+
+function Write-StepHeader {
+    # Numbered "Step x/N" header; N depends on what the user chose to install.
+    param([string]$Title)
+    $script:StepNo++
+    Write-Header "Step $($script:StepNo)/$($script:StepTotal) - $Title"
+}
+
+function Read-InstallChoice {
+    # Returns "cli", "desktop" or "both". Read-Host works for a console run
+    # and for `irm | iex` alike; an empty answer (or no console to read from)
+    # selects the CLI, which is what this installer has always done.
+    Write-Host "  What would you like to install?" -ForegroundColor White
+    Write-Host "    [1] dustm CLI        (default)" -ForegroundColor Gray
+    Write-Host "    [2] dustm Desktop" -ForegroundColor Gray
+    Write-Host "    [3] Both" -ForegroundColor Gray
+    while ($true) {
+        $answer = $null
+        try { $answer = Read-Host "  Choice [1-3, Enter = 1]" } catch { $answer = "" }
+        switch (("$answer").Trim()) {
+            ""  { return "cli" }
+            "1" { return "cli" }
+            "2" { return "desktop" }
+            "3" { return "both" }
+            default { Write-Info "Please answer 1, 2 or 3." }
+        }
+    }
+}
+
+function Assert-DesktopNotRunning {
+    # Windows can't replace files of a running exe. Ask the user to close it
+    # rather than killing anything on their behalf.
+    param([Parameter(Mandatory)][string]$InstallDir)
+    $prefix = $InstallDir.TrimEnd('\') + '\'
+    $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+        try { $_.Path -and $_.Path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) } catch { $false }
+    })
+    if ($running.Count -gt 0) {
+        $ids = ($running | ForEach-Object { $_.Id }) -join ", "
+        throw "dustm Desktop is still running (PID: $ids) from $InstallDir. Close it (including its tray/background windows) and re-run this installer."
+    }
+}
+
+function Set-ShortcutAppId {
+    # Stamps System.AppUserModel.ID on a .lnk. It must equal the id the app
+    # sets (app.setAppUserModelId in desktop/src/main/index.ts): Windows then
+    # groups the running window under the pinned/Start Menu shortcut (one
+    # taskbar button, with its icon) and allows its toast notifications.
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$AppId)
+    if (-not ("DustmShortcut.AppId" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+namespace DustmShortcut {
+  [StructLayout(LayoutKind.Sequential, Pack = 4)]
+  public struct PropertyKey { public Guid fmtid; public uint pid; }
+  [StructLayout(LayoutKind.Explicit)]
+  public struct PropVariant {
+    [FieldOffset(0)] public ushort vt;
+    [FieldOffset(8)] public IntPtr p;
+    [FieldOffset(16)] public IntPtr p2;
+  }
+  [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IPropertyStore {
+    void GetCount(out uint c);
+    void GetAt(uint i, out PropertyKey k);
+    void GetValue(ref PropertyKey k, out PropVariant v);
+    void SetValue(ref PropertyKey k, ref PropVariant v);
+    void Commit();
+  }
+  [ComImport, Guid("0000010b-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IPersistFile {
+    void GetClassID(out Guid g);
+    [PreserveSig] int IsDirty();
+    void Load([MarshalAs(UnmanagedType.LPWStr)] string f, uint mode);
+    void Save([MarshalAs(UnmanagedType.LPWStr)] string f, bool remember);
+    void SaveCompleted([MarshalAs(UnmanagedType.LPWStr)] string f);
+    void GetCurFile([MarshalAs(UnmanagedType.LPWStr)] out string f);
+  }
+  [ComImport, Guid("00021401-0000-0000-C000-000000000046")] class ShellLink {}
+  public static class AppId {
+    public static void Set(string lnk, string id) {
+      object link = new ShellLink();
+      try {
+        ((IPersistFile)link).Load(lnk, 2 /* STGM_READWRITE */);
+        PropertyKey key = new PropertyKey { fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), pid = 5 };
+        PropVariant v = new PropVariant { vt = 31 /* VT_LPWSTR */, p = Marshal.StringToCoTaskMemUni(id) };
+        try {
+          IPropertyStore store = (IPropertyStore)link;
+          store.SetValue(ref key, ref v);
+          store.Commit();
+        } finally { Marshal.FreeCoTaskMem(v.p); }
+        ((IPersistFile)link).Save(lnk, true);
+      } finally { Marshal.ReleaseComObject(link); }
+    }
+  }
+}
+"@
+    }
+    [DustmShortcut.AppId]::Set($Path, $AppId)
+}
+
+function New-DesktopShortcuts {
+    param([Parameter(Mandatory)][string]$ExePath)
+    $shell = New-Object -ComObject WScript.Shell
+    $startMenu = Join-Path ([Environment]::GetFolderPath("Programs")) "dustm Desktop.lnk"
+    $desktop = Join-Path ([Environment]::GetFolderPath("Desktop")) "dustm Desktop.lnk"
+    foreach ($lnk in @($startMenu, $desktop)) {
+        $s = $shell.CreateShortcut($lnk)
+        $s.TargetPath = $ExePath
+        $s.WorkingDirectory = Split-Path $ExePath -Parent
+        $s.IconLocation = "$ExePath,0"
+        $s.Description = "dustm Desktop"
+        $s.Save()
+        try { Set-ShortcutAppId -Path $lnk -AppId "com.mantu.dustm.desktop" }
+        catch { Write-Info "Could not set the taskbar id on $lnk ($($_.Exception.Message)) - the running app may show as a separate taskbar button." }
+        Write-Success "Shortcut: $lnk"
+    }
+}
+
 try {
 
     Write-Banner
 
-    Write-Header "Step 1/7 - Preparing NVM directory"
+    Write-Header "What to install"
+    $InstallChoice = Read-InstallChoice
+    $InstallCli = $InstallChoice -in @("cli", "both")
+    $InstallDesktop = $InstallChoice -in @("desktop", "both")
+    # Node.js is always set up (steps 1-4): both the CLI and the Desktop build need it.
+    $script:StepTotal = 4 + $(if ($InstallCli) { 3 } else { 0 }) + $(if ($InstallDesktop) { 2 } else { 0 })
+
+
+    Write-StepHeader "Preparing NVM directory"
 
     Write-Step "Checking NVM directory: $NvmRoot"
 
@@ -218,7 +366,7 @@ try {
         Write-Info "NVM directory already exists."
     }
 
-    Write-Header "Step 2/7 - Installing NVM for Windows"
+    Write-StepHeader "Installing NVM for Windows"
 
     $nvmExe = Join-Path $NvmRoot "nvm.exe"
 
@@ -234,8 +382,15 @@ try {
             # No overwrite:bool overload exists on Windows PowerShell 5.1's
             # System.IO.Compression.FileSystem (only .NET Core/5+ has it) -
             # this only runs when nvm.exe is missing, i.e. a fresh $NvmRoot,
-            # so there's nothing to overwrite.
-            [System.IO.Compression.ZipFile]::ExtractToDirectory($using:NvmZipPath, $using:NvmRoot)
+            # so there's nothing to overwrite. try/catch because an exception
+            # from a .NET method call doesn't fail the job on its own under
+            # the job's default $ErrorActionPreference of "Continue".
+            try {
+                [System.IO.Compression.ZipFile]::ExtractToDirectory($using:NvmZipPath, $using:NvmRoot)
+            }
+            catch {
+                throw "Extracting $($using:NvmZipPath) into $($using:NvmRoot) failed - $($_.Exception.Message)"
+            }
         } | Out-Null
     }
 
@@ -302,7 +457,7 @@ try {
     }
     Write-Success "NVM ready at: $nvmExe"
 
-    Write-Header "Step 3/7 - Installing Node.js $NodeVersion"
+    Write-StepHeader "Installing Node.js $NodeVersion"
 
     $nodeVersionDir = Join-Path $NvmRoot "v$NodeVersion"
 
@@ -341,7 +496,7 @@ try {
     $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $env:Path = [string]::Join(";", @($env:NVM_HOME, $env:NVM_SYMLINK, $userPath, $machinePath))
 
-    Write-Header "Step 4/7 - Verifying Node.js and npm"
+    Write-StepHeader "Verifying Node.js and npm"
 
     $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
     if (-not $nodeCommand) {
@@ -391,7 +546,8 @@ try {
         Write-Success "npm is up to date."
     }
 
-    Write-Header "Step 5/7 - Verifying the local git checkout"
+    if ($InstallCli) {
+    Write-StepHeader "Verifying the local git checkout"
 
     $gitCommand = Get-Command git -ErrorAction SilentlyContinue
     if (-not $gitCommand) {
@@ -427,7 +583,7 @@ try {
         Write-Info "This branch's package.json names its bin '$binName', not the Mantu fork's usual 'dustm' - continuing with '$binName'."
     }
 
-    Write-Header "Step 6/7 - Building the CLI"
+    Write-StepHeader "Building the CLI"
 
     Push-Location $RepoDir
     try {
@@ -493,7 +649,7 @@ try {
 
     Write-Success "Build complete."
 
-    Write-Header "Step 7/7 - Verifying the '$binName' command"
+    Write-StepHeader "Verifying the '$binName' command"
 
     $dustCommand = Get-Command $binName -ErrorAction SilentlyContinue
     if (-not $dustCommand) {
@@ -513,6 +669,58 @@ try {
     Write-Header "All done"
     Write-Success "Local-mode build from branch '$currentBranch' is ready at $RepoDir."
     Write-Success "To update: git pull (or checkout) inside $RepoDir yourself, then re-run this script."
+    }
+
+    if ($InstallDesktop) {
+        $DesktopSrc  = Join-Path $RepoDir "desktop"
+        $DesktopOut  = "release-local" # separate from 'release' so a running dev/packaged app isn't touched
+        $DesktopDir  = Join-Path $env:LOCALAPPDATA "Programs\dustm Desktop"
+        $DesktopExe  = Join-Path $DesktopDir "dustm Desktop.exe"
+        $UnpackedDir = Join-Path $DesktopSrc "$DesktopOut\win-unpacked"
+        if (-not (Test-Path (Join-Path $DesktopSrc "package.json"))) {
+            throw "$DesktopSrc was not found - this checkout has no desktop/ folder."
+        }
+
+        Write-StepHeader "Building dustm Desktop locally"
+
+        Invoke-CollapsedStep -Title "Installing dependencies (root + desktop)" -ScriptBlock {
+            # The desktop main process imports the CLI's modules from ../src.
+            Set-Location $using:RepoDir
+            & $using:npmCommandPath install
+            if ($LASTEXITCODE -ne 0) { throw "npm install (root) failed with exit code $LASTEXITCODE" }
+            Set-Location $using:DesktopSrc
+            & $using:npmCommandPath install
+            if ($LASTEXITCODE -ne 0) { throw "npm install (desktop) failed with exit code $LASTEXITCODE" }
+        } | Out-Null
+
+        Invoke-CollapsedStep -Title "Building and packaging (npm run package:dir)" -ScriptBlock {
+            Set-Location $using:DesktopSrc
+            & $using:npmCommandPath run package:dir -- "--config.directories.output=$($using:DesktopOut)"
+            if ($LASTEXITCODE -ne 0) { throw "npm run package:dir failed with exit code $LASTEXITCODE" }
+            if (-not (Test-Path (Join-Path $using:UnpackedDir "dustm Desktop.exe"))) {
+                throw "Packaging finished but dustm Desktop.exe was not found in $($using:UnpackedDir)."
+            }
+        } | Out-Null
+
+        Write-StepHeader "Installing dustm Desktop"
+
+        Assert-DesktopNotRunning -InstallDir $DesktopDir
+
+        Invoke-CollapsedStep -Title "Copying dustm Desktop to $DesktopDir" -ScriptBlock {
+            $dir = $using:DesktopDir
+            if (Test-Path $dir) {
+                try { Remove-Item -Recurse -Force $dir -ErrorAction Stop }
+                catch { throw "Could not remove the previous install at $dir - $($_.Exception.Message) Close dustm Desktop and re-run." }
+            }
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            Copy-Item -Path (Join-Path $using:UnpackedDir "*") -Destination $dir -Recurse -Force -ErrorAction Stop
+        } | Out-Null
+
+        New-DesktopShortcuts -ExePath $DesktopExe
+
+        Write-Header "dustm Desktop installed"
+        Write-Success "Local build of dustm Desktop is ready at $DesktopDir (built from $RepoDir)."
+    }
 }
 catch {
     Write-ErrorMsg $_.Exception.Message

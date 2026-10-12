@@ -12,7 +12,11 @@
 # On macOS, this downloads a prebuilt release (built by CI on a
 # matching macOS runner/arch - see .github/workflows/release.yml),
 # so no npm install/build happens on your machine. Linux has no
-# prebuilt release yet, so it still builds from source there.
+# prebuilt CLI release yet, so it still builds from source there.
+#
+# At the start it asks what to install: the CLI, dustm Desktop (a
+# prebuilt Electron app, no Node.js needed: .app on macOS, AppImage on
+# Linux x64) or both. Under `curl | bash` the answer is read from /dev/tty.
 #
 # Usage:
 #   curl -fsSL "https://raw.githubusercontent.com/jlrouzies-mantu/dust-cli/main/scripts/install-dustcli.sh?nocache=$(date +%s)" | bash
@@ -319,9 +323,153 @@ npm_link_step() {
   npm link
 }
 
-banner
+# ---- Install-target choice, step numbering and dustm Desktop ----
 
-header "Step 1/6 - Installing nvm"
+STEP_NO=0
+STEP_TOTAL=0
+step_header() {
+  STEP_NO=$(( STEP_NO + 1 ))
+  header "Step $STEP_NO/$STEP_TOTAL - $1"
+}
+
+# Sets INSTALL_CLI / INSTALL_DESKTOP. Reads from /dev/tty so it still works
+# under `curl | bash` (stdin is the script itself then); with no terminal at
+# all, or an empty answer, it defaults to the CLI.
+ask_install_choice() {
+  echo -e "  What would you like to install?"
+  echo -e "${GRAY}    [1] dustm CLI        (default)${RESET}"
+  echo -e "${GRAY}    [2] dustm Desktop${RESET}"
+  echo -e "${GRAY}    [3] Both${RESET}"
+  local answer=""
+  while true; do
+    answer=""
+    printf '  Choice [1-3, Enter = 1]: '
+    { read -r answer < /dev/tty; } 2>/dev/null || { answer=""; echo ""; }
+    case "$answer" in
+      ""|1) INSTALL_CLI=1; INSTALL_DESKTOP=0; return ;;
+      2)    INSTALL_CLI=0; INSTALL_DESKTOP=1; return ;;
+      3)    INSTALL_CLI=1; INSTALL_DESKTOP=1; return ;;
+      *)    info "Please answer 1, 2 or 3." ;;
+    esac
+    # No terminal to ask on: don't loop forever.
+    [ -r /dev/tty ] || { INSTALL_CLI=1; INSTALL_DESKTOP=0; return; }
+  done
+}
+
+DESKTOP_ASSET=""
+case "$(uname -s)" in
+  Darwin)
+    case "$(uname -m)" in
+      arm64)  DESKTOP_ASSET="dustm-desktop-macos-arm64.zip" ;;
+      x86_64) DESKTOP_ASSET="dustm-desktop-macos-x64.zip" ;;
+    esac
+    ;;
+  Linux)
+    [ "$(uname -m)" = "x86_64" ] && DESKTOP_ASSET="dustm-desktop-linux-x64.AppImage"
+    ;;
+esac
+DESKTOP_DL_PATH="$INSTALL_ROOT/$DESKTOP_ASSET"
+
+# Desktop has its own releases (tags desktop-X.Y.Z, from
+# .github/workflows/release-desktop.yml) that are never "latest" - that stays
+# the CLI's - so find the newest desktop-* release that has our asset.
+resolve_desktop_url() {
+  curl -fsSL -H "User-Agent: dust-cli-installer" \
+    "https://api.github.com/repos/jlrouzies-mantu/dust-cli/releases?per_page=50" \
+    | grep -o "\"browser_download_url\": *\"[^\"]*/download/desktop-v\?[0-9.]*/$DESKTOP_ASSET\"" \
+    | head -n 1 | sed 's/.*"\(https[^"]*\)"$/\1/'
+}
+
+download_desktop_step() {
+  local url
+  url=$(resolve_desktop_url)
+  if [ -z "$url" ]; then
+    echo "No dustm Desktop release with $DESKTOP_ASSET was found (no desktop-* release has been published yet)." >&2
+    return 1
+  fi
+  curl -fsSL "$url" -o "$DESKTOP_DL_PATH"
+}
+
+install_desktop_macos_step() {
+  local app_root="/Applications"
+  [ -w "$app_root" ] || app_root="$HOME/Applications"
+  mkdir -p "$app_root"
+  local dest="$app_root/dustm Desktop.app"
+  local tmp
+  tmp=$(mktemp -d)
+  ditto -x -k "$DESKTOP_DL_PATH" "$tmp"
+  local app
+  app=$(find "$tmp" -maxdepth 2 -name '*.app' -type d | head -n 1)
+  [ -n "$app" ] || { echo "No .app bundle found in $DESKTOP_ASSET"; rm -rf "$tmp"; return 1; }
+  rm -rf "$dest"
+  mv "$app" "$dest"
+  rm -rf "$tmp" "$DESKTOP_DL_PATH"
+  # Unsigned build: drop the quarantine flag so Gatekeeper doesn't refuse it.
+  xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true
+  echo "$dest" > "$INSTALL_ROOT/.desktop-path"
+}
+
+install_desktop_linux_step() {
+  local dest_dir="$HOME/Applications"
+  mkdir -p "$dest_dir" "$HOME/.local/share/applications"
+  local dest="$dest_dir/dustm-desktop.AppImage"
+  mv -f "$DESKTOP_DL_PATH" "$dest"
+  chmod +x "$dest"
+  cat > "$HOME/.local/share/applications/dustm-desktop.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=dustm Desktop
+Comment=Desktop app for the Mantu fork of Dust
+Exec="$dest" %U
+Terminal=false
+Categories=Development;
+EOF
+  echo "$dest" > "$INSTALL_ROOT/.desktop-path"
+}
+
+install_desktop() {
+  if [ -z "$DESKTOP_ASSET" ]; then
+    fail "dustm Desktop has no prebuilt build for $(uname -s) $(uname -m) (macOS arm64/x64 and Linux x64 only)."
+    exit 1
+  fi
+  mkdir -p "$INSTALL_ROOT"
+
+  step_header "Downloading dustm Desktop"
+  # Don't replace a running app; ask the user to close it instead.
+  if [ "$(uname -s)" = "Darwin" ]; then
+    if pgrep -f "dustm Desktop.app/Contents/MacOS" >/dev/null 2>&1; then
+      fail "dustm Desktop is running. Quit it and re-run this installer."
+      exit 1
+    fi
+  elif pgrep -f "dustm-desktop.AppImage" >/dev/null 2>&1; then
+    fail "dustm Desktop is running. Close it and re-run this installer."
+    exit 1
+  fi
+  invoke_collapsed_step "Downloading $DESKTOP_ASSET (latest release)" download_desktop_step
+
+  step_header "Installing dustm Desktop"
+  if [ "$(uname -s)" = "Darwin" ]; then
+    invoke_collapsed_step "Installing dustm Desktop.app" install_desktop_macos_step
+  else
+    invoke_collapsed_step "Installing the dustm Desktop AppImage" install_desktop_linux_step
+  fi
+  local where
+  where=$(cat "$INSTALL_ROOT/.desktop-path" 2>/dev/null || true)
+
+  header "dustm Desktop installed"
+  success "dustm Desktop is ready${where:+ at $where}."
+  if [ "$(uname -s)" = "Darwin" ]; then
+    info "Open it from Launchpad/Spotlight. It shares sign-in and settings with the CLI (no CLI install needed)."
+  else
+    info "Launch it from your application menu or run the AppImage directly. It shares sign-in and settings with the CLI."
+    info "Credential storage needs libsecret (e.g. apt install libsecret-1-0 / dnf install libsecret) and a keyring such as gnome-keyring."
+    info "AppImages need FUSE 2 (libfuse2) on most distributions."
+  fi
+}
+
+install_cli() {
+
+step_header "Installing nvm"
 
 if [ -s "$NVM_DIR/nvm.sh" ]; then
   info "nvm already installed at $NVM_DIR"
@@ -332,7 +480,7 @@ fi
 # shellcheck disable=SC1091
 \. "$NVM_DIR/nvm.sh"
 
-header "Step 2/6 - Installing Node.js $NODE_VERSION"
+step_header "Installing Node.js $NODE_VERSION"
 
 if [ -d "$NVM_DIR/versions/node/v$NODE_VERSION" ]; then
   info "Node.js $NODE_VERSION is already installed via nvm - skipping."
@@ -345,7 +493,7 @@ success "Node.js $NODE_VERSION is now active."
 step "Version:"
 node --version
 
-header "Step 3/6 - Verifying npm"
+step_header "Verifying npm"
 
 invoke_collapsed_step "Updating npm to the latest version" npm install -g npm@latest
 success "npm is up to date ($(npm --version))."
@@ -353,28 +501,28 @@ success "npm is up to date ($(npm --version))."
 mkdir -p "$INSTALL_ROOT"
 
 if [ "$USE_PREBUILT_RELEASE" -eq 1 ]; then
-  header "Step 4/6 - Downloading the prebuilt Mantu fork release"
+  step_header "Downloading the prebuilt Mantu fork release"
 
   invoke_collapsed_step "Downloading $RELEASE_ASSET (latest release)" \
     curl -fsSL "$RELEASE_BASE_URL/$RELEASE_ASSET" -o "$RELEASE_ZIP_PATH"
   invoke_collapsed_step "Extracting the release" extract_prebuilt_release_step
   success "Ready at: $REPO_DIR"
 
-  header "Step 5/6 - Installing the CLI"
+  step_header "Installing the CLI"
 
   invoke_collapsed_step "Verifying keytar's native module (secure credential storage)" verify_keytar_step
   invoke_collapsed_step "Linking the 'dustm' command globally (npm link)" npm_link_step
 
   success "Install complete."
 else
-  header "Step 4/6 - Downloading the Mantu fork"
+  step_header "Downloading the Mantu fork"
 
   invoke_collapsed_step "Downloading jlrouzies-mantu/dust-cli@main" \
     curl -fsSL "$REPO_ZIP_URL" -o "$REPO_ZIP_PATH"
   invoke_collapsed_step "Extracting the Mantu fork" extract_mantu_fork_step
   success "Ready at: $REPO_DIR"
 
-  header "Step 5/6 - Building the CLI"
+  step_header "Building the CLI"
 
   invoke_collapsed_step "Installing dependencies (npm install)" npm_install_step
   invoke_collapsed_step "Verifying keytar's native module (secure credential storage)" verify_keytar_step
@@ -384,7 +532,7 @@ else
   success "Build complete."
 fi
 
-header "Step 6/6 - Verifying the 'dustm' command"
+step_header "Verifying the 'dustm' command"
 
 if ! command -v dustm >/dev/null 2>&1; then
   fail "dust-cli was built, but the 'dustm' command was not found in PATH."
@@ -398,3 +546,15 @@ header "All done"
 success "nvm, Node.js, and the Mantu fork of Dust CLI are ready."
 
 cheat_sheet
+}
+
+banner
+
+header "What to install"
+INSTALL_CLI=1
+INSTALL_DESKTOP=0
+ask_install_choice
+STEP_TOTAL=$(( INSTALL_CLI * 6 + INSTALL_DESKTOP * 2 ))
+
+if [ "$INSTALL_CLI" -eq 1 ]; then install_cli; fi
+if [ "$INSTALL_DESKTOP" -eq 1 ]; then install_desktop; fi

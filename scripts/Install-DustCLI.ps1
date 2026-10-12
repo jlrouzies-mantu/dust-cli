@@ -132,8 +132,18 @@ function Invoke-CollapsedStep {
     # calling it twice (e.g. once to try, once in a catch block) can silently
     # lose output. 2>&1 merges error records into the same stream so a
     # failure's captured output (printed before it threw) isn't lost either.
-    $output = Receive-Job -Job $job -ErrorAction SilentlyContinue 2>&1
+    # -ErrorAction Continue (not SilentlyContinue) is what makes that work:
+    # SilentlyContinue discards the job's error records before the redirect
+    # can capture them, which is why a failed step used to print an empty
+    # "--- output ---" block followed by "unknown error". Continue also keeps
+    # this script's own $ErrorActionPreference = "Stop" from throwing right
+    # here, so the diagnosis below still gets printed.
+    $output = Receive-Job -Job $job -ErrorAction Continue 2>&1
     $succeeded = $job.State -eq "Completed"
+    # The exception that actually killed the job lives on the child job and
+    # disappears with Remove-Job, so read it first - it's the fallback for a
+    # step that died without printing anything.
+    $failureReason = if ($job.ChildJobs.Count -gt 0) { $job.ChildJobs[0].JobStateInfo.Reason.Message } else { $null }
     Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
 
     if ($succeeded) {
@@ -143,7 +153,7 @@ function Invoke-CollapsedStep {
     else {
         Write-Host "`r$ClearLine$AnsiFgRed[FAILED]$AnsiReset  $Title"
         Write-Host "$AnsiFgRed  --- output ---$AnsiReset"
-        $lastErrorMessage = "unknown error"
+        $lastErrorMessage = $null
         $output | ForEach-Object {
             if ($_ -is [System.Management.Automation.ErrorRecord]) {
                 $lastErrorMessage = $_.Exception.Message
@@ -151,8 +161,40 @@ function Invoke-CollapsedStep {
             Write-Host "$AnsiFgGray    $_$AnsiReset"
         }
         Write-Host "$AnsiFgRed  --------------$AnsiReset"
+        if (-not $lastErrorMessage) { $lastErrorMessage = $failureReason }
+        if (-not $lastErrorMessage) { $lastErrorMessage = "unknown error" }
         throw "$Title failed: $lastErrorMessage"
     }
+}
+
+function Get-ProcessesUsingPath {
+    <#
+        Returns the node.exe processes that have a file from under $Path
+        loaded as a module - in practice a 'dustm' session still running in
+        another terminal, holding this install's keytar.node. Windows refuses
+        to delete a module mapped into a live process, so those sessions have
+        to be closed before the install directory can be replaced. The global
+        npm link means such a process shows the linked path on its command
+        line, but its loaded modules resolve to the real directory, which is
+        why this matches on modules rather than on the command line.
+        Processes owned by another user don't expose their module list; those
+        are skipped rather than guessed at.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $prefix = $Path.TrimEnd('\') + '\'
+    $holders = foreach ($proc in (Get-Process -Name node -ErrorAction SilentlyContinue)) {
+        try {
+            if (@($proc.Modules | Where-Object { $_.FileName -like "$prefix*" }).Count -gt 0) {
+                $proc
+            }
+        }
+        catch {
+            # Module list unreadable (another user's process, or it exited
+            # mid-enumeration) - nothing to report for it.
+        }
+    }
+    return $holders
 }
 
 function Write-BannerBorder {
@@ -263,11 +305,143 @@ function Write-DustCliCheatSheet {
     Write-Success "`nRun 'dustm login' to authenticate, then 'dustm' to start chatting."
 }
 
+# ---- Install-target choice and shared Desktop helpers ----
+
+$script:StepNo = 0
+$script:StepTotal = 0
+
+function Write-StepHeader {
+    # Numbered "Step x/N" header; N depends on what the user chose to install.
+    param([string]$Title)
+    $script:StepNo++
+    Write-Header "Step $($script:StepNo)/$($script:StepTotal) - $Title"
+}
+
+function Read-InstallChoice {
+    # Returns "cli", "desktop" or "both". Read-Host works for a console run
+    # and for `irm | iex` alike; an empty answer (or no console to read from)
+    # selects the CLI, which is what this installer has always done.
+    Write-Host "  What would you like to install?" -ForegroundColor White
+    Write-Host "    [1] dustm CLI        (default)" -ForegroundColor Gray
+    Write-Host "    [2] dustm Desktop" -ForegroundColor Gray
+    Write-Host "    [3] Both" -ForegroundColor Gray
+    while ($true) {
+        $answer = $null
+        try { $answer = Read-Host "  Choice [1-3, Enter = 1]" } catch { $answer = "" }
+        switch (("$answer").Trim()) {
+            ""  { return "cli" }
+            "1" { return "cli" }
+            "2" { return "desktop" }
+            "3" { return "both" }
+            default { Write-Info "Please answer 1, 2 or 3." }
+        }
+    }
+}
+
+function Assert-DesktopNotRunning {
+    # Windows can't replace files of a running exe. Ask the user to close it
+    # rather than killing anything on their behalf.
+    param([Parameter(Mandatory)][string]$InstallDir)
+    $prefix = $InstallDir.TrimEnd('\') + '\'
+    $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+        try { $_.Path -and $_.Path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) } catch { $false }
+    })
+    if ($running.Count -gt 0) {
+        $ids = ($running | ForEach-Object { $_.Id }) -join ", "
+        throw "dustm Desktop is still running (PID: $ids) from $InstallDir. Close it (including its tray/background windows) and re-run this installer."
+    }
+}
+
+function Set-ShortcutAppId {
+    # Stamps System.AppUserModel.ID on a .lnk. It must equal the id the app
+    # sets (app.setAppUserModelId in desktop/src/main/index.ts): Windows then
+    # groups the running window under the pinned/Start Menu shortcut (one
+    # taskbar button, with its icon) and allows its toast notifications.
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$AppId)
+    if (-not ("DustmShortcut.AppId" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+namespace DustmShortcut {
+  [StructLayout(LayoutKind.Sequential, Pack = 4)]
+  public struct PropertyKey { public Guid fmtid; public uint pid; }
+  [StructLayout(LayoutKind.Explicit)]
+  public struct PropVariant {
+    [FieldOffset(0)] public ushort vt;
+    [FieldOffset(8)] public IntPtr p;
+    [FieldOffset(16)] public IntPtr p2;
+  }
+  [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IPropertyStore {
+    void GetCount(out uint c);
+    void GetAt(uint i, out PropertyKey k);
+    void GetValue(ref PropertyKey k, out PropVariant v);
+    void SetValue(ref PropertyKey k, ref PropVariant v);
+    void Commit();
+  }
+  [ComImport, Guid("0000010b-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IPersistFile {
+    void GetClassID(out Guid g);
+    [PreserveSig] int IsDirty();
+    void Load([MarshalAs(UnmanagedType.LPWStr)] string f, uint mode);
+    void Save([MarshalAs(UnmanagedType.LPWStr)] string f, bool remember);
+    void SaveCompleted([MarshalAs(UnmanagedType.LPWStr)] string f);
+    void GetCurFile([MarshalAs(UnmanagedType.LPWStr)] out string f);
+  }
+  [ComImport, Guid("00021401-0000-0000-C000-000000000046")] class ShellLink {}
+  public static class AppId {
+    public static void Set(string lnk, string id) {
+      object link = new ShellLink();
+      try {
+        ((IPersistFile)link).Load(lnk, 2 /* STGM_READWRITE */);
+        PropertyKey key = new PropertyKey { fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), pid = 5 };
+        PropVariant v = new PropVariant { vt = 31 /* VT_LPWSTR */, p = Marshal.StringToCoTaskMemUni(id) };
+        try {
+          IPropertyStore store = (IPropertyStore)link;
+          store.SetValue(ref key, ref v);
+          store.Commit();
+        } finally { Marshal.FreeCoTaskMem(v.p); }
+        ((IPersistFile)link).Save(lnk, true);
+      } finally { Marshal.ReleaseComObject(link); }
+    }
+  }
+}
+"@
+    }
+    [DustmShortcut.AppId]::Set($Path, $AppId)
+}
+
+function New-DesktopShortcuts {
+    param([Parameter(Mandatory)][string]$ExePath)
+    $shell = New-Object -ComObject WScript.Shell
+    $startMenu = Join-Path ([Environment]::GetFolderPath("Programs")) "dustm Desktop.lnk"
+    $desktop = Join-Path ([Environment]::GetFolderPath("Desktop")) "dustm Desktop.lnk"
+    foreach ($lnk in @($startMenu, $desktop)) {
+        $s = $shell.CreateShortcut($lnk)
+        $s.TargetPath = $ExePath
+        $s.WorkingDirectory = Split-Path $ExePath -Parent
+        $s.IconLocation = "$ExePath,0"
+        $s.Description = "dustm Desktop"
+        $s.Save()
+        try { Set-ShortcutAppId -Path $lnk -AppId "com.mantu.dustm.desktop" }
+        catch { Write-Info "Could not set the taskbar id on $lnk ($($_.Exception.Message)) - the running app may show as a separate taskbar button." }
+        Write-Success "Shortcut: $lnk"
+    }
+}
+
 try {
 
     Write-Banner
 
-    Write-Header "Step 1/7 - Preparing NVM directory"
+    Write-Header "What to install"
+    $InstallChoice = Read-InstallChoice
+    $InstallCli = $InstallChoice -in @("cli", "both")
+    $InstallDesktop = $InstallChoice -in @("desktop", "both")
+    $script:StepTotal = $(if ($InstallCli) { 7 } else { 0 }) + $(if ($InstallDesktop) { 2 } else { 0 })
+
+    if ($InstallCli) {
+
+    Write-StepHeader "Preparing NVM directory"
 
     # Don't assume this machine has no NVM yet - a user reported already
     # having nvm-windows installed at their own location (e.g.
@@ -311,7 +485,7 @@ try {
         }
     }
 
-    Write-Header "Step 2/7 - Installing NVM for Windows"
+    Write-StepHeader "Installing NVM for Windows"
 
     $nvmExe = Join-Path $NvmRoot "nvm.exe"
 
@@ -330,8 +504,15 @@ try {
             # No overwrite:bool overload exists on Windows PowerShell 5.1's
             # System.IO.Compression.FileSystem (only .NET Core/5+ has it) -
             # this only runs when nvm.exe is missing, i.e. a fresh $NvmRoot,
-            # so there's nothing to overwrite.
-            [System.IO.Compression.ZipFile]::ExtractToDirectory($using:NvmZipPath, $using:NvmRoot)
+            # so there's nothing to overwrite. try/catch because an exception
+            # from a .NET method call doesn't fail the job on its own under
+            # the job's default $ErrorActionPreference of "Continue".
+            try {
+                [System.IO.Compression.ZipFile]::ExtractToDirectory($using:NvmZipPath, $using:NvmRoot)
+            }
+            catch {
+                throw "Extracting $($using:NvmZipPath) into $($using:NvmRoot) failed - $($_.Exception.Message)"
+            }
         } | Out-Null
     }
 
@@ -431,7 +612,7 @@ try {
     }
     Write-Success "NVM ready at: $nvmExe"
 
-    Write-Header "Step 3/7 - Installing Node.js $NodeVersion"
+    Write-StepHeader "Installing Node.js $NodeVersion"
 
     $nodeVersionDir = Join-Path $NvmRoot "v$NodeVersion"
 
@@ -482,7 +663,7 @@ try {
     $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $env:Path = [string]::Join(";", @($env:NVM_HOME, $env:NVM_SYMLINK, $userPath, $machinePath))
 
-    Write-Header "Step 4/7 - Verifying Node.js and npm"
+    Write-StepHeader "Verifying Node.js and npm"
 
     $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
     if (-not $nodeCommand) {
@@ -532,7 +713,18 @@ try {
         Write-Success "npm is up to date."
     }
 
-    Write-Header "Step 5/7 - Downloading the prebuilt Mantu fork release"
+    Write-StepHeader "Downloading the prebuilt Mantu fork release"
+
+    # This step wipes and re-extracts $RepoDir, and Windows won't delete a
+    # native module (node_modules\keytar\build\Release\keytar.node) that is
+    # still mapped into a running dustm session - the wipe fails halfway and
+    # extraction then dies on "the file already exists". Check before
+    # downloading ~20MB, and name the processes to close.
+    $repoInUse = @(Get-ProcessesUsingPath -Path $RepoDir)
+    if ($repoInUse.Count -gt 0) {
+        $repoInUsePids = ($repoInUse | ForEach-Object { $_.Id }) -join ", "
+        throw "A 'dustm' session is still running and using $RepoDir (node.exe PID: $repoInUsePids). Windows keeps its native modules locked while it runs, so the install directory can't be replaced. Close those sessions (or run: Stop-Process -Id $repoInUsePids) and re-run this installer."
+    }
 
     if (-not (Test-Path $InstallRoot)) {
         New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
@@ -626,12 +818,32 @@ try {
     Invoke-CollapsedStep -Title "Extracting the release" -ScriptBlock {
         $repoDir = $using:RepoDir
         if (Test-Path $repoDir) {
-            Remove-Item -Recurse -Force $repoDir
+            # -ErrorAction Stop because a job's default is Continue: without
+            # it a locked file (a still-running dustm session, or antivirus
+            # holding node_modules) only leaves a half-deleted directory
+            # behind, and the extraction below then reports the misleading
+            # "the file already exists" instead of the real cause.
+            try {
+                Remove-Item -Recurse -Force $repoDir -ErrorAction Stop
+            }
+            catch {
+                throw "Could not remove the previous install at $repoDir - $($_.Exception.Message) This usually means a dustm session is still running (Windows locks its native modules) or antivirus is holding a file in node_modules. Close any running dustm sessions and re-run this installer."
+            }
         }
         # No overwrite:bool overload exists on Windows PowerShell 5.1's
         # System.IO.Compression.FileSystem (only .NET Core/5+ has it) -
         # $repoDir was just removed above, so there's nothing to overwrite.
-        [System.IO.Compression.ZipFile]::ExtractToDirectory($using:releaseZipPath, $repoDir)
+        # The try/catch matters: an exception from a .NET method call is only
+        # a statement-level error under the job's default "Continue", so
+        # without it a failed extraction keeps going and surfaces as the
+        # much vaguer "extraction reported success but package.json was not
+        # found" from the poll below.
+        try {
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($using:releaseZipPath, $repoDir)
+        }
+        catch {
+            throw "Extracting $($using:releaseZipPath) into $repoDir failed - $($_.Exception.Message)"
+        }
 
         # As with the nvm symlink above, a directory this job just created
         # doesn't always show up to Test-Path in the parent process the
@@ -649,7 +861,7 @@ try {
     } | Out-Null
     Write-Success "Ready at: $RepoDir"
 
-    Write-Header "Step 6/7 - Installing the CLI"
+    Write-StepHeader "Installing the CLI"
 
     Push-Location $RepoDir
     try {
@@ -699,7 +911,7 @@ try {
 
     Write-Success "Install complete."
 
-    Write-Header "Step 7/7 - Verifying the 'dustm' command"
+    Write-StepHeader "Verifying the 'dustm' command"
 
     $dustCommand = Get-Command dustm -ErrorAction SilentlyContinue
     if (-not $dustCommand) {
@@ -720,6 +932,103 @@ try {
     Write-Success "NVM, Node.js, and the Mantu fork of Dust CLI are ready."
 
     Write-DustCliCheatSheet
+    }
+
+    if ($InstallDesktop) {
+        # No Node.js/NVM needed: the Desktop app ships its own runtime.
+        $DesktopAsset    = "dustm-desktop-windows-x64.zip"
+        $DesktopDir      = Join-Path $env:LOCALAPPDATA "Programs\dustm Desktop"
+        $DesktopExe      = Join-Path $DesktopDir "dustm Desktop.exe"
+        # Desktop has its own releases (tags desktop-X.Y.Z, published by
+        # .github/workflows/release-desktop.yml) that are never "latest" - that
+        # stays the CLI's - so look for the newest desktop-* release instead.
+        $DesktopReleasesApi = "https://api.github.com/repos/jlrouzies-mantu/dust-cli/releases?per_page=50"
+        $DesktopCacheDir = Join-Path $InstallRoot "release-cache"
+
+        Write-StepHeader "Downloading dustm Desktop"
+
+        # Same rule as the CLI: never replace files of a running app.
+        Assert-DesktopNotRunning -InstallDir $DesktopDir
+
+        New-Item -ItemType Directory -Path $DesktopCacheDir -Force | Out-Null
+
+        $dVersion = $null
+        $dUrl = $null
+        $dDigest = $null
+        try {
+            $dReleases = Invoke-RestMethod -Uri $DesktopReleasesApi -Headers @{ "User-Agent" = "dust-cli-installer" }
+        }
+        catch {
+            throw "Could not reach the GitHub releases API to find the latest dustm Desktop release ($($_.Exception.Message)). Check your connection and re-run this installer."
+        }
+        $dInfo = $dReleases |
+            Where-Object { -not $_.draft -and $_.tag_name -like "desktop-*" -and ($_.assets | Where-Object { $_.name -eq $DesktopAsset }) } |
+            Sort-Object { [datetime]$_.published_at } -Descending |
+            Select-Object -First 1
+        if (-not $dInfo) {
+            throw "No dustm Desktop release with $DesktopAsset was found (no desktop-* release has been published yet)."
+        }
+        $dVersion = $dInfo.tag_name
+        $dAsset = $dInfo.assets | Where-Object { $_.name -eq $DesktopAsset } | Select-Object -First 1
+        $dUrl = $dAsset.browser_download_url
+        $dDigest = $dAsset.digest
+
+        if ($dVersion) {
+            Write-Success "Latest release: $dVersion"
+            $dZip = Join-Path $DesktopCacheDir "dustm-desktop-windows-x64-$dVersion.zip"
+        }
+        else {
+            $dZip = Join-Path $InstallRoot $DesktopAsset
+        }
+
+        $dNeedsDownload = $true
+        if ($dVersion -and (Test-Path $dZip)) {
+            if ((-not $dDigest) -or ((Get-FileHash -Path $dZip -Algorithm SHA256).Hash -eq ($dDigest -split ':')[-1])) {
+                $dNeedsDownload = $false
+                Write-Info "Using cached $DesktopAsset $dVersion - skipping download."
+            }
+            else {
+                Write-Info "Cached $DesktopAsset failed sha256 verification - re-downloading."
+                Remove-Item -Force $dZip -ErrorAction SilentlyContinue
+            }
+        }
+        if ($dNeedsDownload) {
+            $dTitle = if ($dVersion) { "Downloading $DesktopAsset $dVersion (latest release)" } else { "Downloading $DesktopAsset (latest release)" }
+            Invoke-CollapsedStep -Title $dTitle -ScriptBlock {
+                Invoke-WebRequest -Uri $using:dUrl -OutFile $using:dZip
+            } | Out-Null
+            if ($dDigest -and ((Get-FileHash -Path $dZip -Algorithm SHA256).Hash -ne ($dDigest -split ':')[-1])) {
+                Remove-Item -Force $dZip -ErrorAction SilentlyContinue
+                throw "Downloaded $DesktopAsset failed sha256 verification against GitHub's published digest. The file was removed - re-run the installer."
+            }
+            if ($dDigest) { Write-Success "sha256 verified." }
+        }
+        if ($dVersion) {
+            Get-ChildItem -Path $DesktopCacheDir -Filter "dustm-desktop-windows-x64-*.zip" -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -ne $dZip } | Remove-Item -Force -ErrorAction SilentlyContinue
+        }
+
+        Write-StepHeader "Installing dustm Desktop"
+
+        Invoke-CollapsedStep -Title "Extracting dustm Desktop to $DesktopDir" -ScriptBlock {
+            $dir = $using:DesktopDir
+            if (Test-Path $dir) {
+                try { Remove-Item -Recurse -Force $dir -ErrorAction Stop }
+                catch { throw "Could not remove the previous install at $dir - $($_.Exception.Message) Close dustm Desktop and re-run this installer." }
+            }
+            try { [System.IO.Compression.ZipFile]::ExtractToDirectory($using:dZip, $dir) }
+            catch { throw "Extracting $($using:dZip) into $dir failed - $($_.Exception.Message)" }
+            if (-not (Test-Path (Join-Path $dir "dustm Desktop.exe"))) {
+                throw "Extraction finished but 'dustm Desktop.exe' was not found in $dir."
+            }
+        } | Out-Null
+
+        New-DesktopShortcuts -ExePath $DesktopExe
+
+        Write-Header "dustm Desktop installed"
+        Write-Success "dustm Desktop is ready at $DesktopDir."
+        Write-Info "Launch it from the Start Menu or the Desktop shortcut. It shares sign-in and settings with the CLI (no CLI install needed)."
+    }
 }
 catch {
     Write-ErrorMsg $_.Exception.Message

@@ -163,7 +163,7 @@ export function Sidebar({
                 <SessionRow
                   key={x.key}
                   badge={x}
-                  agentName={agentName}
+                  agentName={x.agentName}
                   onOpen={() => void openSession(x.key)}
                 />
               ))}
@@ -194,7 +194,7 @@ export function Sidebar({
                     >
                       <div className="t">{active && session.conversationTitle ? session.conversationTitle : c.title}</div>
                       <div className="m">
-                        @{agentName}{" "}
+                        {c.agentName ? `@${c.agentName} ` : ""}
                         {isOpening ? (
                           <span className="working"><span className="spinner small" aria-hidden="true" /> opening…</span>
                         ) : live && live.status !== "idle" ? (
@@ -304,14 +304,14 @@ function SessionRow({
   onOpen,
 }: {
   badge: SessionBadge;
-  agentName: string;
+  agentName: string | null;
   onOpen: () => void;
 }) {
   return (
     <button type="button" className="convo" aria-current={badge.selected} onClick={onOpen}>
       <div className="t">{badge.title}</div>
       <div className="m">
-        @{agentName} <StatusBadge status={badge.status} />
+        {agentName ? `@${agentName} ` : ""}<StatusBadge status={badge.status} />
       </div>
     </button>
   );

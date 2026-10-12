@@ -415,6 +415,11 @@ last-synced commit (procedure step 3 above):
     re-registration mid-turn gives a new id, so that turn's later calls go unanswered
     (they time out server-side) rather than reach another session. The session remembers the
     id its turn was sent with (`turnFsServerId`) and posts an error note when it changes mid-turn.
+  - **Conversation agents.** Dust's conversation list carries no agent, so main remembers the
+    agent each conversation was last used with (`conversationAgents` in settings, capped at 500):
+    recorded on every successful send and from the newest agent reply when a history loads.
+    The sidebar shows it (or nothing when unknown - never the currently selected agent), and
+    opening a conversation without saved prefs selects that agent if it still exists.
   - **Stops name their session.** The renderer passes the `sessionKey` it was showing to
     `cancel(source, sid)`; main refuses when another session is on screen by then (a
     notification click or switch in flight), so a stop can never land on the wrong turn.

@@ -55,6 +55,8 @@ export interface ConversationSummary {
   title: string;
   /** Epoch ms of last activity. */
   updated: number;
+  /** The agent last used in it, when known (sent or seen in its history here). */
+  agentName: string | null;
 }
 
 export interface ModelRow {
@@ -118,9 +120,13 @@ export interface SessionBadge {
   title: string;
   status: SessionStatus;
   selected: boolean;
+  agentName: string | null;
 }
 
 export interface SessionState {
+  /** dustm Desktop app version (desktop/package.json, or the release tag). */
+  desktopVersion: string;
+  /** CLI core version the app was built from. */
   version: string;
   upstreamVersion: string;
   workspaceName: string | null;

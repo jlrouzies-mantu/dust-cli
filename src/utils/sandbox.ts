@@ -65,12 +65,16 @@ function isInside(child: string, parent: string): boolean {
 export function configureSandbox({
   allowPaths = [],
   disabled = false,
+  root,
 }: {
   allowPaths?: string[];
   disabled?: boolean;
+  // Defaults to process.cwd(), which is what the CLI wants. The desktop app
+  // picks a working folder instead of inheriting one.
+  root?: string;
 }): void {
   config = {
-    root: resolveSymlinks(process.cwd()),
+    root: resolveSymlinks(root ?? process.cwd()),
     allowedPaths: allowPaths.map((p) => resolveSymlinks(expandHome(p))),
     enabled: !disabled,
   };

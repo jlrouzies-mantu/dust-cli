@@ -29,6 +29,7 @@ export const PLAN_MODE_BLOCKED_TOOLS = [
   "write_file",
   "edit_file",
   "run_command",
+  "write_memory",
 ] as const;
 
 // Still available while planning: everything needed to research an answer.

@@ -8,11 +8,19 @@ import {
   planModeRefusal,
 } from "../../utils/planMode.js";
 import { resolveInSandbox } from "../../utils/sandbox.js";
+import type { ToolContext } from "../toolContext.js";
 import type { McpTool } from "../types/tools.js";
 import { ReadFileTool } from "./readFile.js";
 
 export class EditFileTool implements McpTool {
   name = "edit_file";
+  private toolContext?: ToolContext;
+
+  /** Desktop only: per-conversation state instead of the module singletons (see toolContext.ts). */
+  setContext(context: ToolContext) {
+    this.toolContext = context;
+  }
+
   private diffApprovalCallback?: (
     originalContent: string,
     updatedContent: string,
@@ -87,7 +95,7 @@ export class EditFileTool implements McpTool {
       // Checked first, before the file even has to exist - see writeFile.ts
       // for why a validation error would be the wrong thing to report while
       // planning.
-      if (isPlanModeActive()) {
+      if (this.toolContext ? this.toolContext.isPlanMode() : isPlanModeActive()) {
         return {
           content: [
             { type: "text" as const, text: planModeRefusal(this.name) },

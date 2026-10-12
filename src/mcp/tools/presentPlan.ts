@@ -3,6 +3,7 @@ import { z } from "zod";
 import { normalizeError } from "../../utils/errors.js";
 import type { PlanDecision } from "../../utils/planMode.js";
 import { isPlanModeActive, planDecisionResult } from "../../utils/planMode.js";
+import type { ToolContext } from "../toolContext.js";
 import type { McpTool } from "../types/tools.js";
 
 /**
@@ -16,6 +17,13 @@ import type { McpTool } from "../types/tools.js";
  */
 export class PresentPlanTool implements McpTool {
   name = "present_plan";
+  private toolContext?: ToolContext;
+
+  /** Desktop only: per-conversation state instead of the module singletons (see toolContext.ts). */
+  setContext(context: ToolContext) {
+    this.toolContext = context;
+  }
+
 
   private planApprovalCallback?: (plan: string) => Promise<PlanDecision>;
 
@@ -52,7 +60,7 @@ export class PresentPlanTool implements McpTool {
 
   async execute({ plan }: z.infer<typeof this.inputSchema>) {
     try {
-      if (!isPlanModeActive()) {
+      if (!(this.toolContext ? this.toolContext.isPlanMode() : isPlanModeActive())) {
         return {
           content: [
             {

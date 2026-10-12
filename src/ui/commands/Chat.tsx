@@ -1126,6 +1126,14 @@ const CliChat: FC<CliChatProps> = ({
         return true;
       }
 
+      // Auto mode approves everything, whatever its stake - including
+      // run_command, which upstream marks high stake so the server asks on
+      // every call. The user's choice: auto means no prompts at all. Plan mode
+      // is the separate, mutually exclusive state that keeps writes blocked.
+      if (isAutoAcceptMode(chatModeRef.current)) {
+        return true;
+      }
+
       // Auto-approve if stake is never_ask
       if (event.stake === "never_ask") {
         return true;

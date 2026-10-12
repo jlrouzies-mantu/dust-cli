@@ -6,6 +6,7 @@ import {
   getActiveConversationId,
   loadTasks,
 } from "../../utils/taskStore.js";
+import type { ToolContext } from "../toolContext.js";
 import type { McpTool } from "../types/tools.js";
 
 /**
@@ -19,6 +20,13 @@ import type { McpTool } from "../types/tools.js";
  */
 export class ReadTasksTool implements McpTool {
   name = "read_tasks";
+  private toolContext?: ToolContext;
+
+  /** Desktop only: per-conversation state instead of the module singletons (see toolContext.ts). */
+  setContext(context: ToolContext) {
+    this.toolContext = context;
+  }
+
 
   description =
     "Reads the current task checklist for this conversation, without rewriting it. Use this to check status, " +
@@ -29,7 +37,9 @@ export class ReadTasksTool implements McpTool {
 
   async execute() {
     try {
-      const conversationId = getActiveConversationId();
+      const conversationId = this.toolContext
+      ? this.toolContext.getConversationId()
+      : getActiveConversationId();
       if (!conversationId) {
         return {
           content: [

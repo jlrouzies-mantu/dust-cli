@@ -9,6 +9,7 @@ import {
   getActiveConversationId,
   saveTasks,
 } from "../../utils/taskStore.js";
+import type { ToolContext } from "../toolContext.js";
 import type { McpTool } from "../types/tools.js";
 
 // TodoItem is the established name this tool's consumers (Chat.tsx,
@@ -23,6 +24,13 @@ export const todoListEmitter = new EventEmitter();
 
 export class TodoWriteTool implements McpTool {
   name = "todo_write";
+  private toolContext?: ToolContext;
+
+  /** Desktop only: per-conversation state instead of the module singletons (see toolContext.ts). */
+  setContext(context: ToolContext) {
+    this.toolContext = context;
+  }
+
   description =
     "Creates or updates a persistent, visible task checklist for the current conversation (similar to Claude Code's " +
     "TodoWrite tool). Call this to plan multi-step work and to mark items in_progress/completed as you go, so the " +
@@ -81,7 +89,11 @@ export class TodoWriteTool implements McpTool {
       };
     }
 
-    todoListEmitter.emit("update", todos);
+    if (this.toolContext?.onTasksUpdated) {
+      this.toolContext.onTasksUpdated(todos);
+    } else {
+      todoListEmitter.emit("update", todos);
+    }
 
     // Awaited, unlike transcriptStore's fire-and-forget writes: those exist
     // purely as a crash-safety net where losing a line to a race is an
@@ -90,7 +102,9 @@ export class TodoWriteTool implements McpTool {
     // mean persisted by the time this call returns - not best-effort,
     // eventually. saveTasks already swallows its own errors internally, so
     // awaiting it can't turn a disk failure into a failed tool call.
-    const conversationId = getActiveConversationId();
+    const conversationId = this.toolContext
+      ? this.toolContext.getConversationId()
+      : getActiveConversationId();
     if (conversationId) {
       await saveTasks(conversationId, todos);
     }

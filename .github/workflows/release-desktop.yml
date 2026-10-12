@@ -1,0 +1,147 @@
+name: Release Desktop
+
+# Builds and publishes dustm Desktop (preview), independently of the CLI.
+#
+# Push a tag `desktop-X.Y.Z` (matching desktop/package.json's version, by
+# convention), or run it by hand from the Actions tab (Release Desktop ->
+# Run workflow), which builds the branch you pick and publishes it under the
+# tag you type in.
+#
+# Desktop releases are published with `--latest=false`: the CLI install
+# scripts download `releases/latest`, so a Desktop release must never become
+# "latest". The install scripts find Desktop by asking the API for the newest
+# release whose tag starts with `desktop-` instead.
+#
+# Builds are unsigned (SmartScreen / Gatekeeper may warn on first launch).
+# Asset names carry no version - keep them in step with
+# desktop/electron-builder.yml and the install scripts.
+
+on:
+  push:
+    tags:
+      - "desktop-*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Desktop release tag to create/update (e.g. desktop-0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - name: Resolve and validate the tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if ! printf '%s' "$TAG" | grep -Eq '^desktop-v?[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Tag must look like desktop-X.Y.Z (got '$TAG')."
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          V="${TAG#desktop-}"; echo "version=${V#v}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            builder: --win
+          - os: macos-14 # Apple Silicon (arm64)
+            builder: --mac --arm64
+          - os: macos-15-intel # Intel (x64)
+            builder: --mac --x64
+          - os: ubuntu-latest
+            builder: --linux --x64
+    runs-on: ${{ matrix.os }}
+    env:
+      # Unsigned builds: stop electron-builder hunting for a signing identity.
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.16.0"
+
+      # keytar links against libsecret on Linux.
+      - name: Install libsecret (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev
+
+      # The desktop main process imports the CLI's modules from ../src, so
+      # the root dependencies are needed too.
+      - name: Install dependencies (root)
+        run: npm ci
+
+      - name: Install dependencies (desktop)
+        working-directory: desktop
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: desktop
+        run: npm run typecheck
+
+      - name: Build
+        working-directory: desktop
+        run: npm run build
+
+      - name: Package
+        working-directory: desktop
+        run: npx electron-builder ${{ matrix.builder }} --publish never --config.extraMetadata.version=${{ needs.resolve.outputs.version }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dustm-desktop-${{ matrix.os }}
+          path: |
+            desktop/release/dustm-desktop-*.zip
+            desktop/release/dustm-desktop-*.exe
+            desktop/release/dustm-desktop-*.AppImage
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find artifacts \( -name '*.zip' -o -name '*.exe' -o -name '*.AppImage' \) -exec cp {} release/ \;
+          ls -la release
+
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          if ! gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            # --target pins the tag to the commit this run built (matters for
+            # a manual run, where the tag does not exist yet). --latest=false
+            # keeps the CLI's release as "latest" for the CLI install scripts.
+            gh release create "$TAG" --repo "${{ github.repository }}" \
+              --title "dustm Desktop ${TAG#desktop-}" \
+              --target "${{ github.sha }}" \
+              --latest=false --prerelease \
+              --notes "dustm Desktop (preview) ${TAG#desktop-}. Unsigned builds: Windows SmartScreen / macOS Gatekeeper may warn on first launch. Install with the dustm install script (choose Desktop)."
+          fi
+          gh release upload "$TAG" release/* --repo "${{ github.repository }}" --clobber

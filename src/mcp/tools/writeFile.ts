@@ -9,10 +9,18 @@ import {
   planModeRefusal,
 } from "../../utils/planMode.js";
 import { resolveInSandbox } from "../../utils/sandbox.js";
+import type { ToolContext } from "../toolContext.js";
 import type { McpTool } from "../types/tools.js";
 
 export class WriteFileTool implements McpTool {
   name = "write_file";
+  private toolContext?: ToolContext;
+
+  /** Desktop only: per-conversation state instead of the module singletons (see toolContext.ts). */
+  setContext(context: ToolContext) {
+    this.toolContext = context;
+  }
+
   private diffApprovalCallback?: (
     originalContent: string,
     updatedContent: string,
@@ -66,7 +74,7 @@ export class WriteFileTool implements McpTool {
       // planning, the answer is the same regardless of whether the arguments
       // were well-formed, and a validation error would misleadingly suggest
       // that fixing the path would let the write through.
-      if (isPlanModeActive()) {
+      if (this.toolContext ? this.toolContext.isPlanMode() : isPlanModeActive()) {
         return {
           content: [
             { type: "text" as const, text: planModeRefusal(this.name) },

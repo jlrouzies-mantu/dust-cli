@@ -640,7 +640,7 @@ export function listSessionKeys(): string[] {
 }
 
 function buildState(s: Session): SessionState {
-  return {
+  const state: SessionState = {
     desktopVersion: app.getVersion(),
     version: CLI_VERSION,
     upstreamVersion: UPSTREAM_CLI_VERSION,
@@ -692,7 +692,57 @@ function buildState(s: Session): SessionState {
     layout: panelLayout,
     notify: notifyCfg,
   };
+  return demoMask ? maskForDemo(state) : state;
 }
+
+// --smoke-demo screenshots go into the public README: replace everything
+// personal (name, folder, branch, conversation titles, workspace agents) with
+// sample values. Main-process only, set once by the smoke harness.
+let demoMask = false;
+
+export function setDemoMask(on: boolean): void {
+  demoMask = on;
+  emitState();
+  emit({ type: "conversations-changed" });
+}
+
+function maskForDemo(state: SessionState): SessionState {
+  const dust = state.agents.find((a) => a.name === "dust");
+  return {
+    ...state,
+    userName: "Ada Lovelace",
+    folder: "C:\\Users\\ada\\source\\repos\\dust-cli",
+    branch: "main",
+    agents: dust ? [dust] : [],
+    agentId: dust?.sId ?? null,
+    modelOverride: { modelId: "claude-opus-5-5", label: "Claude Opus 5.5" },
+    effort: "high",
+    sessions: [],
+  };
+}
+
+function demoConversations(): Result<ConversationSummary[]> {
+  const now = Date.now();
+  return {
+    ok: true,
+    value: DEMO_CONVERSATIONS.map(([title, hoursAgo], i) => ({
+      sId: `demo-c${i}`,
+      title,
+      updated: now - hoursAgo * 3_600_000,
+      agentName: "dust",
+    })),
+  };
+}
+
+const DEMO_CONVERSATIONS: [string, number][] = [
+  ["Fix /model ignoring Opus 5.5", 0.2],
+  ["Add plan mode to the desktop app", 3],
+  ["Why is the Windows paste slow?", 26],
+  ["Review the release workflow", 30],
+  ["Explain the sandbox rules", 50],
+  ["Port the upstream sync", 75],
+  ["Write tests for loopController", 100],
+];
 
 /** Pushes the selected session's state to the window. */
 function emitState(): void {
@@ -2133,6 +2183,9 @@ export async function cancel(source = "internal", sid: string | null = null): Pr
 // ------------------------------------------------------------------ conversations
 
 export async function listConversations(): Promise<Result<ConversationSummary[]>> {
+  if (demoMask) {
+    return demoConversations();
+  }
   const clientRes = await getDustClient();
   if (clientRes.isErr() || !clientRes.value) {
     return { ok: false, error: "Not signed in." };
@@ -2142,6 +2195,9 @@ export async function listConversations(): Promise<Result<ConversationSummary[]>
     return { ok: false, error: `Failed to fetch conversations: ${res.error.message}` };
   }
   const known = await loadConversationAgents();
+  if (demoMask) {
+    return demoConversations(); // the mask went on while the real list was loading
+  }
   const list = res.value
     .filter((c) => c.visibility !== "deleted")
     .map((c) => ({

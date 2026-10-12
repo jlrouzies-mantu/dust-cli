@@ -520,12 +520,16 @@ last-synced commit (procedure step 3 above):
     `PLAN_MODE_BLOCKED_TOOLS` so it stays truthful.
   - Node 24.16.0 lockstep: `desktop/.nvmrc` and `desktop/package.json` `engines` belong
     to the "Keeping the Node.js version in lockstep" list below.
-  - Release wiring: `release.yml`'s `desktop` job (windows, macos-14 arm64, macos-15-intel x64,
-    ubuntu x64) builds unsigned artifacts with version-less names via
-    `desktop/electron-builder.yml` (`dustm-desktop-windows-x64.zip`, `-windows-x64-setup.exe`,
-    `-macos-{arm64,x64}.zip`, `-linux-x64.AppImage`) and the `release` job uploads them next to
-    the CLI zips. The install scripts ask CLI / Desktop / both and fetch
-    `releases/latest/download/<name>`; keep names, workflow and scripts in step. Linux needs
+  - Release wiring: Desktop is released **separately from the CLI** by
+    `.github/workflows/release-desktop.yml`, on a tag `desktop-X.Y.Z` (matching
+    `desktop/package.json`'s version; the user picks it, like the CLI's) or a manual run. It builds
+    unsigned artifacts on windows, macos-14 (arm64), macos-15-intel (x64) and ubuntu (x64) with
+    version-less names from `desktop/electron-builder.yml` (`dustm-desktop-windows-x64.zip`,
+    `-windows-x64-setup.exe`, `-macos-{arm64,x64}.zip`, `-linux-x64.AppImage`). The release is
+    created with `--latest=false --prerelease`: **a Desktop release must never become "latest"**,
+    because the CLI install path downloads `releases/latest`. The install scripts ask CLI / Desktop
+    / both and find Desktop as the newest `desktop-*` release carrying the asset (releases API);
+    keep names, workflow and scripts in step. `release.yml` builds the CLI only. Linux needs
     libsecret at runtime (keytar).
 - `src/types/marked-terminal.d.ts` - type shim
 - Everything under `.github/`, `scripts/`, `img/`, plus `AGENTS.md` and

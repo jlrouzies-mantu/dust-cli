@@ -23,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Desktop release tag to create/update (e.g. desktop-0.1.0)"
+        description: "Desktop version to release, e.g. 0.1.0 (published as tag desktop-0.1.0)"
         required: true
         type: string
 
@@ -43,7 +43,9 @@ jobs:
           INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="$INPUT_TAG"
+            # A bare version (0.1.0 or v0.1.0) gets the desktop- prefix.
+            TAG="$(printf %s "$INPUT_TAG" | tr -d "[:space:]")"
+            case "$TAG" in desktop-*) ;; *) TAG="desktop-${TAG#v}" ;; esac
           else
             TAG="${GITHUB_REF_NAME}"
           fi

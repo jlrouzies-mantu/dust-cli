@@ -1,6 +1,6 @@
 {
   "name": "dustm-desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "dustm Desktop (preview): an Electron front end over the dustm CLI core.",
   "author": "Mantu",
